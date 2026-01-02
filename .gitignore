@@ -57,3 +57,8 @@ Thumbs.db
 *.wav
 *.xml
 *.XML
+
+# Model weights
+*.pt
+*.onnx
+*.safetensors
