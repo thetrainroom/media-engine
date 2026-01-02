@@ -81,6 +81,27 @@ class GPS(BaseModel):
     altitude: float | None = None
 
 
+class ColorSpace(BaseModel):
+    """Color space information for LOG/HDR footage."""
+
+    transfer: str | None = None  # Gamma/transfer function (e.g., "slog3", "bt709", "hlg")
+    primaries: str | None = None  # Color primaries (e.g., "sgamut3", "bt709", "bt2020")
+    matrix: str | None = None  # Color matrix (e.g., "bt709", "bt2020nc")
+    lut_file: str | None = None  # Reference to LUT file for conversion
+    detection_method: DetectionMethod = DetectionMethod.METADATA
+
+
+class LensInfo(BaseModel):
+    """Lens and camera settings."""
+
+    focal_length: float | None = None  # Focal length in mm
+    focal_length_35mm: float | None = None  # 35mm equivalent focal length
+    aperture: float | None = None  # f-number (e.g., 2.8)
+    focus_distance: float | None = None  # Focus distance in meters
+    iris: str | None = None  # Iris setting as string (e.g., "F2.8")
+    detection_method: DetectionMethod = DetectionMethod.METADATA
+
+
 class DeviceInfo(BaseModel):
     """Source device information."""
 
@@ -112,6 +133,8 @@ class Metadata(BaseModel):
     created_at: datetime | None = None
     device: DeviceInfo | None = None
     gps: GPS | None = None
+    color_space: ColorSpace | None = None
+    lens: LensInfo | None = None
     shot_type: ShotType | None = None
 
 

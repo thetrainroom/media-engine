@@ -9,7 +9,9 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, TypeAlias
 
-from PIL import Image
+import cv2  # type: ignore[import-not-found]
+import numpy as np
+from numpy.typing import NDArray
 
 from polybos_engine.config import has_cuda, is_apple_silicon
 from polybos_engine.schemas import ClipResult, ClipSegment, ScenesResult
@@ -17,6 +19,14 @@ from polybos_engine.schemas import ClipResult, ClipSegment, ScenesResult
 Embedding: TypeAlias = list[float]
 
 logger = logging.getLogger(__name__)
+
+
+def _load_image_rgb(image_path: str) -> NDArray[np.uint8]:
+    """Load image using OpenCV and convert to RGB."""
+    img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Failed to load image: {image_path}")
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
 class CLIPBackend(ABC):
@@ -57,8 +67,11 @@ class OpenCLIPBackend(CLIPBackend):
 
     def encode_image(self, image_path: str) -> Embedding:
         import torch
+        from PIL import Image
 
-        image = Image.open(image_path).convert("RGB")
+        # Load with OpenCV and convert to PIL for preprocessing
+        rgb_array = _load_image_rgb(image_path)
+        image = Image.fromarray(rgb_array)
         image_tensor = self.preprocess(image).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
@@ -98,9 +111,13 @@ class MLXCLIPBackend(CLIPBackend):
                 logger.info(f"Loaded transformers CLIP model: {self._model_name}")
 
     def encode_image(self, image_path: str) -> Embedding:
+        from PIL import Image
+
         self._load_model()
 
-        image = Image.open(image_path).convert("RGB")
+        # Load with OpenCV and convert to PIL for preprocessing
+        rgb_array = _load_image_rgb(image_path)
+        image = Image.fromarray(rgb_array)
 
         if self._processor is not None:
             # Using transformers

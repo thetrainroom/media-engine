@@ -14,8 +14,10 @@ from typing import Any
 from polybos_engine.schemas import (
     GPS,
     Codec,
+    ColorSpace,
     DetectionMethod,
     DeviceInfo,
+    LensInfo,
     MediaDeviceType,
     Metadata,
     Resolution,
@@ -37,6 +39,8 @@ class SidecarMetadata:
 
     device: DeviceInfo | None = None
     gps: GPS | None = None
+    color_space: ColorSpace | None = None
+    lens: LensInfo | None = None
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +110,12 @@ def extract_metadata(file_path: str) -> Metadata:
     # Extract GPS
     gps = _extract_gps(tags)
 
+    # Extract color space from ffprobe
+    color_space = _extract_color_space(video_stream)
+
+    # Lens info (only available from sidecar)
+    lens: LensInfo | None = None
+
     # Try Sony XML sidecar for additional metadata (preferred over generic detection)
     sidecar_info = _parse_sony_xml_sidecar(file_path)
     if sidecar_info:
@@ -114,6 +124,11 @@ def extract_metadata(file_path: str) -> Metadata:
             device = sidecar_info.device
         if sidecar_info.gps:
             gps = sidecar_info.gps
+        # Prefer XML sidecar color space (has LOG profile info)
+        if sidecar_info.color_space:
+            color_space = sidecar_info.color_space
+        if sidecar_info.lens:
+            lens = sidecar_info.lens
 
     return Metadata(
         duration=duration,
@@ -125,6 +140,8 @@ def extract_metadata(file_path: str) -> Metadata:
         created_at=created_at,
         device=device,
         gps=gps,
+        color_space=color_space,
+        lens=lens,
     )
 
 
@@ -320,6 +337,27 @@ def _parse_iso6709(location: str) -> GPSCoordinates | None:
     return None
 
 
+def _extract_color_space(video_stream: dict[str, Any] | None) -> ColorSpace | None:
+    """Extract color space information from video stream."""
+    if not video_stream:
+        return None
+
+    transfer = video_stream.get("color_transfer")
+    primaries = video_stream.get("color_primaries")
+    matrix = video_stream.get("color_space")
+
+    # Only return if we have some color info
+    if not (transfer or primaries or matrix):
+        return None
+
+    return ColorSpace(
+        transfer=transfer,
+        primaries=primaries,
+        matrix=matrix,
+        detection_method=DetectionMethod.METADATA,
+    )
+
+
 def _parse_sony_xml_sidecar(video_path: str) -> SidecarMetadata | None:
     """Parse Sony XML sidecar file for additional metadata.
 
@@ -354,6 +392,8 @@ def _parse_sony_xml_sidecar(video_path: str) -> SidecarMetadata | None:
 
         device: DeviceInfo | None = None
         gps: GPS | None = None
+        color_space: ColorSpace | None = None
+        lens: LensInfo | None = None
 
         # Extract device info
         device_elem = root.find(".//nrt:Device", ns) or root.find(".//{*}Device")
@@ -400,8 +440,92 @@ def _parse_sony_xml_sidecar(video_path: str) -> SidecarMetadata | None:
                     except ValueError:
                         pass
 
-        if device or gps:
-            return SidecarMetadata(device=device, gps=gps)
+        # Extract color space from VideoLayout or CameraUnitMetadata groups
+        # Look for CaptureGammaEquation (s-log3), CaptureColorPrimaries (s-gamut3)
+        color_items: dict[str, str | None] = {}
+        for group_name in ["CameraUnitMetadata", "VideoLayout", "AcquisitionRecord"]:
+            group = root.find(f".//*[@name='{group_name}']")
+            if group is not None:
+                for item in group.findall(".//{*}Item"):
+                    name = item.get("name")
+                    if name:
+                        color_items[name] = item.get("value")
+
+        # Also check top-level items
+        for item in root.findall(".//{*}Item"):
+            name = item.get("name")
+            if name and name in [
+                "CaptureGammaEquation",
+                "CaptureColorPrimaries",
+                "CodingEquations",
+            ]:
+                color_items[name] = item.get("value")
+
+        # Look for LUT file reference
+        lut_file: str | None = None
+        for related in root.findall(".//{*}RelatedTo"):
+            if related.get("rel") == "LUT":
+                lut_file = related.get("file")
+                break
+
+        gamma = color_items.get("CaptureGammaEquation")
+        primaries = color_items.get("CaptureColorPrimaries")
+        coding = color_items.get("CodingEquations")
+
+        if gamma or primaries or coding or lut_file:
+            color_space = ColorSpace(
+                transfer=gamma,
+                primaries=primaries,
+                matrix=coding,
+                lut_file=lut_file,
+                detection_method=DetectionMethod.XML_SIDECAR,
+            )
+
+        # Extract lens info from Camera or Lens groups
+        lens_items: dict[str, str | None] = {}
+        for group_name in ["Camera", "Lens", "CameraUnitMetadata"]:
+            group = root.find(f".//*[@name='{group_name}']")
+            if group is not None:
+                for item in group.findall(".//{*}Item"):
+                    name = item.get("name")
+                    if name:
+                        lens_items[name] = item.get("value")
+
+        # Also check top-level items for lens data
+        for item in root.findall(".//{*}Item"):
+            name = item.get("name")
+            if name and name in [
+                "FocalLength",
+                "FocalLength35mm",
+                "FocalLengthIn35mmFilm",
+                "FNumber",
+                "Iris",
+                "FocusDistance",
+            ]:
+                lens_items[name] = item.get("value")
+
+        focal_length = lens_items.get("FocalLength")
+        focal_35mm = lens_items.get("FocalLength35mm") or lens_items.get(
+            "FocalLengthIn35mmFilm"
+        )
+        f_number = lens_items.get("FNumber")
+        iris = lens_items.get("Iris")
+        focus_dist = lens_items.get("FocusDistance")
+
+        if focal_length or focal_35mm or f_number or iris:
+            lens = LensInfo(
+                focal_length=float(focal_length) if focal_length else None,
+                focal_length_35mm=float(focal_35mm) if focal_35mm else None,
+                aperture=float(f_number) if f_number else None,
+                focus_distance=float(focus_dist) if focus_dist else None,
+                iris=iris,
+                detection_method=DetectionMethod.XML_SIDECAR,
+            )
+
+        if device or gps or color_space or lens:
+            return SidecarMetadata(
+                device=device, gps=gps, color_space=color_space, lens=lens
+            )
         return None
 
     except ET.ParseError as e:
