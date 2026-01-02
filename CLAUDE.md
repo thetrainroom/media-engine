@@ -133,8 +133,11 @@ else:
 | `POLYBOS_LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | No (default: INFO) |
 | `POLYBOS_WHISPER_MODEL` | Default Whisper model | No (default: large-v3) |
 | `POLYBOS_DIARIZATION_MODEL` | Pyannote model for diarization | No (default: pyannote/speaker-diarization-3.1) |
+| `POLYBOS_OCR_LANGUAGES` | Comma-separated OCR languages | No (default: en,no,de,fr,es,it,pt,nl,sv,da,fi,pl) |
 
-**Note**: Pyannote models are gated. Accept the license at https://huggingface.co/pyannote/speaker-diarization-3.1 before using.
+**Notes**:
+- Pyannote models are gated. Accept the license at https://huggingface.co/pyannote/speaker-diarization-3.1 before using.
+- OCR uses EasyOCR. For CJK languages, set e.g. `POLYBOS_OCR_LANGUAGES=en,ch_sim,ja,ko`. See https://www.jaided.ai/easyocr/ for full list.
 
 ## Key Implementation Details
 

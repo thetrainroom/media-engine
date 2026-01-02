@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     object_sample_fps: float = 2.0
     min_face_size: int = 80
 
+    # OCR settings - default to Latin script languages
+    # See https://www.jaided.ai/easyocr/ for full list
+    ocr_languages: str = "en,no,de,fr,es,it,pt,nl,sv,da,fi,pl"
+
     # Temp directory for processing
     temp_dir: str = "/tmp/polybos"
 

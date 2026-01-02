@@ -8,17 +8,23 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from polybos_engine.config import get_settings
 from polybos_engine.schemas import BoundingBox, OcrDetection, OcrResult, ScenesResult
 
 logger = logging.getLogger(__name__)
 
 # Singleton reader instance (lazy loaded)
 _ocr_reader: Any = None
+_ocr_languages: list[str] | None = None
 
 
 def _get_ocr_reader(languages: list[str] | None = None) -> Any:
-    """Get or create the EasyOCR reader (singleton)."""
-    global _ocr_reader
+    """Get or create the EasyOCR reader (singleton).
+
+    Note: Once initialized, the reader keeps its languages.
+    To change languages, restart the server.
+    """
+    global _ocr_reader, _ocr_languages
 
     if _ocr_reader is not None:
         return _ocr_reader
@@ -26,8 +32,11 @@ def _get_ocr_reader(languages: list[str] | None = None) -> Any:
     import easyocr  # type: ignore[import-not-found]
 
     if languages is None:
-        languages = ["en", "no"]  # English + Norwegian
+        # Get from settings
+        settings = get_settings()
+        languages = [lang.strip() for lang in settings.ocr_languages.split(",")]
 
+    _ocr_languages = languages
     logger.info(f"Initializing EasyOCR with languages: {languages}")
     _ocr_reader = easyocr.Reader(languages, gpu=False)  # CPU for stability
 
