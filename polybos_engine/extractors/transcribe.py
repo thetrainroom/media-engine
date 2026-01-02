@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from polybos_engine.config import has_cuda, is_apple_silicon
+from polybos_engine.config import get_settings, has_cuda, is_apple_silicon
 from polybos_engine.schemas import Transcript, TranscriptHints, TranscriptSegment
 
 
@@ -29,6 +29,23 @@ class TranscriptionResult:
     language: str
     language_probability: float
     segments: list[TranscriptionSegment] = field(default_factory=list)
+
+
+@dataclass
+class SpeakerSegment:
+    """A speaker segment from diarization."""
+
+    start: float
+    end: float
+    speaker: str
+
+
+@dataclass
+class DiarizationResult:
+    """Result from speaker diarization."""
+
+    segments: list[SpeakerSegment] = field(default_factory=list)
+    speaker_count: int = 0
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +246,125 @@ def get_transcription_backend() -> TranscriptionBackend:
         )
 
 
+# Singleton diarization pipeline
+_diarization_pipeline: Any = None
+
+
+def get_diarization_pipeline() -> Any:
+    """Get the pyannote diarization pipeline (lazy loaded)."""
+    global _diarization_pipeline
+
+    if _diarization_pipeline is not None:
+        return _diarization_pipeline
+
+    settings = get_settings()
+    if not settings.hf_token:
+        return None
+
+    try:
+        from pyannote.audio import Pipeline  # type: ignore[import-not-found]
+
+        logger.info(f"Loading diarization model: {settings.diarization_model}")
+        _diarization_pipeline = Pipeline.from_pretrained(
+            settings.diarization_model,
+            use_auth_token=settings.hf_token,
+        )
+
+        # Move to appropriate device
+        if has_cuda():
+            import torch
+
+            _diarization_pipeline.to(torch.device("cuda"))
+            logger.info("Diarization pipeline moved to CUDA")
+
+        logger.info("Diarization pipeline loaded successfully")
+        return _diarization_pipeline
+
+    except ImportError:
+        logger.warning("pyannote-audio not installed, diarization disabled")
+        return None
+    except Exception as e:
+        logger.warning(f"Failed to load diarization pipeline: {e}")
+        return None
+
+
+def run_diarization(audio_path: str) -> DiarizationResult | None:
+    """Run speaker diarization on audio file.
+
+    Args:
+        audio_path: Path to audio file (WAV format)
+
+    Returns:
+        DiarizationResult with speaker segments, or None if diarization unavailable
+    """
+    pipeline = get_diarization_pipeline()
+    if pipeline is None:
+        return None
+
+    try:
+        logger.info("Running speaker diarization...")
+        diarization = pipeline(audio_path)
+
+        segments: list[SpeakerSegment] = []
+        speakers: set[str] = set()
+
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            segments.append(
+                SpeakerSegment(
+                    start=turn.start,
+                    end=turn.end,
+                    speaker=speaker,
+                )
+            )
+            speakers.add(speaker)
+
+        logger.info(f"Diarization complete: {len(speakers)} speakers, {len(segments)} segments")
+
+        return DiarizationResult(
+            segments=segments,
+            speaker_count=len(speakers),
+        )
+
+    except Exception as e:
+        logger.warning(f"Diarization failed: {e}")
+        return None
+
+
+def assign_speakers_to_segments(
+    transcript_segments: list[TranscriptionSegment],
+    diarization: DiarizationResult,
+) -> list[tuple[TranscriptionSegment, str | None]]:
+    """Assign speaker labels to transcript segments based on overlap.
+
+    Args:
+        transcript_segments: List of transcript segments with timestamps
+        diarization: Diarization result with speaker segments
+
+    Returns:
+        List of (segment, speaker) tuples
+    """
+    result: list[tuple[TranscriptionSegment, str | None]] = []
+
+    for seg in transcript_segments:
+        # Find the speaker segment with maximum overlap
+        best_speaker: str | None = None
+        best_overlap = 0.0
+
+        for spk_seg in diarization.segments:
+            # Calculate overlap
+            overlap_start = max(seg.start, spk_seg.start)
+            overlap_end = min(seg.end, spk_seg.end)
+            overlap = max(0.0, overlap_end - overlap_start)
+
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = spk_seg.speaker
+
+        result.append((seg, best_speaker))
+
+    return result
+
+
 def extract_audio(video_path: str, output_path: str | None = None) -> str:
     """Extract audio from video file as 16kHz mono WAV.
 
@@ -335,15 +471,32 @@ def extract_transcript(
             initial_prompt=context_hint,
         )
 
-        segments = [
-            TranscriptSegment(start=s.start, end=s.end, text=s.text)
-            for s in result.segments
-        ]
+        # Run diarization if available
+        diarization = run_diarization(audio_path)
+        speaker_count: int | None = None
+
+        if diarization is not None:
+            # Assign speakers to segments
+            segments_with_speakers = assign_speakers_to_segments(
+                result.segments, diarization
+            )
+            segments = [
+                TranscriptSegment(start=s.start, end=s.end, text=s.text, speaker=speaker)
+                for s, speaker in segments_with_speakers
+            ]
+            speaker_count = diarization.speaker_count
+            logger.info(f"Diarization complete: {speaker_count} speakers detected")
+        else:
+            segments = [
+                TranscriptSegment(start=s.start, end=s.end, text=s.text)
+                for s in result.segments
+            ]
 
         return Transcript(
             language=result.language,
             confidence=result.language_probability,
             duration=audio_duration,
+            speaker_count=speaker_count,
             hints_used=TranscriptHints(
                 language_hints=language_hints or [],
                 context_hint=context_hint,

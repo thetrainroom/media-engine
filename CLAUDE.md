@@ -13,6 +13,7 @@ Polybos Media Engine is an open-source (MIT), AI-powered video extraction API de
 - **Python 3.12+** (uses modern typing features including `StrEnum`, `type` aliases, union syntax `X | None`)
 - ffmpeg/ffprobe for video processing
 - Platform-specific ML backends (MLX for Apple Silicon, CUDA for NVIDIA, CPU fallback)
+- Optional: pyannote-audio for speaker diarization (requires HuggingFace token)
 
 ## Development Commands
 
@@ -116,7 +117,7 @@ else:
 | Extractor | Skip Flag | Output |
 |-----------|-----------|--------|
 | metadata | (always runs) | duration, resolution, codec, fps, device, GPS |
-| transcript | skip_transcript | segments with timestamps, language detection |
+| transcript | skip_transcript | segments with timestamps, language detection, speaker diarization |
 | scenes | skip_scenes | scene boundaries with start/end times |
 | faces | skip_faces | bounding boxes, embeddings, unique count estimate |
 | objects | skip_objects | labels, bounding boxes, summary counts |
@@ -124,9 +125,21 @@ else:
 | ocr | skip_ocr | detected text with bounding boxes |
 | shot_type | (uses skip_clip) | aerial, interview, b-roll, studio, etc. |
 
+## Environment Variables
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `POLYBOS_HF_TOKEN` | HuggingFace token for pyannote speaker diarization | No (diarization skipped if not set) |
+| `POLYBOS_LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | No (default: INFO) |
+| `POLYBOS_WHISPER_MODEL` | Default Whisper model | No (default: large-v3) |
+| `POLYBOS_DIARIZATION_MODEL` | Pyannote model for diarization | No (default: pyannote/speaker-diarization-3.1) |
+
+**Note**: Pyannote models are gated. Accept the license at https://huggingface.co/pyannote/speaker-diarization-3.1 before using.
+
 ## Key Implementation Details
 
 - **Whisper backends**: mlx-whisper (Mac), faster-whisper (CUDA), openai-whisper (CPU)
+- **Speaker diarization**: pyannote-audio assigns speaker IDs to transcript segments (requires HF token)
 - **Language fallback**: If detection confidence <0.7 on clips <15s, uses fallback_language
 - **Face filtering**: Skips faces <80px or low confidence; clusters embeddings to estimate unique count
 - **Device detection**: Checks metadata tags and XML sidecars for device info (DJI drones, Sony cameras, etc.)

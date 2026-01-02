@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     whisper_model: str = "large-v3"
     fallback_language: str = "en"
 
+    # Speaker diarization settings
+    hf_token: str | None = None  # HuggingFace token for pyannote models
+    diarization_model: str = "pyannote/speaker-diarization-3.1"
+
     # Processing settings
     face_sample_fps: float = 1.0
     object_sample_fps: float = 2.0

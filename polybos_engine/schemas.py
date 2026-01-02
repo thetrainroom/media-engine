@@ -121,6 +121,7 @@ class TranscriptSegment(BaseModel):
     start: float
     end: float
     text: str
+    speaker: str | None = None  # Speaker ID from diarization (e.g., "SPEAKER_00")
 
 
 class TranscriptHints(BaseModel):
@@ -137,6 +138,7 @@ class Transcript(BaseModel):
     language: str
     confidence: float
     duration: float
+    speaker_count: int | None = None  # Number of speakers detected (None if diarization disabled)
     hints_used: TranscriptHints
     segments: list[TranscriptSegment]
 
