@@ -4,15 +4,34 @@ import logging
 import os
 import subprocess
 import tempfile
+from enum import StrEnum
 from pathlib import Path
+from typing import Final
 
 from polybos_engine.config import has_cuda, is_apple_silicon
 from polybos_engine.schemas import ShotType
 
 logger = logging.getLogger(__name__)
 
+
+class ShotTypeLabel(StrEnum):
+    """Shot type classification labels."""
+
+    AERIAL = "aerial"
+    INTERVIEW = "interview"
+    B_ROLL = "b-roll"
+    STUDIO = "studio"
+    HANDHELD = "handheld"
+    STATIC = "static"
+    PHONE = "phone"
+    DASHCAM = "dashcam"
+    SECURITY = "security"
+    BROADCAST = "broadcast"
+    UNKNOWN = "unknown"
+
+
 # Shot type labels for CLIP classification
-SHOT_TYPE_LABELS = [
+SHOT_TYPE_LABELS: Final[list[str]] = [
     "aerial drone footage from above",
     "interview with person talking to camera",
     "b-roll footage of scenery or environment",
@@ -26,17 +45,17 @@ SHOT_TYPE_LABELS = [
 ]
 
 # Map CLIP labels to simplified shot types
-LABEL_TO_TYPE = {
-    "aerial drone footage from above": "aerial",
-    "interview with person talking to camera": "interview",
-    "b-roll footage of scenery or environment": "b-roll",
-    "studio footage with controlled lighting": "studio",
-    "handheld camera footage": "handheld",
-    "tripod static shot": "static",
-    "phone footage vertical video": "phone",
-    "dashcam footage from car": "dashcam",
-    "security camera footage": "security",
-    "news broadcast footage": "broadcast",
+LABEL_TO_TYPE: Final[dict[str, ShotTypeLabel]] = {
+    "aerial drone footage from above": ShotTypeLabel.AERIAL,
+    "interview with person talking to camera": ShotTypeLabel.INTERVIEW,
+    "b-roll footage of scenery or environment": ShotTypeLabel.B_ROLL,
+    "studio footage with controlled lighting": ShotTypeLabel.STUDIO,
+    "handheld camera footage": ShotTypeLabel.HANDHELD,
+    "tripod static shot": ShotTypeLabel.STATIC,
+    "phone footage vertical video": ShotTypeLabel.PHONE,
+    "dashcam footage from car": ShotTypeLabel.DASHCAM,
+    "security camera footage": ShotTypeLabel.SECURITY,
+    "news broadcast footage": ShotTypeLabel.BROADCAST,
 }
 
 
@@ -64,7 +83,7 @@ def detect_shot_type(file_path: str, sample_count: int = 5) -> ShotType | None:
         temp_dir = tempfile.mkdtemp(prefix="polybos_shot_")
 
         try:
-            frames = []
+            frames: list[str] = []
             for i in range(sample_count):
                 timestamp = (i + 0.5) * duration / sample_count
                 frame_path = _extract_frame_at(file_path, temp_dir, timestamp)
@@ -81,11 +100,11 @@ def detect_shot_type(file_path: str, sample_count: int = 5) -> ShotType | None:
                 return None
 
             # Get most common classification
-            best_label = max(votes, key=votes.get)
+            best_label = max(votes, key=lambda k: votes.get(k, 0))
             confidence = votes[best_label] / len(frames)
 
             return ShotType(
-                primary=LABEL_TO_TYPE.get(best_label, "unknown"),
+                primary=LABEL_TO_TYPE.get(best_label, ShotTypeLabel.UNKNOWN),
                 confidence=round(confidence, 3),
                 detection_method="clip",
             )
@@ -103,7 +122,7 @@ def detect_shot_type(file_path: str, sample_count: int = 5) -> ShotType | None:
 
 def _classify_frames(frame_paths: list[str]) -> dict[str, int]:
     """Classify frames using CLIP and return vote counts."""
-    votes = {}
+    votes: dict[str, int] = {}
 
     if is_apple_silicon():
         votes = _classify_with_mlx(frame_paths)
@@ -115,11 +134,11 @@ def _classify_frames(frame_paths: list[str]) -> dict[str, int]:
 
 def _classify_with_openclip(frame_paths: list[str]) -> dict[str, int]:
     """Classify frames using OpenCLIP."""
-    import open_clip
+    import open_clip  # type: ignore[import-not-found]
     import torch
     from PIL import Image
 
-    device = "cuda" if has_cuda() else "cpu"
+    device: str = "cuda" if has_cuda() else "cpu"
 
     model, _, preprocess = open_clip.create_model_and_transforms("ViT-B-32", pretrained="openai")
     model = model.to(device)
@@ -132,7 +151,7 @@ def _classify_with_openclip(frame_paths: list[str]) -> dict[str, int]:
         text_features = model.encode_text(text_tokens)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
-    votes = {}
+    votes: dict[str, int] = {}
 
     for frame_path in frame_paths:
         try:

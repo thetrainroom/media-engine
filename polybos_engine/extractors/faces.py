@@ -6,11 +6,14 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import TypeAlias
 
 import numpy as np
+from numpy.typing import NDArray
 
-from polybos_engine.config import get_settings
 from polybos_engine.schemas import BoundingBox, FaceDetection, FacesResult
+
+Embedding: TypeAlias = list[float]
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +41,6 @@ def extract_faces(
     if not path.exists():
         raise FileNotFoundError(f"Video file not found: {file_path}")
 
-    settings = get_settings()
-
     # Create temp directory for frames
     temp_dir = tempfile.mkdtemp(prefix="polybos_faces_")
 
@@ -48,8 +49,8 @@ def extract_faces(
         logger.info(f"Extracting frames at {sample_fps} fps")
         frame_paths = _extract_frames(file_path, temp_dir, sample_fps)
 
-        detections = []
-        all_embeddings = []
+        detections: list[FaceDetection] = []
+        all_embeddings: list[Embedding] = []
 
         for frame_path in frame_paths:
             # Get timestamp from frame filename
@@ -71,7 +72,7 @@ def extract_faces(
                         continue
 
                     # Get bounding box
-                    region = face.get("facial_area", {})
+                    region: dict[str, int] = face.get("facial_area", {})
                     x, y = region.get("x", 0), region.get("y", 0)
                     w, h = region.get("w", 0), region.get("h", 0)
 
@@ -80,6 +81,7 @@ def extract_faces(
                         continue
 
                     # Generate embedding
+                    embedding: Embedding = []
                     try:
                         embedding_result = DeepFace.represent(
                             img_path=frame_path,
@@ -88,13 +90,12 @@ def extract_faces(
                             enforce_detection=False,
                         )
 
-                        if embedding_result:
-                            embedding = embedding_result[0].get("embedding", [])
-                        else:
-                            embedding = []
+                        if embedding_result and len(embedding_result) > 0:
+                            first_result = embedding_result[0]
+                            if isinstance(first_result, dict):
+                                embedding = first_result.get("embedding", [])
                     except Exception as e:
                         logger.warning(f"Failed to generate embedding: {e}")
-                        embedding = []
 
                     detection = FaceDetection(
                         timestamp=timestamp,
@@ -162,7 +163,7 @@ def _get_timestamp_from_frame(frame_path: str, fps: float) -> float:
     return (frame_num - 1) / fps
 
 
-def _estimate_unique_faces(embeddings: list[list[float]], threshold: float = 0.6) -> int:
+def _estimate_unique_faces(embeddings: list[Embedding], threshold: float = 0.6) -> int:
     """Estimate number of unique faces by clustering embeddings.
 
     Uses simple distance-based clustering.
@@ -170,10 +171,10 @@ def _estimate_unique_faces(embeddings: list[list[float]], threshold: float = 0.6
     if not embeddings:
         return 0
 
-    embeddings_array = np.array(embeddings)
+    embeddings_array: NDArray[np.float64] = np.array(embeddings)
 
     # Simple clustering: group faces within threshold distance
-    clusters = []
+    clusters: list[list[NDArray[np.float64]]] = []
 
     for emb in embeddings_array:
         found_cluster = False

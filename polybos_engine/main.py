@@ -74,7 +74,8 @@ async def extract(request: ExtractRequest):
     # Extract metadata (always required)
     try:
         metadata = extract_metadata(request.file)
-        logger.info(f"Metadata extracted: {metadata.duration}s, {metadata.resolution.width}x{metadata.resolution.height}")
+        res = metadata.resolution
+        logger.info(f"Metadata extracted: {metadata.duration}s, {res.width}x{res.height}")
     except Exception as e:
         logger.error(f"Metadata extraction failed: {e}")
         raise HTTPException(status_code=500, detail=f"Metadata extraction failed: {e}")
@@ -122,7 +123,7 @@ async def extract(request: ExtractRequest):
                 request.file,
                 sample_fps=request.face_sample_fps,
             )
-            logger.info(f"Face detection complete: {faces.count} faces, ~{faces.unique_estimate} unique")
+            logger.info(f"Face detection: {faces.count} faces, ~{faces.unique_estimate} unique")
         except Exception as e:
             logger.warning(f"Face detection failed: {e}")
 
@@ -183,7 +184,7 @@ async def list_extractors():
         "extractors": [
             {
                 "name": "metadata",
-                "description": "Video metadata extraction (duration, resolution, codec, device, GPS)",
+                "description": "Video metadata (duration, resolution, codec, device, GPS)",
                 "always_enabled": True,
             },
             {

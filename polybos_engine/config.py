@@ -1,9 +1,18 @@
 """Configuration settings for Polybos Media Engine."""
 
 import platform
+from enum import StrEnum
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings
+
+
+class DeviceType(StrEnum):
+    """Compute device types."""
+
+    MPS = "mps"
+    CUDA = "cuda"
+    CPU = "cpu"
 
 
 class Settings(BaseSettings):
@@ -49,11 +58,11 @@ def has_cuda() -> bool:
         return False
 
 
-def get_device() -> str:
+def get_device() -> DeviceType:
     """Get the best available compute device."""
     if is_apple_silicon():
-        return "mps"
+        return DeviceType.MPS
     elif has_cuda():
-        return "cuda"
+        return DeviceType.CUDA
     else:
-        return "cpu"
+        return DeviceType.CPU

@@ -1,8 +1,27 @@
 """Pydantic schemas for request/response models."""
 
 from datetime import datetime
+from enum import StrEnum
 
 from pydantic import BaseModel, Field
+
+
+class MediaDeviceType(StrEnum):
+    """Type of media capture device."""
+
+    DRONE = "drone"
+    CAMERA = "camera"
+    PHONE = "phone"
+    ACTION_CAMERA = "action_camera"
+    UNKNOWN = "unknown"
+
+
+class DetectionMethod(StrEnum):
+    """Method used for detection."""
+
+    METADATA = "metadata"
+    XML_SIDECAR = "xml_sidecar"
+    CLIP = "clip"
 
 
 # === Request Models ===
@@ -68,8 +87,8 @@ class DeviceInfo(BaseModel):
     make: str | None = None
     model: str | None = None
     software: str | None = None
-    type: str | None = None  # drone, camera, phone, unknown
-    detection_method: str = "metadata"  # metadata, clip
+    type: MediaDeviceType | None = None
+    detection_method: DetectionMethod = DetectionMethod.METADATA
     confidence: float = 1.0
 
 

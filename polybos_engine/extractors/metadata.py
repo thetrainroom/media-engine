@@ -6,16 +6,37 @@ import os
 import re
 import subprocess
 import xml.etree.ElementTree as ET
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from polybos_engine.schemas import (
-    Codec,
-    DeviceInfo,
     GPS,
+    Codec,
+    DetectionMethod,
+    DeviceInfo,
+    MediaDeviceType,
     Metadata,
     Resolution,
 )
+
+
+@dataclass
+class GPSCoordinates:
+    """Parsed GPS coordinates from ISO 6709 format."""
+
+    latitude: float
+    longitude: float
+    altitude: float | None = None
+
+
+@dataclass
+class SidecarMetadata:
+    """Metadata extracted from sidecar files."""
+
+    device: DeviceInfo | None = None
+    gps: GPS | None = None
 
 logger = logging.getLogger(__name__)
 
@@ -89,10 +110,10 @@ def extract_metadata(file_path: str) -> Metadata:
     sidecar_info = _parse_sony_xml_sidecar(file_path)
     if sidecar_info:
         # Prefer XML sidecar device info (more accurate model name)
-        if sidecar_info.get("device"):
-            device = sidecar_info["device"]
-        if sidecar_info.get("gps"):
-            gps = sidecar_info["gps"]
+        if sidecar_info.device:
+            device = sidecar_info.device
+        if sidecar_info.gps:
+            gps = sidecar_info.gps
 
     return Metadata(
         duration=duration,
@@ -107,7 +128,7 @@ def extract_metadata(file_path: str) -> Metadata:
     )
 
 
-def _run_ffprobe(file_path: str) -> dict:
+def _run_ffprobe(file_path: str) -> dict[str, Any]:
     """Run ffprobe and return parsed JSON output."""
     cmd = [
         "ffprobe",
@@ -131,7 +152,7 @@ def _run_ffprobe(file_path: str) -> dict:
         raise RuntimeError(f"Failed to parse ffprobe output: {e}")
 
 
-def _parse_fps(video_stream: dict) -> float | None:
+def _parse_fps(video_stream: dict[str, Any]) -> float | None:
     """Parse frame rate from video stream."""
     # Try avg_frame_rate first
     fps_str = video_stream.get("avg_frame_rate", "")
@@ -150,10 +171,14 @@ def _parse_fps(video_stream: dict) -> float | None:
     return None
 
 
-def _parse_creation_time(tags: dict) -> datetime | None:
+def _parse_creation_time(tags: dict[str, str]) -> datetime | None:
     """Parse creation time from metadata tags."""
     # Try various tag names
-    time_str = tags.get("creation_time") or tags.get("date") or tags.get("com.apple.quicktime.creationdate")
+    time_str = (
+        tags.get("creation_time")
+        or tags.get("date")
+        or tags.get("com.apple.quicktime.creationdate")
+    )
 
     if not time_str:
         return None
@@ -177,7 +202,7 @@ def _parse_creation_time(tags: dict) -> datetime | None:
     return None
 
 
-def _extract_device_info(tags: dict) -> DeviceInfo | None:
+def _extract_device_info(tags: dict[str, str]) -> DeviceInfo | None:
     """Extract device information from metadata tags."""
     # Case-insensitive tag lookup
     tags_lower = {k.lower(): v for k, v in tags.items()}
@@ -212,28 +237,28 @@ def _extract_device_info(tags: dict) -> DeviceInfo | None:
         return None
 
     # Determine device type
-    device_type = "unknown"
+    device_type = MediaDeviceType.UNKNOWN
     if make:
         if make.upper() in {m.upper() for m in DRONE_MANUFACTURERS}:
-            device_type = "drone"
+            device_type = MediaDeviceType.DRONE
         elif "IPHONE" in (model or "").upper() or "IPAD" in (model or "").upper():
-            device_type = "phone"
+            device_type = MediaDeviceType.PHONE
         elif "GOPRO" in make.upper():
-            device_type = "action_camera"
+            device_type = MediaDeviceType.ACTION_CAMERA
         else:
-            device_type = "camera"
+            device_type = MediaDeviceType.CAMERA
 
     return DeviceInfo(
         make=make,
         model=model,
         software=software,
         type=device_type,
-        detection_method="metadata",
+        detection_method=DetectionMethod.METADATA,
         confidence=1.0,
     )
 
 
-def _extract_gps(tags: dict) -> GPS | None:
+def _extract_gps(tags: dict[str, str]) -> GPS | None:
     """Extract GPS coordinates from metadata tags."""
     # Case-insensitive tag lookup
     tags_lower = {k.lower(): v for k, v in tags.items()}
@@ -248,7 +273,11 @@ def _extract_gps(tags: dict) -> GPS | None:
     if location:
         coords = _parse_iso6709(location)
         if coords:
-            return GPS(**coords)
+            return GPS(
+                latitude=coords.latitude,
+                longitude=coords.longitude,
+                altitude=coords.altitude,
+            )
 
     # Try separate lat/lon tags
     lat = tags_lower.get("gps_latitude") or tags_lower.get("location-latitude")
@@ -267,7 +296,7 @@ def _extract_gps(tags: dict) -> GPS | None:
     return None
 
 
-def _parse_iso6709(location: str) -> dict | None:
+def _parse_iso6709(location: str) -> GPSCoordinates | None:
     """Parse ISO 6709 format GPS coordinates.
 
     Examples:
@@ -280,20 +309,18 @@ def _parse_iso6709(location: str) -> dict | None:
 
     if len(matches) >= 2:
         try:
-            result = {
-                "latitude": float(matches[0]),
-                "longitude": float(matches[1]),
-            }
-            if len(matches) >= 3:
-                result["altitude"] = float(matches[2])
-            return result
+            return GPSCoordinates(
+                latitude=float(matches[0]),
+                longitude=float(matches[1]),
+                altitude=float(matches[2]) if len(matches) >= 3 else None,
+            )
         except ValueError:
             pass
 
     return None
 
 
-def _parse_sony_xml_sidecar(video_path: str) -> dict | None:
+def _parse_sony_xml_sidecar(video_path: str) -> SidecarMetadata | None:
     """Parse Sony XML sidecar file for additional metadata.
 
     Sony cameras create XML sidecar files with naming pattern:
@@ -325,7 +352,8 @@ def _parse_sony_xml_sidecar(video_path: str) -> dict | None:
         # Handle XML namespace
         ns = {"nrt": "urn:schemas-professionalDisc:nonRealTimeMeta:ver.2.20"}
 
-        result = {}
+        device: DeviceInfo | None = None
+        gps: GPS | None = None
 
         # Extract device info
         device_elem = root.find(".//nrt:Device", ns) or root.find(".//{*}Device")
@@ -334,23 +362,27 @@ def _parse_sony_xml_sidecar(video_path: str) -> dict | None:
             model_name = device_elem.get("modelName")
 
             if manufacturer or model_name:
-                device_type = "camera"
+                device_type = MediaDeviceType.CAMERA
                 if manufacturer and manufacturer.upper() == "DJI":
-                    device_type = "drone"
+                    device_type = MediaDeviceType.DRONE
 
-                result["device"] = DeviceInfo(
+                device = DeviceInfo(
                     make=manufacturer,
                     model=model_name,
                     software=None,
                     type=device_type,
-                    detection_method="xml_sidecar",
+                    detection_method=DetectionMethod.XML_SIDECAR,
                     confidence=1.0,
                 )
 
         # Extract GPS from ExifGPS group
         gps_group = root.find(".//{*}Group[@name='ExifGPS']")
         if gps_group is not None:
-            gps_items = {item.get("name"): item.get("value") for item in gps_group.findall(".//{*}Item")}
+            gps_items: dict[str, str | None] = {}
+            for item in gps_group.findall(".//{*}Item"):
+                name = item.get("name")
+                if name is not None:
+                    gps_items[name] = item.get("value")
 
             # Check if GPS has valid fix (Status != "V" means no fix)
             if gps_items.get("Status") != "V":
@@ -360,7 +392,7 @@ def _parse_sony_xml_sidecar(video_path: str) -> dict | None:
 
                 if lat and lon:
                     try:
-                        result["gps"] = GPS(
+                        gps = GPS(
                             latitude=float(lat),
                             longitude=float(lon),
                             altitude=float(alt) if alt else None,
@@ -368,7 +400,9 @@ def _parse_sony_xml_sidecar(video_path: str) -> dict | None:
                     except ValueError:
                         pass
 
-        return result if result else None
+        if device or gps:
+            return SidecarMetadata(device=device, gps=gps)
+        return None
 
     except ET.ParseError as e:
         logger.warning(f"Failed to parse Sony XML sidecar {xml_path}: {e}")

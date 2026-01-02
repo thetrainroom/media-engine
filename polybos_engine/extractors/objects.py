@@ -48,8 +48,8 @@ def extract_objects(
         logger.info(f"Extracting frames at {sample_fps} fps")
         frame_paths = _extract_frames(file_path, temp_dir, sample_fps)
 
-        detections = []
-        label_counter = Counter()
+        detections: list[ObjectDetection] = []
+        label_counter: Counter[str] = Counter()
 
         for frame_path in frame_paths:
             # Get timestamp from frame filename
@@ -73,7 +73,7 @@ def extract_objects(
 
                         # Get class label
                         class_id = int(boxes.cls[i])
-                        label = model.names[class_id]
+                        label = model.names[class_id] if model.names else str(class_id)
 
                         # Get bounding box (xyxy format)
                         x1, y1, x2, y2 = boxes.xyxy[i].tolist()

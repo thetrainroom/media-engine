@@ -52,14 +52,14 @@ def extract_ocr(
             # Fall back to fixed interval
             logger.info(f"Sampling OCR at {sample_fps} fps")
             duration = _get_video_duration(file_path)
-            timestamps = []
+            timestamps: list[float] = []
             t = 0.0
             while t < duration:
                 timestamps.append(t)
                 t += 1.0 / sample_fps
 
-        detections = []
-        seen_texts = set()  # For deduplication
+        detections: list[OcrDetection] = []
+        seen_texts: set[str] = set()  # For deduplication
 
         for timestamp in timestamps:
             frame_path = _extract_frame_at(file_path, temp_dir, timestamp)

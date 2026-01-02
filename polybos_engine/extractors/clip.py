@@ -7,12 +7,14 @@ import subprocess
 import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Any, TypeAlias
 
-import numpy as np
 from PIL import Image
 
 from polybos_engine.config import has_cuda, is_apple_silicon
 from polybos_engine.schemas import ClipResult, ClipSegment, ScenesResult
+
+Embedding: TypeAlias = list[float]
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +23,7 @@ class CLIPBackend(ABC):
     """Abstract base class for CLIP backends."""
 
     @abstractmethod
-    def encode_image(self, image_path: str) -> list[float]:
+    def encode_image(self, image_path: str) -> Embedding:
         """Encode image to embedding vector.
 
         Args:
@@ -42,8 +44,7 @@ class OpenCLIPBackend(CLIPBackend):
     """OpenCLIP backend for CUDA/CPU."""
 
     def __init__(self, model_name: str = "ViT-B-32", pretrained: str = "openai"):
-        import open_clip
-        import torch
+        import open_clip  # type: ignore[import-not-found]
 
         self.device = "cuda" if has_cuda() else "cpu"
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
@@ -54,7 +55,7 @@ class OpenCLIPBackend(CLIPBackend):
         self._model_name = model_name
         logger.info(f"Loaded OpenCLIP model: {model_name} on {self.device}")
 
-    def encode_image(self, image_path: str) -> list[float]:
+    def encode_image(self, image_path: str) -> Embedding:
         import torch
 
         image = Image.open(image_path).convert("RGB")
@@ -73,30 +74,30 @@ class OpenCLIPBackend(CLIPBackend):
 class MLXCLIPBackend(CLIPBackend):
     """MLX-CLIP backend for Apple Silicon."""
 
-    def __init__(self, model_name: str = "openai/clip-vit-base-patch32"):
+    def __init__(self, model_name: str = "openai/clip-vit-base-patch32") -> None:
         # Lazy import for Apple Silicon only
-        self._model = None
-        self._processor = None
+        self._model: Any = None
+        self._processor: Any = None
         self._model_name = model_name
 
-    def _load_model(self):
+    def _load_model(self) -> None:
         if self._model is None:
             try:
                 # Try mlx-clip first
-                import mlx_clip
+                import mlx_clip  # type: ignore[import-not-found]
 
                 self._model = mlx_clip.load(self._model_name)
                 self._processor = None  # MLX-CLIP handles preprocessing
                 logger.info(f"Loaded MLX-CLIP model: {self._model_name}")
             except ImportError:
                 # Fall back to transformers + mlx
-                from transformers import CLIPModel, CLIPProcessor
+                from transformers import CLIPModel, CLIPProcessor  # type: ignore[import-not-found]
 
                 self._processor = CLIPProcessor.from_pretrained(self._model_name)
                 self._model = CLIPModel.from_pretrained(self._model_name)
                 logger.info(f"Loaded transformers CLIP model: {self._model_name}")
 
-    def encode_image(self, image_path: str) -> list[float]:
+    def encode_image(self, image_path: str) -> Embedding:
         self._load_model()
 
         image = Image.open(image_path).convert("RGB")
@@ -165,7 +166,7 @@ def extract_clip(
     temp_dir = tempfile.mkdtemp(prefix="polybos_clip_")
 
     try:
-        segments = []
+        segments: list[ClipSegment] = []
 
         if scenes and scenes.detections:
             # Extract one frame per scene (middle of scene)

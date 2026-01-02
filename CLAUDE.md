@@ -8,6 +8,12 @@ Polybos Media Engine is an open-source (MIT), AI-powered video extraction API de
 
 **Business model**: Open-source backend with a commercial closed-source frontend (SvelteKit).
 
+## Requirements
+
+- **Python 3.12+** (uses modern typing features including `StrEnum`, `type` aliases, union syntax `X | None`)
+- ffmpeg/ffprobe for video processing
+- Platform-specific ML backends (MLX for Apple Silicon, CUDA for NVIDIA, CPU fallback)
+
 ## Development Commands
 
 ```bash
@@ -18,17 +24,18 @@ pip install -e ".[cpu]"     # CPU fallback
 pip install -e ".[dev]"     # Development tools
 
 # Run development server
-uvicorn polybos_engine.main:app --reload
+uvicorn polybos_engine.main:app --reload --port 8001
+
+# Linting and type checking
+ruff check polybos_engine/              # Lint
+ruff check polybos_engine/ --fix        # Lint and auto-fix
+pyright polybos_engine/                 # Type check (strict)
 
 # Run tests (set TEST_VIDEO_PATH first)
 export TEST_VIDEO_PATH=/path/to/test.mp4
 pytest tests/
 pytest tests/test_metadata.py -v          # Single test file
 pytest -m "not slow"                       # Skip slow tests
-
-# Build and run with Docker
-docker build -t polybos/media-engine .
-docker-compose up
 ```
 
 ## API Endpoints
@@ -86,9 +93,14 @@ All AI modules use a backend abstraction for cross-platform support:
 
 ```python
 # In config.py
+class DeviceType(StrEnum):
+    MPS = "mps"
+    CUDA = "cuda"
+    CPU = "cpu"
+
 def is_apple_silicon() -> bool
 def has_cuda() -> bool
-def get_device() -> str  # Returns "mps", "cuda", or "cpu"
+def get_device() -> DeviceType
 
 # Each extractor implements backend selection:
 if is_apple_silicon():
@@ -117,9 +129,40 @@ else:
 - **Whisper backends**: mlx-whisper (Mac), faster-whisper (CUDA), openai-whisper (CPU)
 - **Language fallback**: If detection confidence <0.7 on clips <15s, uses fallback_language
 - **Face filtering**: Skips faces <80px or low confidence; clusters embeddings to estimate unique count
-- **Device detection**: Checks metadata for known drone manufacturers (DJI, Parrot, etc.)
+- **Device detection**: Checks metadata tags and XML sidecars for device info (DJI drones, Sony cameras, etc.)
 - **Shot type**: CLIP zero-shot classification against predefined labels
 - **Scene-aware sampling**: CLIP and OCR use scene boundaries when available
+
+## Type System
+
+The codebase uses strict typing with `pyright`. Key enums in `schemas.py`:
+
+```python
+class MediaDeviceType(StrEnum):
+    DRONE = "drone"
+    CAMERA = "camera"
+    PHONE = "phone"
+    ACTION_CAMERA = "action_camera"
+    UNKNOWN = "unknown"
+
+class DetectionMethod(StrEnum):
+    METADATA = "metadata"
+    XML_SIDECAR = "xml_sidecar"
+    CLIP = "clip"
+```
+
+Shot types in `extractors/shot_type.py`:
+
+```python
+class ShotTypeLabel(StrEnum):
+    AERIAL = "aerial"
+    INTERVIEW = "interview"
+    B_ROLL = "b-roll"
+    STUDIO = "studio"
+    # ... etc
+```
+
+Using `StrEnum` ensures JSON serialization works seamlessly with Pydantic while providing type safety.
 
 ## Testing
 
