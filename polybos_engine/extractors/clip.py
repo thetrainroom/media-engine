@@ -1,0 +1,279 @@
+"""CLIP embedding extraction with platform-specific backends."""
+
+import logging
+import os
+import shutil
+import subprocess
+import tempfile
+from abc import ABC, abstractmethod
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+from polybos_engine.config import has_cuda, is_apple_silicon
+from polybos_engine.schemas import ClipResult, ClipSegment, ScenesResult
+
+logger = logging.getLogger(__name__)
+
+
+class CLIPBackend(ABC):
+    """Abstract base class for CLIP backends."""
+
+    @abstractmethod
+    def encode_image(self, image_path: str) -> list[float]:
+        """Encode image to embedding vector.
+
+        Args:
+            image_path: Path to image file
+
+        Returns:
+            List of floats representing the embedding
+        """
+        pass
+
+    @abstractmethod
+    def get_model_name(self) -> str:
+        """Get the model name."""
+        pass
+
+
+class OpenCLIPBackend(CLIPBackend):
+    """OpenCLIP backend for CUDA/CPU."""
+
+    def __init__(self, model_name: str = "ViT-B-32", pretrained: str = "openai"):
+        import open_clip
+        import torch
+
+        self.device = "cuda" if has_cuda() else "cpu"
+        self.model, _, self.preprocess = open_clip.create_model_and_transforms(
+            model_name, pretrained=pretrained
+        )
+        self.model = self.model.to(self.device)
+        self.model.eval()
+        self._model_name = model_name
+        logger.info(f"Loaded OpenCLIP model: {model_name} on {self.device}")
+
+    def encode_image(self, image_path: str) -> list[float]:
+        import torch
+
+        image = Image.open(image_path).convert("RGB")
+        image_tensor = self.preprocess(image).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            embedding = self.model.encode_image(image_tensor)
+            embedding = embedding / embedding.norm(dim=-1, keepdim=True)
+
+        return embedding.cpu().numpy().flatten().tolist()
+
+    def get_model_name(self) -> str:
+        return self._model_name
+
+
+class MLXCLIPBackend(CLIPBackend):
+    """MLX-CLIP backend for Apple Silicon."""
+
+    def __init__(self, model_name: str = "openai/clip-vit-base-patch32"):
+        # Lazy import for Apple Silicon only
+        self._model = None
+        self._processor = None
+        self._model_name = model_name
+
+    def _load_model(self):
+        if self._model is None:
+            try:
+                # Try mlx-clip first
+                import mlx_clip
+
+                self._model = mlx_clip.load(self._model_name)
+                self._processor = None  # MLX-CLIP handles preprocessing
+                logger.info(f"Loaded MLX-CLIP model: {self._model_name}")
+            except ImportError:
+                # Fall back to transformers + mlx
+                from transformers import CLIPModel, CLIPProcessor
+
+                self._processor = CLIPProcessor.from_pretrained(self._model_name)
+                self._model = CLIPModel.from_pretrained(self._model_name)
+                logger.info(f"Loaded transformers CLIP model: {self._model_name}")
+
+    def encode_image(self, image_path: str) -> list[float]:
+        self._load_model()
+
+        image = Image.open(image_path).convert("RGB")
+
+        if self._processor is not None:
+            # Using transformers
+            inputs = self._processor(images=image, return_tensors="pt")
+            outputs = self._model.get_image_features(**inputs)
+            embedding = outputs / outputs.norm(dim=-1, keepdim=True)
+            return embedding.detach().numpy().flatten().tolist()
+        else:
+            # Using mlx-clip
+            embedding = self._model.encode_image(image)
+            return embedding.tolist()
+
+    def get_model_name(self) -> str:
+        return self._model_name
+
+
+# Singleton backend instance
+_backend: CLIPBackend | None = None
+
+
+def get_clip_backend() -> CLIPBackend:
+    """Get the appropriate CLIP backend for the current platform."""
+    global _backend
+
+    if _backend is not None:
+        return _backend
+
+    if is_apple_silicon():
+        try:
+            _backend = MLXCLIPBackend()
+            logger.info("Using MLX-CLIP backend (Apple Silicon)")
+            return _backend
+        except Exception as e:
+            logger.warning(f"MLX-CLIP not available: {e}, falling back to OpenCLIP")
+
+    _backend = OpenCLIPBackend()
+    logger.info("Using OpenCLIP backend")
+    return _backend
+
+
+def extract_clip(
+    file_path: str,
+    scenes: ScenesResult | None = None,
+    fallback_interval: float = 10.0,
+) -> ClipResult:
+    """Extract CLIP embeddings from video.
+
+    Args:
+        file_path: Path to video file
+        scenes: Optional scene detection results (one embedding per scene)
+        fallback_interval: Interval in seconds if no scenes provided
+
+    Returns:
+        ClipResult with embeddings per segment
+    """
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Video file not found: {file_path}")
+
+    backend = get_clip_backend()
+
+    # Create temp directory for frames
+    temp_dir = tempfile.mkdtemp(prefix="polybos_clip_")
+
+    try:
+        segments = []
+
+        if scenes and scenes.detections:
+            # Extract one frame per scene (middle of scene)
+            logger.info(f"Extracting CLIP embeddings for {scenes.count} scenes")
+
+            for scene in scenes.detections:
+                mid_time = (scene.start + scene.end) / 2
+                frame_path = _extract_frame_at(file_path, temp_dir, mid_time)
+
+                if frame_path:
+                    try:
+                        embedding = backend.encode_image(frame_path)
+                        segments.append(
+                            ClipSegment(
+                                start=scene.start,
+                                end=scene.end,
+                                scene_index=scene.index,
+                                embedding=embedding,
+                            )
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to encode frame at {mid_time}s: {e}")
+        else:
+            # Fall back to fixed interval
+            logger.info(f"Extracting CLIP embeddings at {fallback_interval}s intervals")
+            duration = _get_video_duration(file_path)
+
+            current_time = 0.0
+            index = 0
+
+            while current_time < duration:
+                end_time = min(current_time + fallback_interval, duration)
+                mid_time = (current_time + end_time) / 2
+
+                frame_path = _extract_frame_at(file_path, temp_dir, mid_time)
+
+                if frame_path:
+                    try:
+                        embedding = backend.encode_image(frame_path)
+                        segments.append(
+                            ClipSegment(
+                                start=current_time,
+                                end=end_time,
+                                scene_index=index,
+                                embedding=embedding,
+                            )
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to encode frame at {mid_time}s: {e}")
+
+                current_time = end_time
+                index += 1
+
+        logger.info(f"Generated {len(segments)} CLIP embeddings")
+
+        return ClipResult(
+            model=backend.get_model_name(),
+            segments=segments,
+        )
+
+    finally:
+        # Clean up temp directory
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def _extract_frame_at(video_path: str, output_dir: str, timestamp: float) -> str | None:
+    """Extract a single frame at specified timestamp."""
+    output_path = os.path.join(output_dir, f"frame_{timestamp:.3f}.jpg")
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        str(timestamp),
+        "-i",
+        video_path,
+        "-vframes",
+        "1",
+        "-q:v",
+        "2",
+        output_path,
+    ]
+
+    try:
+        subprocess.run(cmd, capture_output=True, check=True)
+        if os.path.exists(output_path):
+            return output_path
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Failed to extract frame at {timestamp}s: {e.stderr}")
+
+    return None
+
+
+def _get_video_duration(video_path: str) -> float:
+    """Get video duration in seconds."""
+    cmd = [
+        "ffprobe",
+        "-v",
+        "quiet",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        video_path,
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return float(result.stdout.strip())
+    except (subprocess.CalledProcessError, ValueError):
+        return 0.0
