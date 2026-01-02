@@ -125,19 +125,36 @@ else:
 | ocr | skip_ocr | detected text with bounding boxes |
 | shot_type | (uses skip_clip) | aerial, interview, b-roll, studio, etc. |
 
-## Environment Variables
+## Configuration
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `POLYBOS_HF_TOKEN` | HuggingFace token for pyannote speaker diarization | No (diarization skipped if not set) |
-| `POLYBOS_LOG_LEVEL` | Logging level (DEBUG, INFO, WARNING, ERROR) | No (default: INFO) |
-| `POLYBOS_WHISPER_MODEL` | Default Whisper model | No (default: large-v3) |
-| `POLYBOS_DIARIZATION_MODEL` | Pyannote model for diarization | No (default: pyannote/speaker-diarization-3.1) |
-| `POLYBOS_OCR_LANGUAGES` | Comma-separated OCR languages | No (default: en,no,de,fr,es,it,pt,nl,sv,da,fi,pl) |
+Settings are stored in `~/.config/polybos/config.json`. The frontend can read/write this file.
+
+```json
+{
+  "api_version": "1.0",
+  "log_level": "INFO",
+  "whisper_model": "large-v3",
+  "fallback_language": "en",
+  "hf_token": null,
+  "diarization_model": "pyannote/speaker-diarization-3.1",
+  "face_sample_fps": 1.0,
+  "object_sample_fps": 2.0,
+  "min_face_size": 80,
+  "ocr_languages": ["en", "no", "de", "fr", "es", "it", "pt", "nl", "sv", "da", "fi", "pl"],
+  "temp_dir": "/tmp/polybos"
+}
+```
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `hf_token` | HuggingFace token for pyannote speaker diarization | null (diarization skipped) |
+| `whisper_model` | Whisper model for transcription | large-v3 |
+| `diarization_model` | Pyannote model for speaker diarization | pyannote/speaker-diarization-3.1 |
+| `ocr_languages` | OCR languages (see https://www.jaided.ai/easyocr/) | Latin languages |
 
 **Notes**:
 - Pyannote models are gated. Accept the license at https://huggingface.co/pyannote/speaker-diarization-3.1 before using.
-- OCR uses EasyOCR. For CJK languages, set e.g. `POLYBOS_OCR_LANGUAGES=en,ch_sim,ja,ko`. See https://www.jaided.ai/easyocr/ for full list.
+- For CJK OCR, add `ch_sim`, `ja`, `ko` to `ocr_languages`.
 
 ## Key Implementation Details
 

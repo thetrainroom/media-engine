@@ -34,7 +34,7 @@ def _get_ocr_reader(languages: list[str] | None = None) -> Any:
     if languages is None:
         # Get from settings
         settings = get_settings()
-        languages = [lang.strip() for lang in settings.ocr_languages.split(",")]
+        languages = settings.ocr_languages
 
     _ocr_languages = languages
     logger.info(f"Initializing EasyOCR with languages: {languages}")
