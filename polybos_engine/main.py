@@ -115,12 +115,13 @@ async def extract(request: ExtractRequest):
         except Exception as e:
             logger.warning(f"Transcription failed: {e}")
 
-    # Extract faces
+    # Extract faces (use scene boundaries if available for better sampling)
     faces = None
     if not request.skip_faces:
         try:
             faces = extract_faces(
                 request.file,
+                scenes=scenes.detections if scenes else None,
                 sample_fps=request.face_sample_fps,
             )
             logger.info(f"Face detection: {faces.count} faces, ~{faces.unique_estimate} unique")
