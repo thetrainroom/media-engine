@@ -255,6 +255,52 @@ class OcrResult(BaseModel):
     detections: list[OcrDetection]
 
 
+class TelemetryPoint(BaseModel):
+    """Single telemetry point from drone/camera."""
+
+    timestamp: float  # Seconds from start of video
+    recorded_at: datetime | None = None  # Actual datetime from telemetry
+    latitude: float
+    longitude: float
+    altitude: float | None = None  # Absolute altitude in meters
+    relative_altitude: float | None = None  # Altitude above takeoff
+    # Camera settings
+    iso: int | None = None
+    shutter: float | None = None  # Shutter speed as fraction (1/100 = 0.01)
+    aperture: float | None = None  # f-number
+    focal_length: float | None = None
+    color_mode: str | None = None  # d_log, d_cinelike, etc.
+
+
+class TelemetryResult(BaseModel):
+    """Telemetry/flight path results."""
+
+    source: str  # "dji_srt", "gopro", etc.
+    sample_rate: float  # Points per second
+    duration: float  # Total duration in seconds
+    points: list[TelemetryPoint]
+
+    def to_gpx(self) -> str:
+        """Export telemetry as GPX track."""
+        lines = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<gpx version="1.1" creator="Polybos Media Engine">',
+            "  <trk>",
+            "    <name>Flight Path</name>",
+            "    <trkseg>",
+        ]
+        for pt in self.points:
+            ele = f"<ele>{pt.altitude}</ele>" if pt.altitude else ""
+            time = ""
+            if pt.recorded_at:
+                time = f"<time>{pt.recorded_at.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]}Z</time>"
+            lines.append(
+                f'      <trkpt lat="{pt.latitude}" lon="{pt.longitude}">{ele}{time}</trkpt>'
+            )
+        lines.extend(["    </trkseg>", "  </trk>", "</gpx>"])
+        return "\n".join(lines)
+
+
 class ExtractResponse(BaseModel):
     """Response from /extract endpoint."""
 

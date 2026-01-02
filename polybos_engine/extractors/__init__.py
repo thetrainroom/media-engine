@@ -6,6 +6,7 @@ from .metadata import extract_metadata
 from .objects import extract_objects
 from .ocr import extract_ocr
 from .scenes import extract_scenes
+from .telemetry import extract_telemetry
 from .transcribe import extract_transcript
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "extract_objects",
     "extract_clip",
     "extract_ocr",
+    "extract_telemetry",
 ]

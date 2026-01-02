@@ -110,14 +110,18 @@ def extract_metadata(file_path: str) -> Metadata:
     # Extract GPS
     gps = _extract_gps(tags)
 
-    # Extract color space from ffprobe
-    color_space = _extract_color_space(video_stream)
+    # Extract color space from ffprobe and format tags
+    color_space = _extract_color_space(video_stream, tags)
 
     # Lens info (only available from sidecar)
     lens: LensInfo | None = None
 
-    # Try Sony XML sidecar for additional metadata (preferred over generic detection)
-    sidecar_info = _parse_sony_xml_sidecar(file_path)
+    # Try sidecars for additional metadata (preferred over generic detection)
+    sidecar_info = (
+        _parse_sony_xml_sidecar(file_path)
+        or _parse_canon_xml_sidecar(file_path)
+        or _parse_dji_srt_sidecar(file_path)
+    )
     if sidecar_info:
         # Prefer XML sidecar device info (more accurate model name)
         if sidecar_info.device:
@@ -250,6 +254,13 @@ def _extract_device_info(tags: dict[str, str]) -> DeviceInfo | None:
         make = "Sony"
         model = "XAVC Camera"  # Generic, actual model not in metadata
 
+    # Check for Blackmagic cameras (use proapps tags)
+    proapps_manufacturer = tags_lower.get("com.apple.proapps.manufacturer", "")
+    proapps_camera = tags_lower.get("com.apple.proapps.cameraname", "")
+    if not make and proapps_manufacturer:
+        make = proapps_manufacturer
+        model = proapps_camera or None
+
     if not make and not model:
         return None
 
@@ -313,6 +324,34 @@ def _extract_gps(tags: dict[str, str]) -> GPS | None:
     return None
 
 
+def _parse_dms_coordinate(dms: str, ref: str | None) -> float | None:
+    """Parse DMS (degrees;minutes;seconds) format to decimal degrees.
+
+    Examples:
+        "59;51;12.628" with ref "N" -> 59.8535...
+        "8;41;6.356" with ref "E" -> 8.6851...
+    """
+    try:
+        parts = dms.split(";")
+        if len(parts) != 3:
+            # Try decimal format as fallback
+            return float(dms)
+
+        degrees = float(parts[0])
+        minutes = float(parts[1])
+        seconds = float(parts[2])
+
+        decimal = degrees + minutes / 60 + seconds / 3600
+
+        # Apply direction (S and W are negative)
+        if ref in ("S", "W"):
+            decimal = -decimal
+
+        return decimal
+    except (ValueError, IndexError):
+        return None
+
+
 def _parse_iso6709(location: str) -> GPSCoordinates | None:
     """Parse ISO 6709 format GPS coordinates.
 
@@ -337,14 +376,29 @@ def _parse_iso6709(location: str) -> GPSCoordinates | None:
     return None
 
 
-def _extract_color_space(video_stream: dict[str, Any] | None) -> ColorSpace | None:
-    """Extract color space information from video stream."""
-    if not video_stream:
-        return None
+def _extract_color_space(
+    video_stream: dict[str, Any] | None, tags: dict[str, str]
+) -> ColorSpace | None:
+    """Extract color space information from video stream and format tags."""
+    transfer: str | None = None
+    primaries: str | None = None
+    matrix: str | None = None
 
-    transfer = video_stream.get("color_transfer")
-    primaries = video_stream.get("color_primaries")
-    matrix = video_stream.get("color_space")
+    if video_stream:
+        transfer = video_stream.get("color_transfer")
+        primaries = video_stream.get("color_primaries")
+        matrix = video_stream.get("color_space")
+
+    # Check for Blackmagic custom gamma (LOG profile)
+    # e.g., "com.blackmagic-design.productioncamera4k.filmlog"
+    tags_lower = {k.lower(): v for k, v in tags.items()}
+    custom_gamma = tags_lower.get("com.apple.proapps.customgamma", "")
+    if custom_gamma:
+        # Extract the LOG profile name from the full identifier
+        # "com.blackmagic-design.productioncamera4k.filmlog" -> "filmlog"
+        parts = custom_gamma.split(".")
+        if parts:
+            transfer = parts[-1]  # Use the last part as transfer function
 
     # Only return if we have some color info
     if not (transfer or primaries or matrix):
@@ -426,19 +480,26 @@ def _parse_sony_xml_sidecar(video_path: str) -> SidecarMetadata | None:
 
             # Check if GPS has valid fix (Status != "V" means no fix)
             if gps_items.get("Status") != "V":
-                lat = gps_items.get("Latitude")
-                lon = gps_items.get("Longitude")
-                alt = gps_items.get("Altitude")
+                lat_str = gps_items.get("Latitude")
+                lon_str = gps_items.get("Longitude")
+                lat_ref = gps_items.get("LatitudeRef")
+                lon_ref = gps_items.get("LongitudeRef")
+                alt_str = gps_items.get("Altitude")
 
-                if lat and lon:
-                    try:
-                        gps = GPS(
-                            latitude=float(lat),
-                            longitude=float(lon),
-                            altitude=float(alt) if alt else None,
-                        )
-                    except ValueError:
-                        pass
+                if lat_str and lon_str:
+                    # Parse DMS format (e.g., "59;51;12.628") or decimal
+                    lat = _parse_dms_coordinate(lat_str, lat_ref)
+                    lon = _parse_dms_coordinate(lon_str, lon_ref)
+
+                    if lat is not None and lon is not None:
+                        try:
+                            gps = GPS(
+                                latitude=lat,
+                                longitude=lon,
+                                altitude=float(alt_str) if alt_str else None,
+                            )
+                        except ValueError:
+                            pass
 
         # Extract color space from VideoLayout or CameraUnitMetadata groups
         # Look for CaptureGammaEquation (s-log3), CaptureColorPrimaries (s-gamut3)
@@ -533,4 +594,184 @@ def _parse_sony_xml_sidecar(video_path: str) -> SidecarMetadata | None:
         return None
     except Exception as e:
         logger.warning(f"Error reading Sony XML sidecar {xml_path}: {e}")
+        return None
+
+
+def _parse_canon_xml_sidecar(video_path: str) -> SidecarMetadata | None:
+    """Parse Canon XML sidecar file for additional metadata.
+
+    Canon cameras create XML sidecar files with naming pattern:
+    - Video: A012C001H200529BY_CANON.MXF
+    - XML:   A012C001H200529BY_CANON.XML
+    """
+    path = Path(video_path)
+
+    # Canon XML has same name as video but .XML extension
+    xml_patterns = [
+        path.with_suffix(".XML"),
+        path.with_suffix(".xml"),
+    ]
+
+    xml_path = None
+    for pattern in xml_patterns:
+        if pattern.exists():
+            xml_path = pattern
+            break
+
+    if not xml_path:
+        return None
+
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+
+        # Handle Canon XML namespace
+        ns = {"canon": "http://www.canon.com/ns/VideoClip"}
+
+        device: DeviceInfo | None = None
+        gps: GPS | None = None
+
+        # Extract device info
+        device_elem = root.find(".//canon:Device", ns) or root.find(".//{*}Device")
+        if device_elem is not None:
+            manufacturer_elem = device_elem.find("canon:Manufacturer", ns) or device_elem.find(
+                "{*}Manufacturer"
+            )
+            model_elem = device_elem.find("canon:ModelName", ns) or device_elem.find(
+                "{*}ModelName"
+            )
+
+            manufacturer = manufacturer_elem.text if manufacturer_elem is not None else None
+            model_name = model_elem.text if model_elem is not None else None
+
+            if manufacturer or model_name:
+                device = DeviceInfo(
+                    make=manufacturer,
+                    model=model_name,
+                    software=None,
+                    type=MediaDeviceType.CAMERA,
+                    detection_method=DetectionMethod.XML_SIDECAR,
+                    confidence=1.0,
+                )
+
+        # Extract GPS from Location element
+        location_elem = root.find(".//canon:Location", ns) or root.find(".//{*}Location")
+        if location_elem is not None:
+            lat_elem = location_elem.find("canon:Latitude", ns) or location_elem.find(
+                "{*}Latitude"
+            )
+            lon_elem = location_elem.find("canon:Longitude", ns) or location_elem.find(
+                "{*}Longitude"
+            )
+            alt_elem = location_elem.find("canon:Altitude", ns) or location_elem.find(
+                "{*}Altitude"
+            )
+
+            lat = lat_elem.text if lat_elem is not None and lat_elem.text else None
+            lon = lon_elem.text if lon_elem is not None and lon_elem.text else None
+            alt = alt_elem.text if alt_elem is not None and alt_elem.text else None
+
+            if lat and lon:
+                try:
+                    gps = GPS(
+                        latitude=float(lat),
+                        longitude=float(lon),
+                        altitude=float(alt) if alt else None,
+                    )
+                except ValueError:
+                    pass
+
+        if device or gps:
+            return SidecarMetadata(device=device, gps=gps)
+        return None
+
+    except ET.ParseError as e:
+        logger.warning(f"Failed to parse Canon XML sidecar {xml_path}: {e}")
+        return None
+    except Exception as e:
+        logger.warning(f"Error reading Canon XML sidecar {xml_path}: {e}")
+        return None
+
+
+def _parse_dji_srt_sidecar(video_path: str) -> SidecarMetadata | None:
+    """Parse DJI SRT sidecar file for GPS and telemetry.
+
+    DJI drones create SRT files with per-frame telemetry:
+    - Video: DJI_0987.MP4
+    - SRT:   DJI_0987.SRT
+
+    Format: [iso: 400] [shutter: 1/100.0] [fnum: 2.8] [latitude: 61.05121] ...
+    """
+    path = Path(video_path)
+
+    # DJI SRT has same name as video
+    srt_patterns = [
+        path.with_suffix(".SRT"),
+        path.with_suffix(".srt"),
+    ]
+
+    srt_path = None
+    for pattern in srt_patterns:
+        if pattern.exists():
+            srt_path = pattern
+            break
+
+    if not srt_path:
+        return None
+
+    try:
+        with open(srt_path, encoding="utf-8") as f:
+            content = f.read()
+
+        # Parse first occurrence of each field
+        gps: GPS | None = None
+        color_space: ColorSpace | None = None
+        lens: LensInfo | None = None
+
+        # GPS coordinates
+        lat_match = re.search(r"\[latitude:\s*([-\d.]+)\]", content)
+        lon_match = re.search(r"\[longitude:\s*([-\d.]+)\]", content)
+        # Format: [rel_alt: 47.100 abs_alt: 380.003]
+        abs_alt_match = re.search(r"abs_alt:\s*([-\d.]+)", content)
+        rel_alt_match = re.search(r"rel_alt:\s*([-\d.]+)", content)
+
+        if lat_match and lon_match:
+            lat = float(lat_match.group(1))
+            lon = float(lon_match.group(1))
+            # Prefer absolute altitude, fall back to relative
+            alt = None
+            if abs_alt_match:
+                alt = float(abs_alt_match.group(1))
+            elif rel_alt_match:
+                alt = float(rel_alt_match.group(1))
+
+            if lat != 0 and lon != 0:  # Skip invalid 0,0 coordinates
+                gps = GPS(latitude=lat, longitude=lon, altitude=alt)
+
+        # Color mode (d_log, d_cinelike, etc.)
+        color_match = re.search(r"\[color_md\s*:\s*(\w+)\]", content)
+        if color_match:
+            color_mode = color_match.group(1)
+            color_space = ColorSpace(
+                transfer=color_mode,
+                detection_method=DetectionMethod.METADATA,
+            )
+
+        # Focal length and aperture
+        focal_match = re.search(r"\[focal_len:\s*([\d.]+)\]", content)
+        fnum_match = re.search(r"\[fnum:\s*([\d.]+)\]", content)
+
+        if focal_match or fnum_match:
+            lens = LensInfo(
+                focal_length=float(focal_match.group(1)) if focal_match else None,
+                aperture=float(fnum_match.group(1)) if fnum_match else None,
+                detection_method=DetectionMethod.METADATA,
+            )
+
+        if gps or color_space or lens:
+            return SidecarMetadata(gps=gps, color_space=color_space, lens=lens)
+        return None
+
+    except Exception as e:
+        logger.warning(f"Error reading DJI SRT sidecar {srt_path}: {e}")
         return None
