@@ -1,4 +1,4 @@
-"""OCR extraction using PaddleOCR."""
+"""OCR extraction using EasyOCR."""
 
 import logging
 import os
@@ -6,17 +6,40 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from polybos_engine.schemas import BoundingBox, OcrDetection, OcrResult, ScenesResult
 
 logger = logging.getLogger(__name__)
 
+# Singleton reader instance (lazy loaded)
+_ocr_reader: Any = None
+
+
+def _get_ocr_reader(languages: list[str] | None = None) -> Any:
+    """Get or create the EasyOCR reader (singleton)."""
+    global _ocr_reader
+
+    if _ocr_reader is not None:
+        return _ocr_reader
+
+    import easyocr  # type: ignore[import-not-found]
+
+    if languages is None:
+        languages = ["en", "no"]  # English + Norwegian
+
+    logger.info(f"Initializing EasyOCR with languages: {languages}")
+    _ocr_reader = easyocr.Reader(languages, gpu=False)  # CPU for stability
+
+    return _ocr_reader
+
 
 def extract_ocr(
     file_path: str,
     scenes: ScenesResult | None = None,
-    min_confidence: float = 0.7,
+    min_confidence: float = 0.5,
     sample_fps: float = 0.5,
+    languages: list[str] | None = None,
 ) -> OcrResult:
     """Extract text from video frames using OCR.
 
@@ -25,19 +48,17 @@ def extract_ocr(
         scenes: Optional scene detection results (sample at scene changes)
         min_confidence: Minimum detection confidence
         sample_fps: Fallback sample rate if no scenes
+        languages: OCR languages (default: ["en", "no"])
 
     Returns:
         OcrResult with detected text
     """
-    from paddleocr import PaddleOCR
-
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"Video file not found: {file_path}")
 
-    # Initialize OCR (use_angle_cls for rotated text)
-    logger.info("Initializing PaddleOCR")
-    ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
+    # Get OCR reader
+    reader = _get_ocr_reader(languages)
 
     # Create temp directory for frames
     temp_dir = tempfile.mkdtemp(prefix="polybos_ocr_")
@@ -68,19 +89,10 @@ def extract_ocr(
                 continue
 
             try:
-                # Run OCR
-                results = ocr.ocr(frame_path, cls=True)
+                # Run OCR - returns list of (bbox, text, confidence)
+                results = reader.readtext(frame_path)
 
-                if not results or not results[0]:
-                    continue
-
-                for line in results[0]:
-                    if not line:
-                        continue
-
-                    # line format: [[x1,y1], [x2,y1], [x2,y2], [x1,y2]], (text, confidence)
-                    bbox_points, (text, confidence) = line
-
+                for bbox_points, text, confidence in results:
                     if confidence < min_confidence:
                         continue
 
@@ -91,6 +103,7 @@ def extract_ocr(
                     seen_texts.add(text_key)
 
                     # Convert polygon to bounding box
+                    # bbox_points is [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
                     x_coords = [p[0] for p in bbox_points]
                     y_coords = [p[1] for p in bbox_points]
                     x = int(min(x_coords))
@@ -101,7 +114,7 @@ def extract_ocr(
                     detection = OcrDetection(
                         timestamp=timestamp,
                         text=text.strip(),
-                        confidence=round(confidence, 3),
+                        confidence=round(float(confidence), 3),
                         bbox=BoundingBox(x=x, y=y, width=width, height=height),
                     )
                     detections.append(detection)
@@ -130,7 +143,7 @@ def _extract_frame_at(video_path: str, output_dir: str, timestamp: float) -> str
         str(timestamp),
         "-i",
         video_path,
-        "-vframes",
+        "-frames:v",
         "1",
         "-q:v",
         "2",
