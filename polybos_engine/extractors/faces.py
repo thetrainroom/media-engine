@@ -1,5 +1,7 @@
 """Face detection using DeepFace with Facenet."""
 
+import base64
+import io
 import logging
 import os
 import shutil
@@ -10,6 +12,7 @@ from typing import TypeAlias
 
 import numpy as np
 from numpy.typing import NDArray
+from PIL import Image
 
 from polybos_engine.schemas import BoundingBox, FaceDetection, FacesResult, SceneDetection
 
@@ -21,22 +24,29 @@ logger = logging.getLogger(__name__)
 def extract_faces(
     file_path: str,
     scenes: list[SceneDetection] | None = None,
-    sample_fps: float = 1.0,
+    sample_fps: float = 0.5,  # Default: every 2 seconds
     min_face_size: int = 80,
     min_confidence: float = 0.9,
+    extract_images: bool = True,
+    face_image_size: int = 160,  # Output face thumbnail size
 ) -> FacesResult:
     """Extract faces from video file.
 
+    Sampling strategy:
+    - If scenes provided: sample at scene boundaries + every sample_interval within scenes
+    - If no scenes: sample at fixed fps
+
     Args:
         file_path: Path to video file
-        scenes: Optional scene boundaries. If provided, samples from each scene
-            instead of fixed fps. Recommended for better performance and accuracy.
-        sample_fps: Frame sampling rate (used only if scenes not provided)
+        scenes: Optional scene boundaries for smarter sampling
+        sample_fps: Frame sampling rate (e.g., 0.5 = every 2 seconds)
         min_face_size: Minimum face size in pixels
         min_confidence: Minimum detection confidence
+        extract_images: Whether to extract face thumbnail images
+        face_image_size: Size of output face thumbnails (square)
 
     Returns:
-        FacesResult with detected faces and embeddings
+        FacesResult with detected faces, embeddings, and optional images
     """
     from deepface import DeepFace
 
@@ -48,26 +58,31 @@ def extract_faces(
     temp_dir = tempfile.mkdtemp(prefix="polybos_faces_")
 
     try:
-        # Extract frames - scene-based or fps-based
+        # Calculate sample timestamps
         if scenes:
-            logger.info(f"Extracting frames from {len(scenes)} scenes")
-            frame_paths, timestamps = _extract_scene_frames(file_path, temp_dir, scenes)
+            timestamps = _get_sample_timestamps_from_scenes(scenes, sample_fps)
+            logger.info(f"Sampling {len(timestamps)} frames from {len(scenes)} scenes")
         else:
-            logger.info(f"Extracting frames at {sample_fps} fps")
-            frame_paths = _extract_frames(file_path, temp_dir, sample_fps)
-            timestamps = None  # Will be calculated from frame filename
+            # Get video duration and sample at fixed intervals
+            duration = _get_video_duration(file_path)
+            interval = 1.0 / sample_fps
+            timestamps = [float(t) for t in np.arange(0, duration, interval)]
+            logger.info(f"Sampling {len(timestamps)} frames at {sample_fps} fps")
+
+        # Extract frames at specific timestamps
+        frame_paths = _extract_frames_at_timestamps(file_path, temp_dir, timestamps)
 
         detections: list[FaceDetection] = []
         all_embeddings: list[Embedding] = []
 
-        for i, frame_path in enumerate(frame_paths):
-            # Get timestamp - from scene extraction or calculate from filename
-            if timestamps is not None:
-                timestamp = timestamps[i]
-            else:
-                timestamp = _get_timestamp_from_frame(frame_path, sample_fps)
+        for frame_path, timestamp in zip(frame_paths, timestamps):
+            if not os.path.exists(frame_path):
+                continue
 
             try:
+                # Load frame for cropping
+                frame_img = Image.open(frame_path)
+
                 # Detect faces in frame
                 faces = DeepFace.extract_faces(
                     img_path=frame_path,
@@ -91,13 +106,20 @@ def extract_faces(
                     if w < min_face_size or h < min_face_size:
                         continue
 
-                    # Generate embedding
+                    # Crop face with padding for better embedding
+                    face_crop = _crop_face_with_padding(frame_img, x, y, w, h, padding=0.3)
+
+                    # Generate embedding from cropped face
                     embedding: Embedding = []
                     try:
+                        # Save crop temporarily for DeepFace
+                        crop_path = os.path.join(temp_dir, "temp_crop.jpg")
+                        face_crop.save(crop_path, "JPEG", quality=95)
+
                         embedding_result = DeepFace.represent(
-                            img_path=frame_path,
+                            img_path=crop_path,
                             model_name="Facenet512",
-                            detector_backend="skip",  # Already have face region
+                            detector_backend="skip",  # Already cropped
                             enforce_detection=False,
                         )
 
@@ -108,11 +130,17 @@ def extract_faces(
                     except Exception as e:
                         logger.warning(f"Failed to generate embedding: {e}")
 
+                    # Create face thumbnail
+                    image_base64: str | None = None
+                    if extract_images:
+                        image_base64 = _encode_face_image(face_crop, face_image_size)
+
                     detection = FaceDetection(
-                        timestamp=timestamp,
+                        timestamp=round(float(timestamp), 2),
                         bbox=BoundingBox(x=x, y=y, width=w, height=h),
-                        confidence=confidence,
+                        confidence=round(float(confidence), 3),
                         embedding=embedding,
+                        image_base64=image_base64,
                     )
                     detections.append(detection)
 
@@ -123,15 +151,27 @@ def extract_faces(
                 logger.warning(f"Failed to process frame {frame_path}: {e}")
                 continue
 
-        # Estimate unique faces by clustering embeddings
-        unique_estimate = _estimate_unique_faces(all_embeddings)
+        # Get frame size for edge detection
+        frame_size: tuple[int, int] | None = None
+        if frame_paths and os.path.exists(frame_paths[0]):
+            with Image.open(frame_paths[0]) as img:
+                frame_size = img.size  # (width, height)
 
-        logger.info(f"Detected {len(detections)} faces, ~{unique_estimate} unique")
+        # Cluster faces and keep best per person
+        unique_faces, unique_estimate = _deduplicate_faces(
+            detections, all_embeddings, frame_size=frame_size
+        )
+
+        needs_review = sum(1 for f in unique_faces if f.needs_review)
+        logger.info(
+            f"Detected {len(detections)} faces, {unique_estimate} unique, "
+            f"{needs_review} need review"
+        )
 
         return FacesResult(
             count=len(detections),
             unique_estimate=unique_estimate,
-            detections=detections,
+            detections=unique_faces,  # Only return deduplicated faces
         )
 
     finally:
@@ -139,58 +179,59 @@ def extract_faces(
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _extract_frames(video_path: str, output_dir: str, fps: float) -> list[str]:
-    """Extract frames from video at specified fps."""
-    output_pattern = os.path.join(output_dir, "frame_%06d.jpg")
-
+def _get_video_duration(video_path: str) -> float:
+    """Get video duration in seconds using ffprobe."""
     cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
+        "ffprobe",
+        "-v", "quiet",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
         video_path,
-        "-vf",
-        f"fps={fps}",
-        "-q:v",
-        "2",
-        output_pattern,
     ]
-
-    try:
-        subprocess.run(cmd, capture_output=True, check=True)
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to extract frames: {e.stderr}")
-        raise RuntimeError(f"Failed to extract frames: {e.stderr}")
-
-    # Get list of extracted frames
-    frames = sorted(Path(output_dir).glob("frame_*.jpg"))
-    return [str(f) for f in frames]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return float(result.stdout.strip())
 
 
-def _extract_scene_frames(
-    video_path: str, output_dir: str, scenes: list[SceneDetection]
-) -> tuple[list[str], list[float]]:
-    """Extract one frame from the midpoint of each scene.
+def _get_sample_timestamps_from_scenes(
+    scenes: list[SceneDetection], sample_fps: float
+) -> list[float]:
+    """Generate sample timestamps from scenes.
 
-    Args:
-        video_path: Path to video file
-        output_dir: Directory to save frames
-        scenes: List of scene detections with start/end times
-
-    Returns:
-        Tuple of (frame_paths, timestamps)
+    Samples at:
+    - Start of each scene (scene boundary)
+    - Every 1/sample_fps seconds within each scene
     """
-    frame_paths: list[str] = []
     timestamps: list[float] = []
+    interval = 1.0 / sample_fps  # e.g., 0.5 fps = every 2 seconds
 
-    for i, scene in enumerate(scenes):
-        # Calculate midpoint of scene
-        midpoint = (scene.start + scene.end) / 2
-        output_path = os.path.join(output_dir, f"scene_{i:04d}.jpg")
+    for scene in scenes:
+        # Always sample at scene start
+        timestamps.append(scene.start)
+
+        # Sample within scene at regular intervals
+        t = scene.start + interval
+        while t < scene.end - 0.5:  # Stop 0.5s before scene end
+            timestamps.append(t)
+            t += interval
+
+    # Remove duplicates and sort
+    timestamps = sorted(set(timestamps))
+    return timestamps
+
+
+def _extract_frames_at_timestamps(
+    video_path: str, output_dir: str, timestamps: list[float]
+) -> list[str]:
+    """Extract frames at specific timestamps."""
+    frame_paths: list[str] = []
+
+    for i, ts in enumerate(timestamps):
+        output_path = os.path.join(output_dir, f"frame_{i:06d}.jpg")
 
         cmd = [
             "ffmpeg",
             "-y",
-            "-ss", str(midpoint),
+            "-ss", str(ts),
             "-i", video_path,
             "-frames:v", "1",
             "-q:v", "2",
@@ -199,60 +240,218 @@ def _extract_scene_frames(
 
         try:
             subprocess.run(cmd, capture_output=True, check=True)
-            if os.path.exists(output_path):
-                frame_paths.append(output_path)
-                timestamps.append(midpoint)
+            frame_paths.append(output_path)
         except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to extract frame for scene {i}: {e.stderr}")
+            logger.warning(f"Failed to extract frame at {ts}s: {e.stderr}")
+            frame_paths.append("")  # Placeholder to maintain index alignment
 
-    logger.info(f"Extracted {len(frame_paths)} scene frames")
-    return frame_paths, timestamps
-
-
-def _get_timestamp_from_frame(frame_path: str, fps: float) -> float:
-    """Get timestamp in seconds from frame filename."""
-    # Frame filename format: frame_000001.jpg (1-indexed)
-    filename = Path(frame_path).stem
-    frame_num = int(filename.split("_")[1])
-    return (frame_num - 1) / fps
+    return frame_paths
 
 
-def _estimate_unique_faces(
-    embeddings: list[Embedding], distance_threshold: float = 0.25
-) -> int:
-    """Estimate number of unique faces by clustering embeddings.
-
-    Uses Agglomerative Clustering with cosine distance, which is more robust
-    for face embeddings than Euclidean distance. FaceNet512 embeddings are
-    normalized, so cosine distance works well for comparing face similarity.
+def _crop_face_with_padding(
+    img: Image.Image, x: int, y: int, w: int, h: int, padding: float = 0.3
+) -> Image.Image:
+    """Crop face region with padding for better context.
 
     Args:
-        embeddings: List of face embeddings (512-dim vectors from FaceNet512)
-        distance_threshold: Maximum cosine distance to consider same person.
-            Lower = stricter matching. Typical range: 0.3-0.5 for FaceNet.
+        img: Source image
+        x, y, w, h: Face bounding box
+        padding: Padding as fraction of face size (0.3 = 30%)
 
     Returns:
-        Estimated number of unique faces
+        Cropped face image
     """
-    if not embeddings:
-        return 0
+    img_w, img_h = img.size
 
-    if len(embeddings) == 1:
-        return 1
+    # Add padding
+    pad_w = int(w * padding)
+    pad_h = int(h * padding)
 
-    from sklearn.cluster import AgglomerativeClustering
+    x1 = max(0, x - pad_w)
+    y1 = max(0, y - pad_h)
+    x2 = min(img_w, x + w + pad_w)
+    y2 = min(img_h, y + h + pad_h)
 
-    embeddings_array: NDArray[np.float64] = np.array(embeddings)
+    return img.crop((x1, y1, x2, y2))
 
-    # Agglomerative clustering with cosine distance
-    # distance_threshold determines when to stop merging clusters
-    clustering = AgglomerativeClustering(
-        n_clusters=None,  # type: ignore[arg-type]  # sklearn accepts None with distance_threshold
-        distance_threshold=distance_threshold,
-        metric="cosine",
-        linkage="average",
+
+def _encode_face_image(face_img: Image.Image, size: int) -> str:
+    """Resize and encode face image as base64 JPEG."""
+    # Resize to square thumbnail
+    face_img = face_img.resize((size, size), Image.Resampling.LANCZOS)
+
+    # Encode as JPEG base64
+    buffer = io.BytesIO()
+    face_img.save(buffer, format="JPEG", quality=85)
+    buffer.seek(0)
+
+    return base64.b64encode(buffer.read()).decode("utf-8")
+
+
+def _bbox_iou(box1: BoundingBox, box2: BoundingBox) -> float:
+    """Calculate Intersection over Union of two bounding boxes."""
+    x1 = max(box1.x, box2.x)
+    y1 = max(box1.y, box2.y)
+    x2 = min(box1.x + box1.width, box2.x + box2.width)
+    y2 = min(box1.y + box1.height, box2.y + box2.height)
+
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+
+    intersection = (x2 - x1) * (y2 - y1)
+    area1 = box1.width * box1.height
+    area2 = box2.width * box2.height
+    union = area1 + area2 - intersection
+
+    return intersection / union if union > 0 else 0.0
+
+
+def _embedding_distance(emb1: Embedding, emb2: Embedding) -> float:
+    """Compute cosine distance between two embeddings."""
+    a = np.array(emb1)
+    b = np.array(emb2)
+    return 1.0 - float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+
+def _find_position_match(
+    det: FaceDetection,
+    persons: list[list[tuple[int, Embedding]]],
+    detections: list[FaceDetection],
+    max_time_gap: float,
+    min_iou: float,
+) -> int | None:
+    """Find matching person by bbox position in recent frames."""
+    for person_idx, person_dets in enumerate(persons):
+        for prev_det_idx, _ in reversed(person_dets):
+            prev_det = detections[prev_det_idx]
+            time_diff = det.timestamp - prev_det.timestamp
+
+            if time_diff <= max_time_gap:
+                iou = _bbox_iou(det.bbox, prev_det.bbox)
+                if iou >= min_iou:
+                    return person_idx
+            else:
+                break  # Too old
+    return None
+
+
+def _find_embedding_match(
+    emb: Embedding,
+    persons: list[list[tuple[int, Embedding]]],
+    threshold: float,
+) -> int | None:
+    """Find matching person by embedding similarity."""
+    if not emb:
+        return None
+
+    best_dist = float("inf")
+    best_person = None
+
+    for person_idx, person_dets in enumerate(persons):
+        for _, prev_emb in person_dets:
+            if prev_emb:
+                dist = _embedding_distance(emb, prev_emb)
+                if dist < best_dist and dist < threshold:
+                    best_dist = dist
+                    best_person = person_idx
+
+    return best_person
+
+
+def _is_near_edge(bbox: BoundingBox, frame_width: int, frame_height: int, margin: float = 0.05) -> bool:
+    """Check if bbox is near frame edge (partially out of frame)."""
+    margin_x = int(frame_width * margin)
+    margin_y = int(frame_height * margin)
+
+    return (
+        bbox.x < margin_x or
+        bbox.y < margin_y or
+        bbox.x + bbox.width > frame_width - margin_x or
+        bbox.y + bbox.height > frame_height - margin_y
     )
 
-    labels = clustering.fit_predict(embeddings_array)
 
-    return len(set(labels))
+def _select_best_faces(
+    persons: list[list[tuple[int, Embedding]]],
+    detections: list[FaceDetection],
+    frame_size: tuple[int, int] | None = None,
+) -> list[FaceDetection]:
+    """Select best face (highest confidence) per person and flag uncertain ones."""
+    result: list[FaceDetection] = []
+
+    for person_dets in persons:
+        det_indices = [idx for idx, _ in person_dets]
+        best_idx = max(det_indices, key=lambda i: detections[i].confidence)
+        face = detections[best_idx].model_copy()
+
+        # Flag for review if uncertain
+        reasons: list[str] = []
+
+        # Check if near frame edge
+        if frame_size:
+            if _is_near_edge(face.bbox, frame_size[0], frame_size[1]):
+                reasons.append("near_edge")
+
+        # Check if low confidence
+        if face.confidence < 0.95:
+            reasons.append("low_confidence")
+
+        # Check if only one detection for this person (no tracking confirmation)
+        if len(person_dets) == 1:
+            reasons.append("single_detection")
+
+        if reasons:
+            face.needs_review = True
+            face.review_reason = ", ".join(reasons)
+
+        result.append(face)
+
+    result.sort(key=lambda d: d.timestamp)
+    return result
+
+
+def _deduplicate_faces(
+    detections: list[FaceDetection],
+    embeddings: list[Embedding],
+    frame_size: tuple[int, int] | None = None,
+    max_time_gap: float = 5.0,
+    min_iou: float = 0.2,
+    embedding_threshold: float = 0.5,
+) -> tuple[list[FaceDetection], int]:
+    """Deduplicate faces using position tracking + embedding fallback.
+
+    Strategy:
+    1. Try position-based matching (bbox overlap within time window)
+    2. Fall back to embedding similarity for non-adjacent detections
+    """
+    if not detections:
+        return [], 0
+
+    if len(detections) == 1:
+        # Single detection - flag for review
+        face = detections[0].model_copy()
+        face.needs_review = True
+        face.review_reason = "single_detection"
+        return [face], 1
+
+    # Sort by timestamp
+    sorted_dets = sorted(enumerate(detections), key=lambda x: x[1].timestamp)
+
+    # Track persons: list of (detection_idx, embedding) per person
+    persons: list[list[tuple[int, Embedding]]] = []
+
+    for det_idx, det in sorted_dets:
+        emb = embeddings[det_idx] if det_idx < len(embeddings) else []
+
+        # Try position match first, then embedding match
+        match = _find_position_match(det, persons, detections, max_time_gap, min_iou)
+        if match is None:
+            match = _find_embedding_match(emb, persons, embedding_threshold)
+
+        if match is not None:
+            persons[match].append((det_idx, emb))
+        else:
+            persons.append([(det_idx, emb)])
+
+    result = _select_best_faces(persons, detections, frame_size)
+    return result, len(persons)

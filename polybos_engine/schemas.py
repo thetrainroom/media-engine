@@ -204,6 +204,9 @@ class FaceDetection(BaseModel):
     bbox: BoundingBox
     confidence: float
     embedding: list[float]
+    image_base64: str | None = None  # Base64-encoded JPEG of cropped face
+    needs_review: bool = False  # Flag for uncertain detections
+    review_reason: str | None = None  # Why review is needed
 
 
 class FacesResult(BaseModel):

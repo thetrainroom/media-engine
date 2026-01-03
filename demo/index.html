@@ -452,9 +452,37 @@
                 document.getElementById('faceCount').textContent = count;
                 document.getElementById('faceCount').className = 'bg-blue-500 text-white text-xs px-2 py-1 rounded-full ml-2';
                 document.getElementById('facesSummary').textContent = count > 0 ? `${unique} unique` : '';
-                document.getElementById('facesGrid').innerHTML = count > 0
-                    ? `<p class="text-gray-400">${count} faces, ${unique} unique</p>`
-                    : '<p class="text-gray-500">No faces detected</p>';
+
+                if (count > 0 && r.faces?.detections) {
+                    const withImages = r.faces.detections.filter(d => d.image_base64);
+
+                    if (withImages.length > 0) {
+                        const facesHtml = withImages
+                            .slice(0, 20)
+                            .map(d => {
+                                const borderClass = d.needs_review
+                                    ? 'border-yellow-500'
+                                    : 'border-gray-600 hover:border-blue-400';
+                                const reviewIcon = d.needs_review
+                                    ? `<span class="absolute top-0 right-0 bg-yellow-500 text-black text-xs px-1 rounded">?</span>`
+                                    : '';
+                                return `
+                                    <div class="relative cursor-pointer" onclick="seekTo(${d.timestamp})">
+                                        <img src="data:image/jpeg;base64,${d.image_base64}"
+                                             class="w-16 h-16 rounded-lg object-cover border-2 ${borderClass}">
+                                        ${reviewIcon}
+                                        <span class="absolute bottom-0 right-0 bg-black/70 text-xs px-1 rounded">${formatTime(d.timestamp)}</span>
+                                    </div>
+                                `;
+                            }).join('');
+                        document.getElementById('facesGrid').innerHTML = facesHtml;
+                    } else {
+                        document.getElementById('facesGrid').innerHTML =
+                            `<p class="text-gray-400">${count} faces detected (loading images...)</p>`;
+                    }
+                } else {
+                    document.getElementById('facesGrid').innerHTML = '<p class="text-gray-500">No faces detected</p>';
+                }
             }
 
             // Objects
@@ -729,9 +757,33 @@
             document.getElementById('faceCount').textContent = faceCount;
             if (faceCount > 0) {
                 document.getElementById('facesSummary').textContent =
-                    `${uniqueFaces} unique person(s) estimated`;
-                document.getElementById('facesGrid').innerHTML =
-                    `<p class="text-gray-400">Detected ${faceCount} faces across ${uniqueFaces} unique individuals</p>`;
+                    `${uniqueFaces} unique person(s)`;
+                // Show face thumbnails (already deduplicated to ~3 per person)
+                const withImages = data.faces.detections.filter(d => d.image_base64);
+
+                if (withImages.length > 0) {
+                    const facesHtml = withImages.map(d => {
+                        const borderClass = d.needs_review
+                            ? 'border-yellow-500 hover:border-yellow-400'
+                            : 'border-gray-600 hover:border-blue-400';
+                        const reviewIcon = d.needs_review
+                            ? `<span class="absolute top-0 right-0 bg-yellow-500 text-black text-xs px-1 rounded" title="${d.review_reason || 'Needs review'}">?</span>`
+                            : '';
+                        return `
+                            <div class="relative group cursor-pointer" onclick="seekTo(${d.timestamp})">
+                                <img src="data:image/jpeg;base64,${d.image_base64}"
+                                     class="w-16 h-16 rounded-lg object-cover border-2 ${borderClass} transition"
+                                     title="@ ${formatTime(d.timestamp)} (${Math.round(d.confidence * 100)}%)${d.needs_review ? ' - ' + d.review_reason : ''}">
+                                ${reviewIcon}
+                                <span class="absolute bottom-0 right-0 bg-black/70 text-xs px-1 rounded">${formatTime(d.timestamp)}</span>
+                            </div>
+                        `;
+                    }).join('');
+                    document.getElementById('facesGrid').innerHTML = facesHtml;
+                } else {
+                    document.getElementById('facesGrid').innerHTML =
+                        `<p class="text-gray-400">Detected ${faceCount} faces</p>`;
+                }
             } else if (stepFailed('faces', data.faces)) {
                 document.getElementById('facesSummary').textContent = '';
                 document.getElementById('facesGrid').innerHTML =

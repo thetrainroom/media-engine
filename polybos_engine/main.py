@@ -147,7 +147,26 @@ def run_extraction_job(job_id: str, file_path: str) -> None:
         update_step("faces")
         try:
             faces = extract_faces(file_path)
-            complete_step("faces", faces.model_dump() if faces else None)
+            # Exclude embeddings from job results (too large for JSON polling)
+            if faces:
+                faces_data = {
+                    "count": faces.count,
+                    "unique_estimate": faces.unique_estimate,
+                    "detections": [
+                        {
+                            "timestamp": d.timestamp,
+                            "bbox": d.bbox.model_dump(),
+                            "confidence": d.confidence,
+                            "image_base64": d.image_base64,
+                            "needs_review": d.needs_review,
+                            "review_reason": d.review_reason,
+                        }
+                        for d in faces.detections
+                    ],
+                }
+                complete_step("faces", faces_data)
+            else:
+                complete_step("faces", None)
         except Exception as e:
             logger.warning(f"Faces failed: {e}")
             complete_step("faces", None)
@@ -156,7 +175,11 @@ def run_extraction_job(job_id: str, file_path: str) -> None:
         update_step("objects")
         try:
             objects = extract_objects(file_path)
-            complete_step("objects", objects.model_dump() if objects else None)
+            # Only include summary for job polling (full detections too large)
+            if objects:
+                complete_step("objects", {"summary": objects.summary})
+            else:
+                complete_step("objects", None)
         except Exception as e:
             logger.warning(f"Objects failed: {e}")
             complete_step("objects", None)
