@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polybos Media Engine - Demo</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        .drop-zone.dragover { border-color: #3b82f6; background-color: rgba(59, 130, 246, 0.1); }
+        .card { @apply bg-gray-800 rounded-xl p-6 shadow-lg; }
+        #map { height: 300px; border-radius: 0.75rem; }
+        .face-thumb { @apply w-20 h-20 rounded-lg object-cover border-2 border-gray-600; }
+        .segment { @apply p-3 rounded-lg bg-gray-700 hover:bg-gray-600 cursor-pointer transition; }
+        .spinner { animation: spin 1s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        .progress-step { @apply flex items-center gap-2 text-sm; }
+        .progress-step.done { @apply text-green-400; }
+        .progress-step.active { @apply text-blue-400; }
+        .progress-step.pending { @apply text-gray-500; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8 max-w-6xl">
+        <!-- Header -->
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">
+                Polybos Media Engine
+            </h1>
+            <p class="text-gray-400 mt-2">AI-powered video metadata extraction</p>
+        </header>
+
+        <!-- File Browser -->
+        <div id="uploadZone" class="mb-8">
+            <div class="card">
+                <div class="flex items-center justify-between mb-4">
+                    <label class="text-gray-400">Select a video file:</label>
+                    <span id="currentPath" class="text-xs text-gray-500 font-mono"></span>
+                </div>
+
+                <!-- Breadcrumb / Up button -->
+                <div id="browserNav" class="flex items-center gap-2 mb-3">
+                    <button id="upBtn" class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-sm transition flex items-center gap-1">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18"/>
+                        </svg>
+                        Up
+                    </button>
+                    <span id="breadcrumb" class="text-sm text-gray-400 font-mono truncate"></span>
+                </div>
+
+                <!-- File list -->
+                <div id="fileList" class="bg-gray-900 rounded-lg max-h-64 overflow-y-auto mb-4">
+                    <div class="p-4 text-gray-500 text-center">Loading...</div>
+                </div>
+
+                <!-- Selected file + Start button -->
+                <div id="selectedFile" class="hidden flex items-center gap-3 bg-gray-700 rounded-lg p-3">
+                    <svg class="w-6 h-6 text-blue-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                    <div class="flex-1 min-w-0">
+                        <div id="selectedName" class="font-medium truncate"></div>
+                        <div id="selectedSize" class="text-xs text-gray-400"></div>
+                    </div>
+                    <button id="extractBtn" class="bg-blue-600 hover:bg-blue-500 px-6 py-2 rounded-lg font-semibold transition whitespace-nowrap">
+                        Start Processing
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Processing State -->
+        <div id="processingState" class="hidden mb-8">
+            <div class="card">
+                <div class="flex items-center gap-4 mb-6">
+                    <div class="spinner w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full"></div>
+                    <div>
+                        <h3 class="text-lg font-semibold" id="processingTitle">Processing video...</h3>
+                        <p class="text-sm text-gray-400" id="processingFile"></p>
+                    </div>
+                </div>
+                <div id="progressSteps" class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div class="progress-step pending" data-step="metadata">
+                        <span class="step-icon">○</span> Metadata
+                    </div>
+                    <div class="progress-step pending" data-step="transcript">
+                        <span class="step-icon">○</span> Transcript
+                    </div>
+                    <div class="progress-step pending" data-step="scenes">
+                        <span class="step-icon">○</span> Scenes
+                    </div>
+                    <div class="progress-step pending" data-step="faces">
+                        <span class="step-icon">○</span> Faces
+                    </div>
+                    <div class="progress-step pending" data-step="objects">
+                        <span class="step-icon">○</span> Objects
+                    </div>
+                    <div class="progress-step pending" data-step="clip">
+                        <span class="step-icon">○</span> CLIP
+                    </div>
+                    <div class="progress-step pending" data-step="ocr">
+                        <span class="step-icon">○</span> OCR
+                    </div>
+                    <div class="progress-step pending" data-step="telemetry">
+                        <span class="step-icon">○</span> Telemetry
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Results -->
+        <div id="results" class="hidden space-y-6">
+            <!-- Top Row: Video + Metadata -->
+            <div class="grid md:grid-cols-2 gap-6">
+                <!-- Video Player -->
+                <div class="card">
+                    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        Video
+                    </h2>
+                    <video id="videoPlayer" controls class="w-full rounded-lg bg-black"></video>
+                </div>
+
+                <!-- Metadata Card -->
+                <div class="card">
+                    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                        </svg>
+                        Metadata
+                    </h2>
+                    <div id="metadataContent" class="space-y-3 text-sm">
+                        <!-- Filled by JS -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Map (if GPS available) -->
+            <div id="mapCard" class="card hidden">
+                <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
+                    </svg>
+                    Location
+                    <span id="locationName" class="text-gray-400 font-normal text-sm ml-2"></span>
+                </h2>
+                <div id="map"></div>
+            </div>
+
+            <!-- Transcript -->
+            <div id="transcriptCard" class="card">
+                <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"/>
+                    </svg>
+                    Transcript
+                    <span id="transcriptLang" class="text-gray-400 font-normal text-sm ml-2"></span>
+                </h2>
+                <div id="transcriptContent" class="space-y-2 max-h-64 overflow-y-auto">
+                    <p class="text-gray-500 text-center py-4">Waiting...</p>
+                </div>
+            </div>
+
+            <!-- Faces -->
+            <div id="facesCard" class="card">
+                <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/>
+                    </svg>
+                    Faces Detected
+                    <span id="faceCount" class="bg-gray-600 text-white text-xs px-2 py-1 rounded-full ml-2">-</span>
+                </h2>
+                <p id="facesSummary" class="text-gray-400 text-sm mb-4"></p>
+                <div id="facesGrid" class="flex flex-wrap gap-2">
+                    <p class="text-gray-500">Waiting...</p>
+                </div>
+            </div>
+
+            <!-- Objects -->
+            <div id="objectsCard" class="card">
+                <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                    </svg>
+                    Objects Detected
+                </h2>
+                <div id="objectsList" class="flex flex-wrap gap-2">
+                    <p class="text-gray-500">Waiting...</p>
+                </div>
+            </div>
+
+            <!-- OCR -->
+            <div id="ocrCard" class="card">
+                <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                    </svg>
+                    Text Detected (OCR)
+                </h2>
+                <div id="ocrContent" class="space-y-2">
+                    <p class="text-gray-500">Waiting...</p>
+                </div>
+            </div>
+
+            <!-- Scenes -->
+            <div id="scenesCard" class="card">
+                <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"/>
+                    </svg>
+                    Scenes
+                    <span id="sceneCount" class="bg-gray-600 text-white text-xs px-2 py-1 rounded-full ml-2">-</span>
+                </h2>
+                <div id="scenesTimeline" class="flex gap-1 h-8 rounded overflow-hidden bg-gray-700">
+                    <!-- Filled by JS -->
+                </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="card flex gap-4">
+                <button id="newExtractBtn" class="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg transition">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+                    </svg>
+                    New Extraction
+                </button>
+                <button id="toggleJson" class="flex items-center gap-2 text-gray-400 hover:text-white transition">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/>
+                    </svg>
+                    Show Raw JSON
+                </button>
+            </div>
+            <pre id="jsonOutput" class="hidden card text-xs bg-gray-900 p-4 overflow-auto max-h-96"></pre>
+        </div>
+
+        <!-- Error State -->
+        <div id="errorState" class="hidden">
+            <div class="card border border-red-500">
+                <h3 class="text-red-400 font-semibold mb-2">Error</h3>
+                <p id="errorMessage" class="text-gray-400"></p>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="mt-12 text-center text-gray-500 text-sm">
+            <p>Polybos Media Engine &bull; Open Source &bull;
+                <a href="https://github.com/polybos/media-engine" class="text-blue-400 hover:underline">GitHub</a>
+            </p>
+        </footer>
+    </div>
+
+    <script>
+        const API_URL = 'http://localhost:8001';
+        let map = null;
+        let currentFile = null;
+
+        // DOM Elements
+        const fileList = document.getElementById('fileList');
+        const upBtn = document.getElementById('upBtn');
+        const breadcrumb = document.getElementById('breadcrumb');
+        const selectedFile = document.getElementById('selectedFile');
+        const selectedName = document.getElementById('selectedName');
+        const selectedSize = document.getElementById('selectedSize');
+        const extractBtn = document.getElementById('extractBtn');
+        const uploadZone = document.getElementById('uploadZone');
+        const processingState = document.getElementById('processingState');
+        const results = document.getElementById('results');
+        const errorState = document.getElementById('errorState');
+
+        let currentDir = '/Volumes/Backup';
+        let selectedPath = null;
+
+        // Load initial directory
+        loadDirectory(currentDir);
+
+        // Up button
+        upBtn.addEventListener('click', () => {
+            const parent = currentDir.split('/').slice(0, -1).join('/') || '/';
+            loadDirectory(parent);
+        });
+
+        // Start processing button
+        extractBtn.addEventListener('click', () => {
+            if (selectedPath) handleExtract(selectedPath);
+        });
+
+        async function loadDirectory(path) {
+            fileList.innerHTML = '<div class="p-4 text-gray-500 text-center">Loading...</div>';
+            selectedFile.classList.add('hidden');
+            selectedPath = null;
+
+            try {
+                const response = await fetch(`${API_URL}/browse?path=${encodeURIComponent(path)}`);
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.detail);
+                }
+                const data = await response.json();
+                currentDir = data.path;
+                breadcrumb.textContent = currentDir;
+
+                if (data.items.length === 0) {
+                    fileList.innerHTML = '<div class="p-4 text-gray-500 text-center">No video files found</div>';
+                    return;
+                }
+
+                fileList.innerHTML = data.items.map(item => {
+                    if (item.type === 'directory') {
+                        return `
+                            <div class="flex items-center gap-3 px-4 py-2 hover:bg-gray-800 cursor-pointer border-b border-gray-800" onclick="loadDirectory('${item.path}')">
+                                <svg class="w-5 h-5 text-yellow-500" fill="currentColor" viewBox="0 0 20 20">
+                                    <path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/>
+                                </svg>
+                                <span>${item.name}</span>
+                            </div>
+                        `;
+                    } else {
+                        return `
+                            <div class="flex items-center gap-3 px-4 py-2 hover:bg-gray-800 cursor-pointer border-b border-gray-800" onclick="selectFile('${item.path}', '${item.name}', ${item.size_mb})">
+                                <svg class="w-5 h-5 text-blue-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                                </svg>
+                                <span class="flex-1">${item.name}</span>
+                                <span class="text-xs text-gray-500">${item.size_mb} MB</span>
+                            </div>
+                        `;
+                    }
+                }).join('');
+            } catch (error) {
+                fileList.innerHTML = `<div class="p-4 text-red-400 text-center">${error.message}</div>`;
+            }
+        }
+
+        function selectFile(path, name, sizeMb) {
+            selectedPath = path;
+            selectedName.textContent = name;
+            selectedSize.textContent = `${sizeMb} MB`;
+            selectedFile.classList.remove('hidden');
+        }
+
+        // Extract from server path
+        async function handleExtract(filePath) {
+            const filename = filePath.split('/').pop();
+            showProcessing(filename);
+
+            try {
+                // Create job
+                const createResponse = await fetch(`${API_URL}/jobs`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ file: filePath })
+                });
+
+                if (!createResponse.ok) {
+                    const err = await createResponse.json();
+                    throw new Error(err.detail || `API error: ${createResponse.status}`);
+                }
+
+                const { job_id } = await createResponse.json();
+                console.log('Job created:', job_id);
+
+                // Poll for status
+                let jobData = null;
+                while (true) {
+                    const statusResponse = await fetch(`${API_URL}/jobs/${job_id}`);
+                    if (!statusResponse.ok) {
+                        throw new Error('Failed to get job status');
+                    }
+
+                    jobData = await statusResponse.json();
+
+                    // Update UI with current progress
+                    updateJobProgress(jobData);
+
+                    if (jobData.status === 'completed' || jobData.status === 'failed') {
+                        break;
+                    }
+
+                    // Wait before next poll
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                }
+
+                if (jobData.status === 'failed') {
+                    throw new Error(jobData.error || 'Extraction failed');
+                }
+
+                // Show results
+                showJobResults(jobData, filePath);
+
+            } catch (error) {
+                showError(error.message);
+            }
+        }
+
+        function updateJobProgress(jobData) {
+            // Mark completed steps
+            for (const step of jobData.completed_steps) {
+                updateStep(step, 'done');
+            }
+
+            // Mark current step as active
+            if (jobData.current_step) {
+                updateStep(jobData.current_step, 'active');
+            }
+
+            // Update results display as they come in
+            const r = jobData.results;
+
+            // Metadata
+            if (r.metadata && !document.getElementById('metadataContent').dataset.filled) {
+                updateMetadataCard(r.metadata);
+            }
+
+            // Transcript
+            if (jobData.completed_steps.includes('transcript')) {
+                if (r.transcript && r.transcript.segments && r.transcript.segments.length > 0) {
+                    document.getElementById('transcriptLang').textContent =
+                        `${r.transcript.language.toUpperCase()} (${Math.round(r.transcript.confidence * 100)}%)`;
+                    document.getElementById('transcriptContent').innerHTML = r.transcript.segments.map(seg =>
+                        `<div class="segment"><span class="text-xs text-gray-500">${formatTime(seg.start)}</span> ${seg.text}</div>`
+                    ).join('');
+                } else {
+                    document.getElementById('transcriptContent').innerHTML =
+                        '<p class="text-yellow-500 text-center py-4">No audio track</p>';
+                }
+            }
+
+            // Scenes
+            if (jobData.completed_steps.includes('scenes')) {
+                const count = r.scenes?.count || 0;
+                document.getElementById('sceneCount').textContent = count;
+                document.getElementById('sceneCount').className = 'bg-purple-500 text-white text-xs px-2 py-1 rounded-full ml-2';
+                if (count === 0) {
+                    document.getElementById('scenesTimeline').innerHTML =
+                        '<div class="bg-blue-500 w-full h-full" title="Single scene"></div>';
+                }
+            }
+
+            // Faces
+            if (jobData.completed_steps.includes('faces')) {
+                const count = r.faces?.count || 0;
+                const unique = r.faces?.unique_estimate || 0;
+                document.getElementById('faceCount').textContent = count;
+                document.getElementById('faceCount').className = 'bg-blue-500 text-white text-xs px-2 py-1 rounded-full ml-2';
+                document.getElementById('facesSummary').textContent = count > 0 ? `${unique} unique` : '';
+                document.getElementById('facesGrid').innerHTML = count > 0
+                    ? `<p class="text-gray-400">${count} faces, ${unique} unique</p>`
+                    : '<p class="text-gray-500">No faces detected</p>';
+            }
+
+            // Objects
+            if (jobData.completed_steps.includes('objects') && r.objects?.summary) {
+                const entries = Object.entries(r.objects.summary);
+                if (entries.length > 0) {
+                    document.getElementById('objectsList').innerHTML = entries
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([label, count]) =>
+                            `<span class="bg-gray-700 px-3 py-1 rounded-full text-sm">${label} <span class="text-gray-400">${count}</span></span>`
+                        ).join('');
+                } else {
+                    document.getElementById('objectsList').innerHTML = '<p class="text-gray-500">No objects detected</p>';
+                }
+            } else if (jobData.completed_steps.includes('objects')) {
+                document.getElementById('objectsList').innerHTML = '<p class="text-gray-500">No objects detected</p>';
+            }
+
+            // OCR
+            if (jobData.completed_steps.includes('ocr') && r.ocr?.detections?.length > 0) {
+                const texts = [...new Set(r.ocr.detections.map(d => d.text))].slice(0, 10);
+                document.getElementById('ocrContent').innerHTML = texts.map(t =>
+                    `<div class="bg-gray-700 px-3 py-2 rounded text-sm">"${t}"</div>`
+                ).join('');
+            } else if (jobData.completed_steps.includes('ocr')) {
+                document.getElementById('ocrContent').innerHTML = '<p class="text-gray-500">No text detected</p>';
+            }
+        }
+
+        function updateMetadataCard(metadata) {
+            const container = document.getElementById('metadataContent');
+
+            let html = `
+                <div class="flex justify-between"><span class="text-gray-400">Duration</span><span>${formatDuration(metadata.duration)}</span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Resolution</span><span>${metadata.resolution.width}x${metadata.resolution.height}</span></div>
+                <div class="flex justify-between"><span class="text-gray-400">FPS</span><span>${metadata.fps}</span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Codec</span><span>${metadata.codec.video}</span></div>
+            `;
+            if (metadata.device) {
+                html += `<div class="flex justify-between"><span class="text-gray-400">Device</span><span>${metadata.device.make} ${metadata.device.model || ''}</span></div>`;
+            }
+            container.innerHTML = html;
+            container.dataset.filled = 'true';
+        }
+
+        function showJobResults(jobData, filePath) {
+            // Convert job results to the format showResults expects
+            const data = {
+                metadata: jobData.results.metadata,
+                transcript: jobData.results.transcript,
+                faces: jobData.results.faces,
+                scenes: jobData.results.scenes,
+                objects: jobData.results.objects,
+                ocr: jobData.results.ocr,
+            };
+
+            // Track which steps completed (even if null result)
+            const completedSteps = new Set(jobData.completed_steps);
+
+            const telemetry = jobData.results.telemetry;
+            showResults(data, telemetry, filePath, completedSteps);
+        }
+
+        function showProcessing(filename) {
+            uploadZone.classList.add('hidden');
+            processingState.classList.remove('hidden');
+            results.classList.remove('hidden');  // Show results layout immediately
+            errorState.classList.add('hidden');
+            document.getElementById('processingFile').textContent = filename;
+
+            // Reset all cards to waiting state
+            document.getElementById('metadataContent').innerHTML = '<p class="text-gray-500">Waiting...</p>';
+            document.getElementById('metadataContent').dataset.filled = '';
+            document.getElementById('transcriptContent').innerHTML = '<p class="text-gray-500 text-center py-4">Waiting...</p>';
+            document.getElementById('transcriptLang').textContent = '';
+            document.getElementById('faceCount').textContent = '-';
+            document.getElementById('faceCount').className = 'bg-gray-600 text-white text-xs px-2 py-1 rounded-full ml-2';
+            document.getElementById('facesSummary').textContent = '';
+            document.getElementById('facesGrid').innerHTML = '<p class="text-gray-500">Waiting...</p>';
+            document.getElementById('objectsList').innerHTML = '<p class="text-gray-500">Waiting...</p>';
+            document.getElementById('ocrContent').innerHTML = '<p class="text-gray-500">Waiting...</p>';
+            document.getElementById('sceneCount').textContent = '-';
+            document.getElementById('sceneCount').className = 'bg-gray-600 text-white text-xs px-2 py-1 rounded-full ml-2';
+            document.getElementById('scenesTimeline').innerHTML = '';
+            document.getElementById('mapCard').classList.add('hidden');
+
+            // Reset steps
+            document.querySelectorAll('.progress-step').forEach(el => {
+                el.classList.remove('done', 'active');
+                el.classList.add('pending');
+                el.querySelector('.step-icon').textContent = '○';
+            });
+        }
+
+        function hideProcessing() {
+            uploadZone.classList.remove('hidden');
+            processingState.classList.add('hidden');
+        }
+
+        function updateStep(step, state) {
+            const el = document.querySelector(`[data-step="${step}"]`);
+            if (!el) return;
+
+            el.classList.remove('pending', 'active', 'done');
+            el.classList.add(state);
+
+            if (state === 'done') {
+                el.querySelector('.step-icon').textContent = '✓';
+            } else if (state === 'active') {
+                el.querySelector('.step-icon').textContent = '◉';
+            }
+        }
+
+        function markAllStepsDone() {
+            ['metadata', 'transcript', 'scenes', 'faces', 'objects', 'clip', 'ocr', 'telemetry'].forEach(s => {
+                updateStep(s, 'done');
+            });
+        }
+
+        function showError(message) {
+            processingState.classList.add('hidden');
+            errorState.classList.remove('hidden');
+            document.getElementById('errorMessage').textContent = message;
+        }
+
+        function showResults(data, telemetry, filePath, completedSteps = new Set()) {
+            processingState.classList.add('hidden');
+            results.classList.remove('hidden');
+
+            // Helper to check if step failed (completed but no result)
+            const stepFailed = (step, result) => completedSteps.has(step) && !result;
+
+            // Video player
+            document.getElementById('videoPlayer').src = `file://${filePath}`;
+
+            // Metadata
+            const meta = data.metadata;
+            const device = meta.device;
+            let metaHtml = `
+                <div class="flex justify-between"><span class="text-gray-400">Duration</span><span>${formatDuration(meta.duration)}</span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Resolution</span><span>${meta.resolution.width}x${meta.resolution.height}</span></div>
+                <div class="flex justify-between"><span class="text-gray-400">FPS</span><span>${meta.fps}</span></div>
+                <div class="flex justify-between"><span class="text-gray-400">Codec</span><span>${meta.codec.video}</span></div>
+            `;
+            if (device) {
+                metaHtml += `<div class="flex justify-between"><span class="text-gray-400">Device</span><span>${device.make} ${device.model || ''}</span></div>`;
+                if (device.type) {
+                    metaHtml += `<div class="flex justify-between"><span class="text-gray-400">Type</span><span class="capitalize">${device.type}</span></div>`;
+                }
+            }
+            if (meta.color_space) {
+                metaHtml += `<div class="flex justify-between"><span class="text-gray-400">Color</span><span>${meta.color_space.transfer || ''} ${meta.color_space.primaries || ''}</span></div>`;
+            }
+            if (meta.lens) {
+                metaHtml += `<div class="flex justify-between"><span class="text-gray-400">Lens</span><span>${meta.lens.focal_length}mm f/${meta.lens.aperture}</span></div>`;
+            }
+            document.getElementById('metadataContent').innerHTML = metaHtml;
+
+            // Map
+            if (meta.gps) {
+                document.getElementById('mapCard').classList.remove('hidden');
+                if (map) map.remove();
+                map = L.map('map').setView([meta.gps.latitude, meta.gps.longitude], 13);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    attribution: '© OpenStreetMap'
+                }).addTo(map);
+                L.marker([meta.gps.latitude, meta.gps.longitude]).addTo(map);
+
+                // Add flight path if telemetry available
+                if (telemetry && telemetry.points && telemetry.points.length > 1) {
+                    const coords = telemetry.points
+                        .filter(p => p.latitude !== 0 && p.longitude !== 0)
+                        .map(p => [p.latitude, p.longitude]);
+                    if (coords.length > 1) {
+                        L.polyline(coords, {color: '#3b82f6', weight: 3}).addTo(map);
+                        map.fitBounds(coords);
+                    }
+                }
+            }
+
+            // Transcript
+            if (data.transcript && data.transcript.segments && data.transcript.segments.length > 0) {
+                document.getElementById('transcriptLang').textContent =
+                    `${data.transcript.language.toUpperCase()} (${Math.round(data.transcript.confidence * 100)}% confidence)`;
+
+                const speakerColors = ['text-blue-400', 'text-green-400', 'text-yellow-400', 'text-pink-400'];
+                let transcriptHtml = data.transcript.segments.map(seg => {
+                    const speaker = seg.speaker || 'Speaker';
+                    const colorClass = speakerColors[parseInt(speaker.replace(/\D/g, '') || '0') % speakerColors.length];
+                    return `
+                        <div class="segment" onclick="seekTo(${seg.start})">
+                            <span class="text-xs text-gray-500">${formatTime(seg.start)}</span>
+                            <span class="${colorClass} text-xs ml-2">${speaker}</span>
+                            <p class="mt-1">${seg.text}</p>
+                        </div>
+                    `;
+                }).join('');
+                document.getElementById('transcriptContent').innerHTML = transcriptHtml;
+            } else if (stepFailed('transcript', data.transcript)) {
+                document.getElementById('transcriptLang').textContent = '';
+                document.getElementById('transcriptContent').innerHTML =
+                    '<p class="text-yellow-500 text-center py-4">⚠ Failed - No audio track in video</p>';
+            } else {
+                document.getElementById('transcriptLang').textContent = '';
+                document.getElementById('transcriptContent').innerHTML =
+                    '<p class="text-gray-500 text-center py-4">No speech detected</p>';
+            }
+
+            // Faces
+            const faceCount = data.faces?.count || 0;
+            const uniqueFaces = data.faces?.unique_estimate || 0;
+            document.getElementById('faceCount').textContent = faceCount;
+            if (faceCount > 0) {
+                document.getElementById('facesSummary').textContent =
+                    `${uniqueFaces} unique person(s) estimated`;
+                document.getElementById('facesGrid').innerHTML =
+                    `<p class="text-gray-400">Detected ${faceCount} faces across ${uniqueFaces} unique individuals</p>`;
+            } else if (stepFailed('faces', data.faces)) {
+                document.getElementById('facesSummary').textContent = '';
+                document.getElementById('facesGrid').innerHTML =
+                    '<p class="text-yellow-500">⚠ Face detection failed</p>';
+            } else {
+                document.getElementById('facesSummary').textContent = '';
+                document.getElementById('facesGrid').innerHTML =
+                    '<p class="text-gray-500">No faces detected in video</p>';
+            }
+
+            // Objects
+            if (data.objects && data.objects.summary && Object.keys(data.objects.summary).length > 0) {
+                const objHtml = Object.entries(data.objects.summary)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([label, count]) =>
+                        `<span class="bg-gray-700 px-3 py-1 rounded-full text-sm">${label} <span class="text-gray-400">${count}</span></span>`
+                    ).join('');
+                document.getElementById('objectsList').innerHTML = objHtml;
+            } else if (stepFailed('objects', data.objects)) {
+                document.getElementById('objectsList').innerHTML =
+                    '<p class="text-yellow-500">⚠ Object detection failed</p>';
+            } else {
+                document.getElementById('objectsList').innerHTML =
+                    '<p class="text-gray-500">No objects detected</p>';
+            }
+
+            // OCR
+            if (data.ocr && data.ocr.detections && data.ocr.detections.length > 0) {
+                const uniqueTexts = [...new Set(data.ocr.detections.map(d => d.text))];
+                const ocrHtml = uniqueTexts.slice(0, 10).map(text =>
+                    `<div class="bg-gray-700 px-3 py-2 rounded text-sm">"${text}"</div>`
+                ).join('');
+                document.getElementById('ocrContent').innerHTML = ocrHtml;
+            } else if (stepFailed('ocr', data.ocr)) {
+                document.getElementById('ocrContent').innerHTML =
+                    '<p class="text-yellow-500">⚠ OCR failed</p>';
+            } else {
+                document.getElementById('ocrContent').innerHTML =
+                    '<p class="text-gray-500">No text detected in video</p>';
+            }
+
+            // Scenes
+            const sceneCount = data.scenes?.count || 0;
+            document.getElementById('sceneCount').textContent = sceneCount;
+            if (sceneCount > 0) {
+                const colors = ['bg-blue-500', 'bg-purple-500', 'bg-green-500', 'bg-yellow-500', 'bg-pink-500', 'bg-cyan-500'];
+                const totalDuration = meta.duration;
+                const scenesHtml = data.scenes.detections.map((scene, i) => {
+                    const width = (scene.duration / totalDuration * 100).toFixed(2);
+                    return `<div class="${colors[i % colors.length]} cursor-pointer hover:opacity-80"
+                                style="width: ${width}%"
+                                title="Scene ${i + 1}: ${formatTime(scene.start)} - ${formatTime(scene.end)}"
+                                onclick="seekTo(${scene.start})"></div>`;
+                }).join('');
+                document.getElementById('scenesTimeline').innerHTML = scenesHtml;
+            } else if (stepFailed('scenes', data.scenes)) {
+                document.getElementById('scenesTimeline').innerHTML =
+                    '<div class="text-yellow-500 text-sm py-2">⚠ Scene detection failed</div>';
+            } else {
+                document.getElementById('scenesTimeline').innerHTML =
+                    '<div class="bg-blue-500 w-full h-full" title="Single continuous scene"></div>';
+            }
+
+            // JSON toggle
+            document.getElementById('jsonOutput').textContent = JSON.stringify(data, null, 2);
+            document.getElementById('toggleJson').onclick = () => {
+                document.getElementById('jsonOutput').classList.toggle('hidden');
+            };
+
+            // New extraction button
+            document.getElementById('newExtractBtn').onclick = () => {
+                results.classList.add('hidden');
+                uploadZone.classList.remove('hidden');
+                pathInput.value = '';
+                pathInput.focus();
+            };
+        }
+
+        function formatDuration(seconds) {
+            const m = Math.floor(seconds / 60);
+            const s = Math.floor(seconds % 60);
+            return `${m}:${s.toString().padStart(2, '0')}`;
+        }
+
+        function formatTime(seconds) {
+            const m = Math.floor(seconds / 60);
+            const s = Math.floor(seconds % 60);
+            return `${m}:${s.toString().padStart(2, '0')}`;
+        }
+
+        function seekTo(time) {
+            const video = document.getElementById('videoPlayer');
+            video.currentTime = time;
+            video.play();
+        }
+    </script>
+</body>
+</html>
