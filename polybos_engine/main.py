@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -409,6 +410,85 @@ async def browse_directory(
         "parent": str(dir_path.parent) if dir_path.parent != dir_path else None,
         "items": items,
     }
+
+
+# MIME types for video files
+VIDEO_MIME_TYPES = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".mxf": "video/mxf",
+    ".avi": "video/x-msvideo",
+    ".mkv": "video/x-matroska",
+    ".m4v": "video/x-m4v",
+    ".webm": "video/webm",
+}
+
+
+@app.get("/video")
+async def stream_video(
+    request: Request,
+    file: str = Query(..., description="Path to video file"),
+):
+    """Stream a video file with range request support for seeking."""
+    file_path = Path(file)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {file}")
+    if not file_path.is_file():
+        raise HTTPException(status_code=400, detail=f"Not a file: {file}")
+
+    file_size = file_path.stat().st_size
+    content_type = VIDEO_MIME_TYPES.get(file_path.suffix.lower(), "video/mp4")
+
+    # Parse range header for seeking support
+    range_header = request.headers.get("range")
+
+    if range_header:
+        # Parse "bytes=start-end" format
+        range_match = range_header.replace("bytes=", "").split("-")
+        start = int(range_match[0]) if range_match[0] else 0
+        end = int(range_match[1]) if range_match[1] else file_size - 1
+
+        # Clamp end to file size
+        end = min(end, file_size - 1)
+        chunk_size = end - start + 1
+
+        def iter_file():
+            with open(file_path, "rb") as f:
+                f.seek(start)
+                remaining = chunk_size
+                while remaining > 0:
+                    read_size = min(remaining, 1024 * 1024)  # 1MB chunks
+                    data = f.read(read_size)
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        return StreamingResponse(
+            iter_file(),
+            status_code=206,  # Partial Content
+            media_type=content_type,
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(chunk_size),
+            },
+        )
+    else:
+        # No range header - stream entire file
+        def iter_file():
+            with open(file_path, "rb") as f:
+                while chunk := f.read(1024 * 1024):
+                    yield chunk
+
+        return StreamingResponse(
+            iter_file(),
+            media_type=content_type,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(file_size),
+            },
+        )
 
 
 @app.get("/extractors")

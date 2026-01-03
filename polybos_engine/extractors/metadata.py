@@ -13,6 +13,7 @@ from typing import Any
 
 from polybos_engine.schemas import (
     GPS,
+    AudioInfo,
     Codec,
     ColorSpace,
     DetectionMethod,
@@ -21,6 +22,7 @@ from polybos_engine.schemas import (
     MediaDeviceType,
     Metadata,
     Resolution,
+    VideoCodec,
 )
 
 
@@ -83,11 +85,33 @@ def extract_metadata(file_path: str) -> Metadata:
         height=video_stream.get("height", 0) if video_stream else 0,
     )
 
-    # Extract codec info
+    # Extract codec info (simple for backwards compat)
     codec = Codec(
         video=video_stream.get("codec_name") if video_stream else None,
         audio=audio_stream.get("codec_name") if audio_stream else None,
     )
+
+    # Extract detailed video codec info
+    video_codec: VideoCodec | None = None
+    if video_stream:
+        video_codec = VideoCodec(
+            name=video_stream.get("codec_name", "unknown"),
+            profile=video_stream.get("profile"),
+            bit_depth=_parse_bit_depth(video_stream),
+            pixel_format=video_stream.get("pix_fmt"),
+        )
+
+    # Extract audio info
+    audio_info: AudioInfo | None = None
+    if audio_stream:
+        audio_info = AudioInfo(
+            codec=audio_stream.get("codec_name"),
+            sample_rate=int(audio_stream.get("sample_rate", 0)) or None,
+            channels=audio_stream.get("channels"),
+            bit_depth=audio_stream.get("bits_per_sample")
+            or audio_stream.get("bits_per_raw_sample"),
+            bitrate=int(audio_stream.get("bit_rate", 0)) or None,
+        )
 
     # Extract fps
     fps = _parse_fps(video_stream) if video_stream else None
@@ -103,6 +127,9 @@ def extract_metadata(file_path: str) -> Metadata:
 
     # Extract creation time
     created_at = _parse_creation_time(tags)
+
+    # Extract timecode
+    timecode = _extract_timecode(tags, video_stream)
 
     # Extract device info
     device = _extract_device_info(tags)
@@ -138,9 +165,12 @@ def extract_metadata(file_path: str) -> Metadata:
         duration=duration,
         resolution=resolution,
         codec=codec,
+        video_codec=video_codec,
+        audio=audio_info,
         fps=fps,
         bitrate=bitrate,
         file_size=file_size,
+        timecode=timecode,
         created_at=created_at,
         device=device,
         gps=gps,
@@ -188,6 +218,65 @@ def _parse_fps(video_stream: dict[str, Any]) -> float | None:
         num, den = fps_str.split("/")
         if int(den) != 0:
             return round(int(num) / int(den), 2)
+
+    return None
+
+
+def _parse_bit_depth(video_stream: dict[str, Any]) -> int | None:
+    """Parse bit depth from video stream.
+
+    ffprobe provides this in several places:
+    - bits_per_raw_sample (most accurate for ProRes, HEVC)
+    - pix_fmt suffix (e.g., yuv420p10le -> 10)
+    """
+    # Try bits_per_raw_sample first
+    bits = video_stream.get("bits_per_raw_sample")
+    if bits:
+        try:
+            return int(bits)
+        except ValueError:
+            pass
+
+    # Parse from pixel format (e.g., yuv420p10le, yuv422p10be)
+    pix_fmt = video_stream.get("pix_fmt", "")
+    if pix_fmt:
+        # Look for bit depth in format name
+        match = re.search(r"(\d+)(le|be)?$", pix_fmt)
+        if match:
+            depth = int(match.group(1))
+            if depth in (10, 12, 16):  # Common HDR/ProRes depths
+                return depth
+        # Default formats without suffix are 8-bit
+        if pix_fmt in ("yuv420p", "yuv422p", "yuv444p", "yuvj420p", "yuvj422p"):
+            return 8
+
+    return None
+
+
+def _extract_timecode(
+    tags: dict[str, str], video_stream: dict[str, Any] | None
+) -> str | None:
+    """Extract start timecode from metadata.
+
+    Timecode can be in:
+    - format tags: timecode
+    - video stream tags: timecode
+    - QuickTime: com.apple.quicktime.timecode.sample
+    """
+    tags_lower = {k.lower(): v for k, v in tags.items()}
+
+    # Check format-level tags
+    tc = tags_lower.get("timecode")
+    if tc:
+        return tc
+
+    # Check video stream tags
+    if video_stream:
+        stream_tags = video_stream.get("tags", {})
+        stream_tags_lower = {k.lower(): v for k, v in stream_tags.items()}
+        tc = stream_tags_lower.get("timecode")
+        if tc:
+            return tc
 
     return None
 

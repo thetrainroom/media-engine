@@ -486,18 +486,97 @@
 
         function updateMetadataCard(metadata) {
             const container = document.getElementById('metadataContent');
-
-            let html = `
-                <div class="flex justify-between"><span class="text-gray-400">Duration</span><span>${formatDuration(metadata.duration)}</span></div>
-                <div class="flex justify-between"><span class="text-gray-400">Resolution</span><span>${metadata.resolution.width}x${metadata.resolution.height}</span></div>
-                <div class="flex justify-between"><span class="text-gray-400">FPS</span><span>${metadata.fps}</span></div>
-                <div class="flex justify-between"><span class="text-gray-400">Codec</span><span>${metadata.codec.video}</span></div>
-            `;
-            if (metadata.device) {
-                html += `<div class="flex justify-between"><span class="text-gray-400">Device</span><span>${metadata.device.make} ${metadata.device.model || ''}</span></div>`;
-            }
+            let html = buildMetadataHtml(metadata);
             container.innerHTML = html;
             container.dataset.filled = 'true';
+        }
+
+        function buildMetadataHtml(meta) {
+            let html = '';
+
+            // Basic info
+            html += `<div class="flex justify-between"><span class="text-gray-400">Duration</span><span>${formatDuration(meta.duration)}</span></div>`;
+            html += `<div class="flex justify-between"><span class="text-gray-400">Resolution</span><span>${meta.resolution.width}x${meta.resolution.height}</span></div>`;
+            if (meta.fps) html += `<div class="flex justify-between"><span class="text-gray-400">FPS</span><span>${meta.fps}</span></div>`;
+
+            // Video codec details
+            if (meta.video_codec) {
+                let codecInfo = meta.video_codec.name;
+                if (meta.video_codec.profile) codecInfo += ` (${meta.video_codec.profile})`;
+                if (meta.video_codec.bit_depth) codecInfo += ` ${meta.video_codec.bit_depth}-bit`;
+                html += `<div class="flex justify-between"><span class="text-gray-400">Video Codec</span><span>${codecInfo}</span></div>`;
+                if (meta.video_codec.pixel_format) {
+                    html += `<div class="flex justify-between"><span class="text-gray-400">Pixel Format</span><span>${meta.video_codec.pixel_format}</span></div>`;
+                }
+            } else if (meta.codec?.video) {
+                html += `<div class="flex justify-between"><span class="text-gray-400">Video Codec</span><span>${meta.codec.video}</span></div>`;
+            }
+
+            // Audio info
+            if (meta.audio) {
+                let audioInfo = meta.audio.codec || 'unknown';
+                if (meta.audio.bit_depth) audioInfo += ` ${meta.audio.bit_depth}-bit`;
+                html += `<div class="flex justify-between"><span class="text-gray-400">Audio Codec</span><span>${audioInfo}</span></div>`;
+                if (meta.audio.sample_rate) {
+                    html += `<div class="flex justify-between"><span class="text-gray-400">Sample Rate</span><span>${(meta.audio.sample_rate / 1000).toFixed(1)} kHz</span></div>`;
+                }
+                if (meta.audio.channels) {
+                    const chLabel = meta.audio.channels === 1 ? 'Mono' : meta.audio.channels === 2 ? 'Stereo' : `${meta.audio.channels} channels`;
+                    html += `<div class="flex justify-between"><span class="text-gray-400">Audio Channels</span><span>${chLabel}</span></div>`;
+                }
+            }
+
+            // File info
+            if (meta.file_size) {
+                html += `<div class="flex justify-between"><span class="text-gray-400">File Size</span><span>${formatFileSize(meta.file_size)}</span></div>`;
+            }
+            if (meta.bitrate) {
+                html += `<div class="flex justify-between"><span class="text-gray-400">Data Rate</span><span>${(meta.bitrate / 1_000_000).toFixed(1)} Mbps</span></div>`;
+            }
+            if (meta.timecode) {
+                html += `<div class="flex justify-between"><span class="text-gray-400">Timecode</span><span class="font-mono">${meta.timecode}</span></div>`;
+            }
+
+            // Device info
+            if (meta.device) {
+                html += `<div class="flex justify-between"><span class="text-gray-400">Device</span><span>${meta.device.make} ${meta.device.model || ''}</span></div>`;
+                if (meta.device.type && meta.device.type !== 'unknown') {
+                    html += `<div class="flex justify-between"><span class="text-gray-400">Type</span><span class="capitalize">${meta.device.type}</span></div>`;
+                }
+            }
+
+            // Color space
+            if (meta.color_space) {
+                let colorInfo = [meta.color_space.transfer, meta.color_space.primaries].filter(Boolean).join(' / ');
+                if (colorInfo) {
+                    html += `<div class="flex justify-between"><span class="text-gray-400">Color Space</span><span>${colorInfo}</span></div>`;
+                }
+            }
+
+            // Lens info
+            if (meta.lens) {
+                let lensInfo = '';
+                if (meta.lens.focal_length) lensInfo += `${meta.lens.focal_length}mm`;
+                if (meta.lens.focal_length_35mm) lensInfo += ` (${meta.lens.focal_length_35mm}mm equiv)`;
+                if (meta.lens.aperture) lensInfo += ` f/${meta.lens.aperture}`;
+                if (lensInfo) {
+                    html += `<div class="flex justify-between"><span class="text-gray-400">Lens</span><span>${lensInfo}</span></div>`;
+                }
+            }
+
+            // Shot type
+            if (meta.shot_type) {
+                html += `<div class="flex justify-between"><span class="text-gray-400">Shot Type</span><span class="capitalize">${meta.shot_type.primary} (${Math.round(meta.shot_type.confidence * 100)}%)</span></div>`;
+            }
+
+            return html;
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+            return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
         }
 
         function showJobResults(jobData, filePath) {
@@ -587,31 +666,12 @@
             // Helper to check if step failed (completed but no result)
             const stepFailed = (step, result) => completedSteps.has(step) && !result;
 
-            // Video player
-            document.getElementById('videoPlayer').src = `file://${filePath}`;
+            // Video player - use streaming endpoint
+            document.getElementById('videoPlayer').src = `${API_URL}/video?file=${encodeURIComponent(filePath)}`;
 
             // Metadata
             const meta = data.metadata;
-            const device = meta.device;
-            let metaHtml = `
-                <div class="flex justify-between"><span class="text-gray-400">Duration</span><span>${formatDuration(meta.duration)}</span></div>
-                <div class="flex justify-between"><span class="text-gray-400">Resolution</span><span>${meta.resolution.width}x${meta.resolution.height}</span></div>
-                <div class="flex justify-between"><span class="text-gray-400">FPS</span><span>${meta.fps}</span></div>
-                <div class="flex justify-between"><span class="text-gray-400">Codec</span><span>${meta.codec.video}</span></div>
-            `;
-            if (device) {
-                metaHtml += `<div class="flex justify-between"><span class="text-gray-400">Device</span><span>${device.make} ${device.model || ''}</span></div>`;
-                if (device.type) {
-                    metaHtml += `<div class="flex justify-between"><span class="text-gray-400">Type</span><span class="capitalize">${device.type}</span></div>`;
-                }
-            }
-            if (meta.color_space) {
-                metaHtml += `<div class="flex justify-between"><span class="text-gray-400">Color</span><span>${meta.color_space.transfer || ''} ${meta.color_space.primaries || ''}</span></div>`;
-            }
-            if (meta.lens) {
-                metaHtml += `<div class="flex justify-between"><span class="text-gray-400">Lens</span><span>${meta.lens.focal_length}mm f/${meta.lens.aperture}</span></div>`;
-            }
-            document.getElementById('metadataContent').innerHTML = metaHtml;
+            document.getElementById('metadataContent').innerHTML = buildMetadataHtml(meta);
 
             // Map
             if (meta.gps) {

@@ -66,8 +66,27 @@ class Resolution(BaseModel):
     height: int
 
 
+class VideoCodec(BaseModel):
+    """Video codec details."""
+
+    name: str  # h264, hevc, prores, etc.
+    profile: str | None = None  # Main 10, High, etc.
+    bit_depth: int | None = None  # 8, 10, 12
+    pixel_format: str | None = None  # yuv420p, yuv420p10le, etc.
+
+
+class AudioInfo(BaseModel):
+    """Audio stream information."""
+
+    codec: str | None = None  # pcm_s16be, aac, etc.
+    sample_rate: int | None = None  # 48000, 44100, etc.
+    channels: int | None = None  # 1, 2, 6, etc.
+    bit_depth: int | None = None  # 16, 24, 32
+    bitrate: int | None = None  # Audio bitrate in bps
+
+
 class Codec(BaseModel):
-    """Video/audio codec info."""
+    """Video/audio codec info (simplified for backwards compat)."""
 
     video: str | None = None
     audio: str | None = None
@@ -126,10 +145,13 @@ class Metadata(BaseModel):
 
     duration: float
     resolution: Resolution
-    codec: Codec
+    codec: Codec  # Simplified codec info for backwards compat
+    video_codec: VideoCodec | None = None  # Detailed video codec info
+    audio: AudioInfo | None = None  # Audio stream info
     fps: float | None = None
-    bitrate: int | None = None
-    file_size: int
+    bitrate: int | None = None  # Total bitrate in bps
+    file_size: int  # File size in bytes
+    timecode: str | None = None  # Start timecode (e.g., "01:15:07:17")
     created_at: datetime | None = None
     device: DeviceInfo | None = None
     gps: GPS | None = None
