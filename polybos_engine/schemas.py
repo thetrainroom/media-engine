@@ -57,6 +57,10 @@ class ExtractRequest(BaseModel):
 
     # Object detection
     object_detector: str | None = Field(default=None, description="Object detector: 'yolo' or 'qwen'")
+    context: dict[str, str] | None = Field(
+        default=None,
+        description="Context for VLM (person, location, topic, language, etc.)"
+    )
 
 
 # === Response Models ===

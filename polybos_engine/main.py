@@ -148,7 +148,12 @@ def _build_qwen_context(results: dict[str, Any]) -> dict[str, str] | None:
     return context if context else None
 
 
-def run_extraction_job(job_id: str, file_path: str, object_detector: str | None = None) -> None:
+def run_extraction_job(
+    job_id: str,
+    file_path: str,
+    object_detector: str | None = None,
+    context: dict[str, str] | None = None,
+) -> None:
     """Run extraction in background thread."""
     settings = get_settings()
     # Use request parameter or fall back to settings
@@ -249,10 +254,10 @@ def run_extraction_job(job_id: str, file_path: str, object_detector: str | None 
 
             # Use configured detector (yolo or qwen)
             if detector == "qwen":
-                # Build context from earlier extraction results
-                context = _build_qwen_context(jobs[job_id].results)
+                # Use passed context, or build from earlier extraction results
+                qwen_context = context or _build_qwen_context(jobs[job_id].results)
                 objects = extract_objects_qwen(
-                    file_path, scenes=scene_detections, context=context
+                    file_path, scenes=scene_detections, context=qwen_context
                 )
             else:
                 objects = extract_objects(file_path, scenes=scene_detections)
@@ -331,7 +336,7 @@ async def create_job(request: ExtractRequest) -> dict[str, str]:
     # Start background thread
     thread = threading.Thread(
         target=run_extraction_job,
-        args=(job_id, request.file, request.object_detector)
+        args=(job_id, request.file, request.object_detector, request.context)
     )
     thread.start()
 
