@@ -112,11 +112,12 @@ The metadata extractor automatically detects camera/device type:
 
 | Manufacturer | Models | Features |
 |--------------|--------|----------|
-| **DJI** | Mavic, Air, Mini, Pocket, Osmo | GPS from SRT, color profiles |
+| **DJI** | Mavic, Air, Mini, Pocket, Osmo, Action | GPS from SRT, color profiles |
 | **Sony** | PXW, FX, Alpha, ZV series | XML sidecar, S-Log, GPS |
 | **Canon** | Cinema EOS, EOS R | XML sidecar |
 | **Apple** | iPhone, iPad | QuickTime metadata, GPS |
 | **Blackmagic** | Pocket Cinema Camera | ProApps metadata |
+| **Insta360** | X3, X4, ONE RS, GO 3 | 360 video detection |
 | **FFmpeg** | OBS, Handbrake, etc. | Encoder detection |
 
 Adding new manufacturers is easy - create a module in `polybos_engine/extractors/metadata/`.
