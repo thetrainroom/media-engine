@@ -5,6 +5,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+from polybos_engine.config import ObjectDetector
+
 
 class MediaDeviceType(StrEnum):
     """Type of media capture device."""
@@ -56,7 +58,7 @@ class ExtractRequest(BaseModel):
     object_sample_fps: float = Field(default=2.0, description="Object detection sample rate")
 
     # Object detection
-    object_detector: str | None = Field(default=None, description="Object detector: 'yolo' or 'qwen'")
+    object_detector: ObjectDetector | None = Field(default=None, description="Object detector backend")
     context: dict[str, str] | None = Field(
         default=None,
         description="Context for VLM (person, location, topic, language, etc.)"

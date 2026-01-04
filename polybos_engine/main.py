@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from polybos_engine import __version__
-from polybos_engine.config import get_settings
+from polybos_engine.config import get_settings, ObjectDetector
 from polybos_engine.extractors import (
     extract_clip,
     extract_faces,
@@ -151,7 +151,7 @@ def _build_qwen_context(results: dict[str, Any]) -> dict[str, str] | None:
 def run_extraction_job(
     job_id: str,
     file_path: str,
-    object_detector: str | None = None,
+    object_detector: ObjectDetector | None = None,
     context: dict[str, str] | None = None,
 ) -> None:
     """Run extraction in background thread."""
@@ -253,7 +253,7 @@ def run_extraction_job(
                 ]
 
             # Use configured detector (yolo or qwen)
-            if detector == "qwen":
+            if detector == ObjectDetector.QWEN:
                 # Use passed context, or build from earlier extraction results
                 qwen_context = context or _build_qwen_context(jobs[job_id].results)
                 objects = extract_objects_qwen(
@@ -445,10 +445,12 @@ async def extract(request: ExtractRequest):
     if not request.skip_objects:
         try:
             scene_detections = scenes.detections if scenes else None
-            if settings.object_detector == "qwen":
+            detector = request.object_detector or settings.object_detector
+            if detector == ObjectDetector.QWEN:
                 objects = extract_objects_qwen(
                     request.file,
                     scenes=scene_detections,
+                    context=request.context,
                 )
                 logger.info(f"Qwen object detection: {len(objects.summary)} types")
             else:

@@ -35,8 +35,7 @@ DEFAULT_FACE_SAMPLE_FPS = 1.0
 DEFAULT_OBJECT_SAMPLE_FPS = 2.0
 DEFAULT_MIN_FACE_SIZE = 80
 
-# Object detection
-DEFAULT_OBJECT_DETECTOR = "yolo"
+# Object detection (Qwen VLM)
 DEFAULT_QWEN_MODEL = "Qwen/Qwen2-VL-2B-Instruct"
 DEFAULT_QWEN_FRAMES_PER_SCENE = 1
 
@@ -110,7 +109,7 @@ class Settings(BaseModel):
     min_face_size: int = DEFAULT_MIN_FACE_SIZE
 
     # Object detection settings
-    object_detector: str = DEFAULT_OBJECT_DETECTOR  # "yolo" or "qwen"
+    object_detector: ObjectDetector = ObjectDetector.YOLO
     qwen_model: str = DEFAULT_QWEN_MODEL
     qwen_frames_per_scene: int = DEFAULT_QWEN_FRAMES_PER_SCENE
 
