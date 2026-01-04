@@ -7,17 +7,17 @@ Handles Blackmagic cameras:
 - Production Camera 4K
 
 Detection methods:
+- .braw extension (Blackmagic RAW)
 - com.apple.proapps.manufacturer: "Blackmagic Design"
 - com.apple.proapps.cameraname: camera model
 - com.apple.proapps.customgamma: LOG profile
 
-Blackmagic uses Apple ProApps metadata tags:
-- com.apple.proapps.manufacturer
-- com.apple.proapps.cameraname
-- com.apple.proapps.customgamma (e.g., "com.blackmagic-design.productioncamera4k.filmlog")
+Note: Full BRAW metadata requires Blackmagic RAW SDK (free download).
+Without it, we detect the format but limited metadata from ffprobe.
 """
 
 import logging
+from pathlib import Path
 from typing import Any
 
 from polybos_engine.schemas import (
@@ -55,6 +55,12 @@ class BlackmagicExtractor:
 
     def detect(self, probe_data: dict[str, Any], file_path: str) -> bool:
         """Detect if file is from a Blackmagic camera."""
+        path = Path(file_path)
+
+        # Check for BRAW extension
+        if path.suffix.lower() == ".braw":
+            return True
+
         tags = get_tags_lower(probe_data)
 
         # Check ProApps manufacturer tag
@@ -78,6 +84,7 @@ class BlackmagicExtractor:
         self, probe_data: dict[str, Any], file_path: str, base_metadata: Metadata
     ) -> Metadata:
         """Extract Blackmagic-specific metadata."""
+        path = Path(file_path)
         tags = get_tags_lower(probe_data)
 
         # Get device info from ProApps tags (preferred)
@@ -91,11 +98,18 @@ class BlackmagicExtractor:
             or tags.get("model")
         )
 
+        # BRAW files are from cinema cameras
+        is_braw = path.suffix.lower() == ".braw"
+        if is_braw:
+            logger.info(
+                "BRAW detected. For full metadata, install Blackmagic RAW SDK."
+            )
+
         device = DeviceInfo(
             make=manufacturer,
             model=camera_name,
             software=tags.get("software"),
-            type=MediaDeviceType.CAMERA,
+            type=MediaDeviceType.CINEMA_CAMERA,
             detection_method=DetectionMethod.METADATA,
             confidence=1.0,
         )

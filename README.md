@@ -116,7 +116,9 @@ The metadata extractor automatically detects camera/device type:
 | **Sony** | PXW, FX, Alpha, ZV series | XML sidecar, S-Log, GPS |
 | **Canon** | Cinema EOS, EOS R | XML sidecar |
 | **Apple** | iPhone, iPad | QuickTime metadata, GPS |
-| **Blackmagic** | Pocket Cinema Camera | ProApps metadata |
+| **Blackmagic** | Pocket, URSA, BRAW | ProApps metadata, BRAW detection |
+| **RED** | DSMC2, V-RAPTOR, KOMODO | R3D native support |
+| **ARRI** | ALEXA, ALEXA Mini, AMIRA | ARRIRAW detection |
 | **Insta360** | X3, X4, ONE RS, GO 3 | 360 video detection |
 | **FFmpeg** | OBS, Handbrake, etc. | Encoder detection |
 

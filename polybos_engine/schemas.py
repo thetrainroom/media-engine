@@ -13,6 +13,7 @@ class MediaDeviceType(StrEnum):
 
     DRONE = "drone"
     CAMERA = "camera"
+    CINEMA_CAMERA = "cinema_camera"
     PHONE = "phone"
     ACTION_CAMERA = "action_camera"
     CAMERA_360 = "360_camera"
