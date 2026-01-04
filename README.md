@@ -35,9 +35,29 @@ Mount your media folder:
 MEDIA_PATH=/path/to/videos docker compose up -d
 ```
 
-For NVIDIA GPU support:
+For NVIDIA GPU support (uses `Dockerfile.cuda`):
 ```bash
 docker compose --profile gpu up -d
+```
+
+Or build manually:
+```bash
+docker build -f Dockerfile.cuda -t polybos-gpu .
+docker run -p 8000:8000 --gpus all -v /path/to/media:/media polybos-gpu
+```
+
+### Apple Silicon (Recommended: Native)
+
+Docker on macOS runs in a Linux VM without Metal/MPS access. For GPU acceleration on Apple Silicon, run natively:
+
+```bash
+pip install -e ".[mlx]"
+uvicorn polybos_engine.main:app --port 8000
+```
+
+A `Dockerfile.mlx` is provided for consistency, but will use CPU in Docker:
+```bash
+docker compose --profile mlx up -d
 ```
 
 ### Local Installation
