@@ -78,13 +78,25 @@ polybos_engine/
 ├── schemas.py           # Pydantic request/response models
 └── extractors/
     ├── __init__.py      # Exports all extractors
-    ├── metadata.py      # ffprobe wrapper (duration, resolution, codec, GPS, device)
+    ├── metadata/        # Modular per-manufacturer metadata extraction
+    │   ├── __init__.py  # Main entry point
+    │   ├── base.py      # Common utilities (ffprobe, GPS parsing)
+    │   ├── registry.py  # Extractor registration and detection
+    │   ├── dji.py       # DJI drones and cameras
+    │   ├── sony.py      # Sony cameras with XML sidecar
+    │   ├── canon.py     # Canon cameras
+    │   ├── apple.py     # iPhone/iPad
+    │   ├── blackmagic.py # Blackmagic cameras
+    │   ├── ffmpeg.py    # FFmpeg-encoded files (OBS, etc.)
+    │   └── generic.py   # Fallback for unknown devices
     ├── transcribe.py    # Whisper with MLX/CUDA/CPU backends
     ├── faces.py         # DeepFace + Facenet for detection and embeddings
     ├── scenes.py        # PySceneDetect ContentDetector
     ├── objects.py       # YOLO object detection
+    ├── objects_qwen.py  # Qwen VLM for scene descriptions
     ├── clip.py          # OpenCLIP/MLX-CLIP embeddings
     ├── ocr.py           # PaddleOCR text extraction
+    ├── motion.py        # Camera motion analysis (optical flow)
     └── shot_type.py     # CLIP-based shot classification
 ```
 
