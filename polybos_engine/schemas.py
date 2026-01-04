@@ -52,7 +52,7 @@ class ExtractRequest(BaseModel):
     enable_motion: bool = Field(default=False, description="Analyze camera motion")
 
     # Whisper options
-    whisper_model: str = Field(default="large-v3", description="Whisper model size")
+    whisper_model: str = Field(default="auto", description="Whisper model size (auto=VRAM-based)")
     language: str | None = Field(default=None, description="Force language (skip detection)")
     fallback_language: str = Field(
         default="en", description="Fallback for short clips with low confidence"

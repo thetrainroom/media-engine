@@ -172,7 +172,8 @@ def run_extraction_job(
     # Use proxy file for frame-based analysis if provided
     analysis_file = request.proxy_file or request.file
     # Use request parameter or fall back to settings
-    detector = request.object_detector or settings.object_detector
+    # Resolve object detector (handles "auto")
+    detector = request.object_detector or settings.get_object_detector()
     context = request.context
 
     def update_step(step: str) -> None:
@@ -494,7 +495,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
     processes all files, then is unloaded before the next model.
     """
     settings = get_settings()
-    detector = request.object_detector or settings.object_detector
+    # Resolve object detector (handles "auto")
+    detector = request.object_detector or settings.get_object_detector()
 
     def update_batch_progress(extractor: str, message: str, current: int | None = None, total: int | None = None) -> None:
         with batch_jobs_lock:
@@ -689,6 +691,17 @@ async def health():
     )
 
 
+@app.get("/hardware")
+async def hardware():
+    """Get hardware capabilities and auto-selected models.
+
+    Returns information about available GPU/VRAM and which models
+    will be used with the current "auto" settings.
+    """
+    from polybos_engine.config import get_vram_summary
+    return get_vram_summary()
+
+
 @app.post("/extract", response_model=ExtractResponse)
 async def extract(request: ExtractRequest):
     """Extract metadata and features from video file.
@@ -821,7 +834,8 @@ async def extract(request: ExtractRequest):
     if request.enable_objects:
         try:
             scene_detections = scenes.detections if scenes else None
-            detector = request.object_detector or settings.object_detector
+            # Resolve object detector (handles "auto")
+            detector = request.object_detector or settings.get_object_detector()
             if detector == ObjectDetector.QWEN:
                 # Use timestamps from request (frontend decides)
                 timestamps = request.qwen_timestamps
@@ -1031,7 +1045,7 @@ async def list_extractors():
                 "name": "objects",
                 "description": "Object detection (YOLO or Qwen2-VL)",
                 "enable_flag": "enable_objects",
-                "backend": get_settings().object_detector,
+                "backend": str(get_settings().get_object_detector()),
             },
             {
                 "name": "clip",

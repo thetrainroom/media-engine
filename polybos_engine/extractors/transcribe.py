@@ -434,7 +434,7 @@ def extract_audio(video_path: str, output_path: str | None = None) -> str:
 
 def extract_transcript(
     file_path: str,
-    model: str = "large-v3",
+    model: str = "auto",
     language: str | None = None,
     fallback_language: str = "en",
     language_hints: list[str] | None = None,
@@ -445,7 +445,7 @@ def extract_transcript(
 
     Args:
         file_path: Path to video file
-        model: Whisper model name
+        model: Whisper model name ("auto" = select based on VRAM)
         language: Force language (skip detection)
         fallback_language: Fallback for short clips with low confidence
         language_hints: Language hints (not directly used by Whisper, but logged)
@@ -454,6 +454,12 @@ def extract_transcript(
     Returns:
         Transcript object with segments and metadata
     """
+    # Resolve "auto" model based on available VRAM
+    if model == "auto":
+        from polybos_engine.config import get_auto_whisper_model
+        model = get_auto_whisper_model()
+        logger.info(f"Auto-selected Whisper model: {model}")
+
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"Video file not found: {file_path}")

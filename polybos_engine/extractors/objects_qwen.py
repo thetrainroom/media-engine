@@ -202,7 +202,8 @@ def extract_objects_qwen(
     from qwen_vl_utils import process_vision_info
 
     settings = get_settings()
-    model_name = model_name or settings.qwen_model
+    # Resolve model name (handles "auto")
+    model_name = model_name or settings.get_qwen_model()
 
     path = Path(file_path)
     if not path.exists():
