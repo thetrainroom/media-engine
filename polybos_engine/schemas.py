@@ -34,13 +34,14 @@ class ExtractRequest(BaseModel):
 
     file: str = Field(..., description="Path to video file")
 
-    # Extractor toggles
-    skip_transcript: bool = Field(default=False, description="Skip transcription")
-    skip_faces: bool = Field(default=False, description="Skip face detection")
-    skip_scenes: bool = Field(default=False, description="Skip scene detection")
-    skip_objects: bool = Field(default=False, description="Skip object detection")
-    skip_clip: bool = Field(default=False, description="Skip CLIP embeddings")
-    skip_ocr: bool = Field(default=False, description="Skip OCR")
+    # Extractor toggles (all default to off)
+    enable_metadata: bool = Field(default=False, description="Extract metadata")
+    enable_transcript: bool = Field(default=False, description="Extract transcript")
+    enable_faces: bool = Field(default=False, description="Extract faces")
+    enable_scenes: bool = Field(default=False, description="Extract scenes")
+    enable_objects: bool = Field(default=False, description="Extract objects")
+    enable_clip: bool = Field(default=False, description="Extract CLIP embeddings")
+    enable_ocr: bool = Field(default=False, description="Extract OCR")
 
     # Whisper options
     whisper_model: str = Field(default="large-v3", description="Whisper model size")
@@ -346,7 +347,7 @@ class ExtractResponse(BaseModel):
     api_version: str
     engine_version: str
 
-    metadata: Metadata
+    metadata: Metadata | None = None
     transcript: Transcript | None = None
     faces: FacesResult | None = None
     scenes: ScenesResult | None = None

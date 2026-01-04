@@ -60,26 +60,34 @@ For description:
 
     context_section = "\n".join(context_lines)
 
+    # Get person name for explicit instruction
+    person_name = context.get("person", "")
+    person_instruction = ""
+    if person_name:
+        person_instruction = f"""
+IMPORTANT: The person in this video is "{person_name}".
+- In objects list: use "{person_name}" instead of "person", "man", or "woman"
+- In description: refer to them as "{person_name}", not "a person" or "someone"
+"""
+
     # Enhanced prompt with context
     return f"""{context_section}
-
+{person_instruction}
 Analyze this image and return JSON with two fields:
 {{
   "objects": ["object1", "object2", ...],
-  "description": "A brief 1-2 sentence description using the context above."
+  "description": "A brief 1-2 sentence description."
 }}
 
 For objects:
 - Be specific (e.g., "scissors" not "tool", "remote control" not "device")
-- Use the person's name if identified above instead of "man" or "woman"
+- IMPORTANT: If a person is visible and identified above, use their name (e.g., "{person_name}" not "person")
 - Only list clearly visible objects
-- For miniatures/models, prefix with "model " (e.g., "model train")
 
 For description:
-- Use the person's name if known
+- Use the person's name "{person_name}" if they are visible
 - Reference the known location/activity if relevant
-- Describe what's happening in the scene
-- Be specific and contextual"""
+- Describe what's happening in the scene"""
 
 
 def extract_objects_qwen(

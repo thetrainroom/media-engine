@@ -150,14 +150,14 @@ def _build_qwen_context(results: dict[str, Any]) -> dict[str, str] | None:
 
 def run_extraction_job(
     job_id: str,
-    file_path: str,
-    object_detector: ObjectDetector | None = None,
-    context: dict[str, str] | None = None,
+    request: ExtractRequest,
 ) -> None:
     """Run extraction in background thread."""
     settings = get_settings()
+    file_path = request.file
     # Use request parameter or fall back to settings
-    detector = object_detector or settings.object_detector
+    detector = request.object_detector or settings.object_detector
+    context = request.context
 
     def update_step(step: str) -> None:
         with jobs_lock:
@@ -177,120 +177,147 @@ def run_extraction_job(
             jobs[job_id].status = "running"
 
         # Metadata
-        update_step("metadata")
-        metadata = extract_metadata(file_path)
-        complete_step("metadata", metadata.model_dump())
+        if request.enable_metadata:
+            update_step("metadata")
+            metadata = extract_metadata(file_path)
+            complete_step("metadata", metadata.model_dump())
 
-        # Shot type
-        update_step("shot_type")
-        try:
-            from polybos_engine.extractors.shot_type import detect_shot_type
-            shot_type = detect_shot_type(file_path)
-            if shot_type:
-                complete_step("shot_type", shot_type.model_dump())
-            else:
+            # Shot type (part of metadata)
+            update_step("shot_type")
+            try:
+                from polybos_engine.extractors.shot_type import detect_shot_type
+                shot_type = detect_shot_type(file_path)
+                if shot_type:
+                    complete_step("shot_type", shot_type.model_dump())
+                else:
+                    complete_step("shot_type", None)
+            except Exception as e:
+                logger.warning(f"Shot type failed: {e}")
                 complete_step("shot_type", None)
-        except Exception as e:
-            logger.warning(f"Shot type failed: {e}")
-            complete_step("shot_type", None)
 
         # Scenes
-        update_step("scenes")
-        try:
-            scenes = extract_scenes(file_path)
-            complete_step("scenes", scenes.model_dump() if scenes else None)
-        except Exception as e:
-            logger.warning(f"Scenes failed: {e}")
-            complete_step("scenes", None)
+        if request.enable_scenes:
+            update_step("scenes")
+            try:
+                scenes = extract_scenes(file_path)
+                complete_step("scenes", scenes.model_dump() if scenes else None)
+            except Exception as e:
+                logger.warning(f"Scenes failed: {e}")
+                complete_step("scenes", None)
 
         # Transcript
-        update_step("transcript")
-        try:
-            transcript = extract_transcript(file_path)
-            complete_step("transcript", transcript.model_dump() if transcript else None)
-        except Exception as e:
-            logger.warning(f"Transcript failed: {e}")
-            complete_step("transcript", None)
+        if request.enable_transcript:
+            update_step("transcript")
+            try:
+                transcript = extract_transcript(
+                    file_path,
+                    model=request.whisper_model,
+                    language=request.language,
+                    fallback_language=request.fallback_language,
+                    language_hints=request.language_hints,
+                    context_hint=request.context_hint,
+                )
+                complete_step("transcript", transcript.model_dump() if transcript else None)
+            except Exception as e:
+                logger.warning(f"Transcript failed: {e}")
+                complete_step("transcript", None)
 
         # Faces
-        update_step("faces")
-        try:
-            faces = extract_faces(file_path)
-            # Exclude embeddings from job results (too large for JSON polling)
-            if faces:
-                faces_data = {
-                    "count": faces.count,
-                    "unique_estimate": faces.unique_estimate,
-                    "detections": [
-                        {
-                            "timestamp": d.timestamp,
-                            "bbox": d.bbox.model_dump(),
-                            "confidence": d.confidence,
-                            "image_base64": d.image_base64,
-                            "needs_review": d.needs_review,
-                            "review_reason": d.review_reason,
-                        }
-                        for d in faces.detections
-                    ],
-                }
-                complete_step("faces", faces_data)
-            else:
+        if request.enable_faces:
+            update_step("faces")
+            try:
+                # Get scene detections for better sampling
+                scene_detections = None
+                if "scenes" in jobs[job_id].results and jobs[job_id].results["scenes"]:
+                    from polybos_engine.schemas import SceneDetection
+                    scene_data = jobs[job_id].results["scenes"]
+                    scene_detections = [
+                        SceneDetection(**s) for s in scene_data.get("detections", [])
+                    ]
+
+                faces = extract_faces(
+                    file_path,
+                    scenes=scene_detections,
+                    sample_fps=request.face_sample_fps,
+                )
+                # Exclude embeddings from job results (too large for JSON polling)
+                if faces:
+                    faces_data = {
+                        "count": faces.count,
+                        "unique_estimate": faces.unique_estimate,
+                        "detections": [
+                            {
+                                "timestamp": d.timestamp,
+                                "bbox": d.bbox.model_dump(),
+                                "confidence": d.confidence,
+                                "image_base64": d.image_base64,
+                                "needs_review": d.needs_review,
+                                "review_reason": d.review_reason,
+                            }
+                            for d in faces.detections
+                        ],
+                    }
+                    complete_step("faces", faces_data)
+                else:
+                    complete_step("faces", None)
+            except Exception as e:
+                logger.warning(f"Faces failed: {e}")
                 complete_step("faces", None)
-        except Exception as e:
-            logger.warning(f"Faces failed: {e}")
-            complete_step("faces", None)
 
         # Objects (use configurable detector)
-        update_step("objects")
-        try:
-            # Get scene detections for scene-aware sampling
-            scene_detections = None
-            if "scenes" in jobs[job_id].results and jobs[job_id].results["scenes"]:
-                from polybos_engine.schemas import SceneDetection
-                scene_data = jobs[job_id].results["scenes"]
-                scene_detections = [
-                    SceneDetection(**s) for s in scene_data.get("detections", [])
-                ]
+        if request.enable_objects:
+            update_step("objects")
+            try:
+                # Get scene detections for scene-aware sampling
+                scene_detections = None
+                if "scenes" in jobs[job_id].results and jobs[job_id].results["scenes"]:
+                    from polybos_engine.schemas import SceneDetection
+                    scene_data = jobs[job_id].results["scenes"]
+                    scene_detections = [
+                        SceneDetection(**s) for s in scene_data.get("detections", [])
+                    ]
 
-            # Use configured detector (yolo or qwen)
-            if detector == ObjectDetector.QWEN:
-                # Use passed context, or build from earlier extraction results
-                qwen_context = context or _build_qwen_context(jobs[job_id].results)
-                objects = extract_objects_qwen(
-                    file_path, scenes=scene_detections, context=qwen_context
-                )
-            else:
-                objects = extract_objects(file_path, scenes=scene_detections)
+                # Use configured detector (yolo or qwen)
+                if detector == ObjectDetector.QWEN:
+                    # Use passed context, or build from earlier extraction results
+                    qwen_context = context or _build_qwen_context(jobs[job_id].results)
+                    objects = extract_objects_qwen(
+                        file_path, scenes=scene_detections, context=qwen_context
+                    )
+                else:
+                    objects = extract_objects(file_path, scenes=scene_detections)
 
-            # Only include summary for job polling (full detections too large)
-            if objects:
-                objects_data: dict[str, Any] = {"summary": objects.summary}
-                if objects.descriptions:
-                    objects_data["descriptions"] = objects.descriptions
-                complete_step("objects", objects_data)
-            else:
+                # Only include summary for job polling (full detections too large)
+                if objects:
+                    objects_data: dict[str, Any] = {"summary": objects.summary}
+                    if objects.descriptions:
+                        objects_data["descriptions"] = objects.descriptions
+                    complete_step("objects", objects_data)
+                else:
+                    complete_step("objects", None)
+            except Exception as e:
+                logger.warning(f"Objects failed: {e}")
                 complete_step("objects", None)
-        except Exception as e:
-            logger.warning(f"Objects failed: {e}")
-            complete_step("objects", None)
 
         # CLIP
-        update_step("clip")
-        try:
-            embeddings = extract_clip(file_path)
-            complete_step("clip", {"count": len(embeddings.segments)} if embeddings else None)
-        except Exception as e:
-            logger.warning(f"CLIP failed: {e}")
-            complete_step("clip", None)
+        if request.enable_clip:
+            update_step("clip")
+            try:
+                embeddings = extract_clip(file_path)
+                complete_step("clip", {"count": len(embeddings.segments)} if embeddings else None)
+            except Exception as e:
+                logger.warning(f"CLIP failed: {e}")
+                complete_step("clip", None)
 
         # OCR
-        update_step("ocr")
-        try:
-            ocr = extract_ocr(file_path)
-            complete_step("ocr", ocr.model_dump() if ocr else None)
-        except Exception as e:
-            logger.warning(f"OCR failed: {e}")
-            complete_step("ocr", None)
+        if request.enable_ocr:
+            update_step("ocr")
+            try:
+                ocr = extract_ocr(file_path)
+                complete_step("ocr", ocr.model_dump() if ocr else None)
+            except Exception as e:
+                logger.warning(f"OCR failed: {e}")
+                complete_step("ocr", None)
 
         # Telemetry
         update_step("telemetry")
@@ -336,7 +363,7 @@ async def create_job(request: ExtractRequest) -> dict[str, str]:
     # Start background thread
     thread = threading.Thread(
         target=run_extraction_job,
-        args=(job_id, request.file, request.object_detector, request.context)
+        args=(job_id, request)
     )
     thread.start()
 
@@ -367,8 +394,8 @@ async def health():
 async def extract(request: ExtractRequest):
     """Extract metadata and features from video file.
 
-    This endpoint runs all enabled extractors on the video file and returns
-    the combined results. Extractors can be disabled using skip_* flags.
+    This endpoint runs enabled extractors on the video file and returns
+    the combined results. Use enable_* flags to select extractors.
     """
     start_time = time.time()
 
@@ -383,28 +410,29 @@ async def extract(request: ExtractRequest):
     settings = get_settings()
     logger.info(f"Starting extraction for: {request.file}")
 
-    # Extract metadata (always required)
-    try:
-        metadata = extract_metadata(request.file)
-        res = metadata.resolution
-        logger.info(f"Metadata extracted: {metadata.duration}s, {res.width}x{res.height}")
-    except Exception as e:
-        logger.error(f"Metadata extraction failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Metadata extraction failed: {e}")
-
-    # Detect shot type using CLIP (if not skipped)
-    if not request.skip_clip:
+    # Extract metadata
+    metadata = None
+    if request.enable_metadata:
         try:
-            shot_type = detect_shot_type(request.file)
-            if shot_type:
-                metadata.shot_type = shot_type
-                logger.info(f"Shot type detected: {shot_type.primary} ({shot_type.confidence:.2f})")
-        except Exception as e:
-            logger.warning(f"Shot type detection failed: {e}")
+            metadata = extract_metadata(request.file)
+            res = metadata.resolution
+            logger.info(f"Metadata extracted: {metadata.duration}s, {res.width}x{res.height}")
 
-    # Extract scenes (needed by CLIP and OCR)
+            # Detect shot type (part of metadata)
+            try:
+                shot_type = detect_shot_type(request.file)
+                if shot_type:
+                    metadata.shot_type = shot_type
+                    logger.info(f"Shot type detected: {shot_type.primary} ({shot_type.confidence:.2f})")
+            except Exception as e:
+                logger.warning(f"Shot type detection failed: {e}")
+        except Exception as e:
+            logger.error(f"Metadata extraction failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Metadata extraction failed: {e}")
+
+    # Extract scenes
     scenes = None
-    if not request.skip_scenes:
+    if request.enable_scenes:
         try:
             scenes = extract_scenes(request.file)
             logger.info(f"Scene detection complete: {scenes.count} scenes")
@@ -413,7 +441,7 @@ async def extract(request: ExtractRequest):
 
     # Extract transcript
     transcript = None
-    if not request.skip_transcript:
+    if request.enable_transcript:
         try:
             transcript = extract_transcript(
                 request.file,
@@ -427,9 +455,9 @@ async def extract(request: ExtractRequest):
         except Exception as e:
             logger.warning(f"Transcription failed: {e}")
 
-    # Extract faces (use scene boundaries if available for better sampling)
+    # Extract faces
     faces = None
-    if not request.skip_faces:
+    if request.enable_faces:
         try:
             faces = extract_faces(
                 request.file,
@@ -440,9 +468,9 @@ async def extract(request: ExtractRequest):
         except Exception as e:
             logger.warning(f"Face detection failed: {e}")
 
-    # Extract objects (use configurable detector)
+    # Extract objects
     objects = None
-    if not request.skip_objects:
+    if request.enable_objects:
         try:
             scene_detections = scenes.detections if scenes else None
             detector = request.object_detector or settings.object_detector
@@ -465,7 +493,7 @@ async def extract(request: ExtractRequest):
 
     # Extract CLIP embeddings
     embeddings = None
-    if not request.skip_clip:
+    if request.enable_clip:
         try:
             embeddings = extract_clip(request.file, scenes=scenes)
             logger.info(f"CLIP extraction complete: {len(embeddings.segments)} segments")
@@ -474,7 +502,7 @@ async def extract(request: ExtractRequest):
 
     # Extract OCR
     ocr = None
-    if not request.skip_ocr:
+    if request.enable_ocr:
         try:
             ocr = extract_ocr(request.file, scenes=scenes)
             logger.info(f"OCR complete: {len(ocr.detections)} text regions")
@@ -626,38 +654,38 @@ async def list_extractors():
             {
                 "name": "metadata",
                 "description": "Video metadata (duration, resolution, codec, device, GPS)",
-                "always_enabled": True,
+                "enable_flag": "enable_metadata",
             },
             {
                 "name": "transcript",
                 "description": "Audio transcription using Whisper",
-                "skip_flag": "skip_transcript",
+                "enable_flag": "enable_transcript",
             },
             {
                 "name": "scenes",
                 "description": "Scene boundary detection",
-                "skip_flag": "skip_scenes",
+                "enable_flag": "enable_scenes",
             },
             {
                 "name": "faces",
                 "description": "Face detection with embeddings",
-                "skip_flag": "skip_faces",
+                "enable_flag": "enable_faces",
             },
             {
                 "name": "objects",
                 "description": "Object detection (YOLO or Qwen2-VL)",
-                "skip_flag": "skip_objects",
+                "enable_flag": "enable_objects",
                 "backend": get_settings().object_detector,
             },
             {
                 "name": "clip",
                 "description": "CLIP visual embeddings per scene",
-                "skip_flag": "skip_clip",
+                "enable_flag": "enable_clip",
             },
             {
                 "name": "ocr",
                 "description": "Text extraction from video frames",
-                "skip_flag": "skip_ocr",
+                "enable_flag": "enable_ocr",
             },
             {
                 "name": "telemetry",

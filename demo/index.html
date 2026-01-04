@@ -31,6 +31,68 @@
             <p class="text-gray-400 mt-2">AI-powered video metadata extraction</p>
         </header>
 
+        <!-- Extractor Selection -->
+        <div class="card mb-6">
+            <div class="flex flex-wrap items-center gap-4">
+                <span class="text-gray-400 text-sm">Extractors:</span>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="chkMetadata" checked class="w-4 h-4 accent-blue-500">
+                    <span class="text-sm">Metadata</span>
+                </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="chkScenes" class="w-4 h-4 accent-blue-500">
+                    <span class="text-sm">Scenes</span>
+                </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="chkFaces" class="w-4 h-4 accent-blue-500">
+                    <span class="text-sm">Faces</span>
+                </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="chkTranscript" class="w-4 h-4 accent-blue-500">
+                    <span class="text-sm">Transcript</span>
+                </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="chkObjects" class="w-4 h-4 accent-blue-500">
+                    <span class="text-sm">Objects</span>
+                </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="chkClip" class="w-4 h-4 accent-blue-500">
+                    <span class="text-sm">CLIP</span>
+                </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="chkOcr" class="w-4 h-4 accent-blue-500">
+                    <span class="text-sm">OCR</span>
+                </label>
+                <div class="flex items-center gap-2 ml-4 pl-4 border-l border-gray-600">
+                    <label class="text-sm text-gray-400">Objects:</label>
+                    <select id="objectDetector" class="bg-gray-700 text-sm px-2 py-1 rounded border border-gray-600">
+                        <option value="yolo">YOLO</option>
+                        <option value="qwen">Qwen</option>
+                    </select>
+                </div>
+                <button onclick="selectAll(true)" class="text-xs text-blue-400 hover:text-blue-300 ml-auto">All</button>
+                <button onclick="selectAll(false)" class="text-xs text-gray-400 hover:text-gray-300">None</button>
+            </div>
+        </div>
+
+        <!-- Context (for Qwen/Whisper) -->
+        <div id="contextPanel" class="card mb-6 hidden">
+            <div class="flex items-center gap-2 mb-3">
+                <span class="text-gray-400 text-sm">Context:</span>
+                <span class="text-xs text-gray-500">(optional, helps Qwen & Whisper)</span>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <input type="text" id="contextPerson" placeholder="Person name"
+                       class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none">
+                <input type="text" id="contextLocation" placeholder="Location"
+                       class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none">
+                <input type="text" id="contextActivity" placeholder="Activity/Topic"
+                       class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none">
+                <input type="text" id="contextLanguage" placeholder="Language hint"
+                       class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none">
+            </div>
+        </div>
+
         <!-- File Browser -->
         <div id="uploadZone" class="mb-8">
             <div class="card">
@@ -65,16 +127,8 @@
                         <div id="selectedName" class="font-medium truncate"></div>
                         <div id="selectedSize" class="text-xs text-gray-400"></div>
                     </div>
-                    <!-- Object detector toggle -->
-                    <div class="flex items-center gap-2 mr-4">
-                        <label class="text-xs text-gray-400">Objects:</label>
-                        <select id="objectDetector" class="bg-gray-600 text-sm px-2 py-1 rounded border border-gray-500 focus:border-blue-500 focus:outline-none">
-                            <option value="yolo">YOLO (fast)</option>
-                            <option value="qwen">Qwen VLM (detailed)</option>
-                        </select>
-                    </div>
                     <button id="extractBtn" class="bg-blue-600 hover:bg-blue-500 px-6 py-2 rounded-lg font-semibold transition whitespace-nowrap">
-                        Start Processing
+                        Run
                     </button>
                 </div>
             </div>
@@ -172,7 +226,7 @@
                     <span id="transcriptLang" class="text-gray-400 font-normal text-sm ml-2"></span>
                 </h2>
                 <div id="transcriptContent" class="space-y-2 max-h-64 overflow-y-auto">
-                    <p class="text-gray-500 text-center py-4">Waiting...</p>
+                    <p class="text-gray-600 text-center py-4">—</p>
                 </div>
             </div>
 
@@ -183,11 +237,11 @@
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/>
                     </svg>
                     Faces Detected
-                    <span id="faceCount" class="bg-gray-600 text-white text-xs px-2 py-1 rounded-full ml-2">-</span>
+                    <span id="faceCount" class="bg-gray-600 text-white text-xs px-2 py-1 rounded-full ml-2">—</span>
                 </h2>
                 <p id="facesSummary" class="text-gray-400 text-sm mb-4"></p>
                 <div id="facesGrid" class="flex flex-wrap gap-2">
-                    <p class="text-gray-500">Waiting...</p>
+                    <p class="text-gray-600 text-center py-4">—</p>
                 </div>
             </div>
 
@@ -200,7 +254,7 @@
                     Objects Detected
                 </h2>
                 <div id="objectsList" class="flex flex-wrap gap-2">
-                    <p class="text-gray-500">Waiting...</p>
+                    <p class="text-gray-600 text-center py-4">—</p>
                 </div>
                 <!-- Scene Descriptions (from VLM) -->
                 <div id="descriptionsSection" class="hidden mt-4 pt-4 border-t border-gray-700">
@@ -224,7 +278,7 @@
                     Text Detected (OCR)
                 </h2>
                 <div id="ocrContent" class="space-y-2">
-                    <p class="text-gray-500">Waiting...</p>
+                    <p class="text-gray-600 text-center py-4">—</p>
                 </div>
             </div>
 
@@ -235,7 +289,7 @@
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"/>
                     </svg>
                     Scenes
-                    <span id="sceneCount" class="bg-gray-600 text-white text-xs px-2 py-1 rounded-full ml-2">-</span>
+                    <span id="sceneCount" class="bg-gray-600 text-white text-xs px-2 py-1 rounded-full ml-2">—</span>
                 </h2>
                 <div id="scenesTimeline" class="flex gap-1 h-8 rounded overflow-hidden bg-gray-700">
                     <!-- Filled by JS -->
@@ -293,9 +347,9 @@
         const processingState = document.getElementById('processingState');
         const results = document.getElementById('results');
         const errorState = document.getElementById('errorState');
-
         let currentDir = '/Volumes/Backup';
         let selectedPath = null;
+        let lastResults = {};  // Store results for incremental runs
 
         // Load initial directory
         loadDirectory(currentDir);
@@ -306,10 +360,36 @@
             loadDirectory(parent);
         });
 
-        // Start processing button
+        // Start extraction button
         extractBtn.addEventListener('click', () => {
             if (selectedPath) handleExtract(selectedPath);
         });
+
+        // Show/hide context panel based on checkbox selection
+        function updateContextPanel() {
+            const objectsWithQwen = document.getElementById('chkObjects').checked &&
+                                    document.getElementById('objectDetector').value === 'qwen';
+            const transcriptEnabled = document.getElementById('chkTranscript').checked;
+            const needsContext = objectsWithQwen || transcriptEnabled;
+            const panel = document.getElementById('contextPanel');
+            if (needsContext) {
+                panel.classList.remove('hidden');
+            } else {
+                panel.classList.add('hidden');
+            }
+        }
+
+        // Listen for checkbox/select changes
+        document.getElementById('chkObjects').addEventListener('change', updateContextPanel);
+        document.getElementById('objectDetector').addEventListener('change', updateContextPanel);
+        document.getElementById('chkTranscript').addEventListener('change', updateContextPanel);
+
+        // Select all/none helper
+        function selectAll(checked) {
+            ['chkMetadata', 'chkScenes', 'chkFaces', 'chkTranscript', 'chkObjects', 'chkClip', 'chkOcr']
+                .forEach(id => document.getElementById(id).checked = checked);
+            updateContextPanel();
+        }
 
         async function loadDirectory(path) {
             fileList.innerHTML = '<div class="p-4 text-gray-500 text-center">Loading...</div>';
@@ -366,21 +446,69 @@
             selectedFile.classList.remove('hidden');
         }
 
-        // Extract from server path
+        // Extract based on checked options
         async function handleExtract(filePath) {
             const filename = filePath.split('/').pop();
+
+            // Read checkbox states
+            const enableMetadata = document.getElementById('chkMetadata').checked;
+            const enableScenes = document.getElementById('chkScenes').checked;
+            const enableFaces = document.getElementById('chkFaces').checked;
+            const enableTranscript = document.getElementById('chkTranscript').checked;
+            const enableObjects = document.getElementById('chkObjects').checked;
+            const enableClip = document.getElementById('chkClip').checked;
+            const enableOcr = document.getElementById('chkOcr').checked;
             const objectDetector = document.getElementById('objectDetector').value;
+
+            // Build context from form
+            const context = {};
+            const contextHintParts = [];
+
+            const person = document.getElementById('contextPerson').value.trim();
+            const location = document.getElementById('contextLocation').value.trim();
+            const activity = document.getElementById('contextActivity').value.trim();
+            const language = document.getElementById('contextLanguage').value.trim();
+
+            if (person) {
+                context.person = person;
+                contextHintParts.push(`Speaker: ${person}`);
+            }
+            if (location) {
+                context.location = location;
+                contextHintParts.push(`Location: ${location}`);
+            }
+            if (activity) {
+                context.activity = activity;
+                contextHintParts.push(`Topic: ${activity}`);
+            }
+            if (language) {
+                context.language = language;
+                contextHintParts.push(`Language: ${language}`);
+            }
+
+            const contextHint = contextHintParts.length > 0 ? contextHintParts.join('. ') + '.' : null;
+
             showProcessing(filename);
 
             try {
-                // Create job
+                const requestBody = {
+                    file: filePath,
+                    enable_metadata: enableMetadata,
+                    enable_scenes: enableScenes,
+                    enable_faces: enableFaces,
+                    enable_transcript: enableTranscript,
+                    enable_objects: enableObjects,
+                    enable_clip: enableClip,
+                    enable_ocr: enableOcr,
+                    object_detector: objectDetector,
+                    context: Object.keys(context).length > 0 ? context : null,
+                    context_hint: contextHint
+                };
+
                 const createResponse = await fetch(`${API_URL}/jobs`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        file: filePath,
-                        object_detector: objectDetector
-                    })
+                    body: JSON.stringify(requestBody)
                 });
 
                 if (!createResponse.ok) {
@@ -400,15 +528,12 @@
                     }
 
                     jobData = await statusResponse.json();
-
-                    // Update UI with current progress
                     updateJobProgress(jobData);
 
                     if (jobData.status === 'completed' || jobData.status === 'failed') {
                         break;
                     }
 
-                    // Wait before next poll
                     await new Promise(resolve => setTimeout(resolve, 500));
                 }
 
@@ -416,8 +541,12 @@
                     throw new Error(jobData.error || 'Extraction failed');
                 }
 
-                // Show results
-                showJobResults(jobData, filePath);
+                // Merge with previous results (for incremental runs)
+                const mergedResults = { ...lastResults, ...jobData.results };
+                lastResults = mergedResults;
+
+                const mergedJobData = { ...jobData, results: mergedResults };
+                showJobResults(mergedJobData, filePath);
 
             } catch (error) {
                 showError(error.message);
@@ -664,33 +793,30 @@
         function showProcessing(filename) {
             uploadZone.classList.add('hidden');
             processingState.classList.remove('hidden');
-            results.classList.remove('hidden');  // Show results layout immediately
+            results.classList.remove('hidden');
             errorState.classList.add('hidden');
             document.getElementById('processingFile').textContent = filename;
+            document.getElementById('processingTitle').textContent = 'Processing...';
 
-            // Reset video player
-            const videoPlayer = document.getElementById('videoPlayer');
-            videoPlayer.pause();
-            videoPlayer.removeAttribute('src');
-            videoPlayer.load();
+            // Show only enabled steps
+            const enabledSteps = {
+                metadata: document.getElementById('chkMetadata').checked,
+                scenes: document.getElementById('chkScenes').checked,
+                faces: document.getElementById('chkFaces').checked,
+                transcript: document.getElementById('chkTranscript').checked,
+                objects: document.getElementById('chkObjects').checked,
+                clip: document.getElementById('chkClip').checked,
+                ocr: document.getElementById('chkOcr').checked,
+            };
 
-            // Reset all cards to waiting state
-            document.getElementById('metadataContent').innerHTML = '<p class="text-gray-500">Waiting...</p>';
-            document.getElementById('metadataContent').dataset.filled = '';
-            document.getElementById('transcriptContent').innerHTML = '<p class="text-gray-500 text-center py-4">Waiting...</p>';
-            document.getElementById('transcriptLang').textContent = '';
-            document.getElementById('faceCount').textContent = '-';
-            document.getElementById('faceCount').className = 'bg-gray-600 text-white text-xs px-2 py-1 rounded-full ml-2';
-            document.getElementById('facesSummary').textContent = '';
-            document.getElementById('facesGrid').innerHTML = '<p class="text-gray-500">Waiting...</p>';
-            document.getElementById('objectsList').innerHTML = '<p class="text-gray-500">Waiting...</p>';
-            document.getElementById('descriptionsSection').classList.add('hidden');
-            document.getElementById('descriptionsList').innerHTML = '';
-            document.getElementById('ocrContent').innerHTML = '<p class="text-gray-500">Waiting...</p>';
-            document.getElementById('sceneCount').textContent = '-';
-            document.getElementById('sceneCount').className = 'bg-gray-600 text-white text-xs px-2 py-1 rounded-full ml-2';
-            document.getElementById('scenesTimeline').innerHTML = '';
-            document.getElementById('mapCard').classList.add('hidden');
+            document.querySelectorAll('.progress-step').forEach(el => {
+                const step = el.dataset.step;
+                if (step === 'telemetry' || enabledSteps[step]) {
+                    el.classList.remove('hidden');
+                } else {
+                    el.classList.add('hidden');
+                }
+            });
 
             // Reset steps
             document.querySelectorAll('.progress-step').forEach(el => {
@@ -698,6 +824,39 @@
                 el.classList.add('pending');
                 el.querySelector('.step-icon').textContent = '○';
             });
+
+            // Update result cards based on enabled state
+            const disabledMsg = '<p class="text-gray-600 text-center py-4">—</p>';
+
+            // Transcript
+            if (!enabledSteps.transcript && !lastResults.transcript) {
+                document.getElementById('transcriptContent').innerHTML = disabledMsg;
+                document.getElementById('transcriptLang').textContent = '';
+            }
+
+            // Faces
+            if (!enabledSteps.faces && !lastResults.faces) {
+                document.getElementById('facesGrid').innerHTML = disabledMsg;
+                document.getElementById('facesSummary').textContent = '';
+                document.getElementById('faceCount').textContent = '—';
+            }
+
+            // Objects
+            if (!enabledSteps.objects && !lastResults.objects) {
+                document.getElementById('objectsList').innerHTML = disabledMsg;
+                document.getElementById('descriptionsSection').classList.add('hidden');
+            }
+
+            // OCR
+            if (!enabledSteps.ocr && !lastResults.ocr) {
+                document.getElementById('ocrContent').innerHTML = disabledMsg;
+            }
+
+            // Scenes
+            if (!enabledSteps.scenes && !lastResults.scenes) {
+                document.getElementById('scenesTimeline').innerHTML = '<div class="text-gray-600 text-sm py-2 text-center">—</div>';
+                document.getElementById('sceneCount').textContent = '—';
+            }
         }
 
         function hideProcessing() {
@@ -915,8 +1074,31 @@
             document.getElementById('newExtractBtn').onclick = () => {
                 results.classList.add('hidden');
                 uploadZone.classList.remove('hidden');
-                pathInput.value = '';
-                pathInput.focus();
+
+                // Reset stored results
+                lastResults = {};
+
+                // Reset result card placeholders (use dash for "not run yet")
+                const emptyMsg = '<p class="text-gray-600 text-center py-4">—</p>';
+                document.getElementById('metadataContent').innerHTML = '';
+                document.getElementById('metadataContent').dataset.filled = '';
+                document.getElementById('transcriptLang').textContent = '';
+                document.getElementById('transcriptContent').innerHTML = emptyMsg;
+                document.getElementById('faceCount').textContent = '—';
+                document.getElementById('facesSummary').textContent = '';
+                document.getElementById('facesGrid').innerHTML = emptyMsg;
+                document.getElementById('objectsList').innerHTML = emptyMsg;
+                document.getElementById('descriptionsSection').classList.add('hidden');
+                document.getElementById('ocrContent').innerHTML = emptyMsg;
+                document.getElementById('sceneCount').textContent = '—';
+                document.getElementById('scenesTimeline').innerHTML = '<div class="text-gray-600 text-sm py-2 text-center">—</div>';
+                document.getElementById('mapCard').classList.add('hidden');
+
+                // Clear context form
+                document.getElementById('contextPerson').value = '';
+                document.getElementById('contextLocation').value = '';
+                document.getElementById('contextActivity').value = '';
+                document.getElementById('contextLanguage').value = '';
             };
         }
 
