@@ -169,6 +169,8 @@ def run_extraction_job(
     """Run extraction in background thread."""
     settings = get_settings()
     file_path = request.file
+    # Use proxy file for frame-based analysis if provided
+    analysis_file = request.proxy_file or request.file
     # Use request parameter or fall back to settings
     detector = request.object_detector or settings.object_detector
     context = request.context
@@ -206,11 +208,11 @@ def run_extraction_job(
             metadata = extract_metadata(file_path)
             complete_step("metadata", metadata.model_dump())
 
-            # Shot type (part of metadata)
+            # Shot type (part of metadata) - uses frames
             update_step("shot_type")
             try:
                 from polybos_engine.extractors.shot_type import detect_shot_type
-                shot_type = detect_shot_type(file_path)
+                shot_type = detect_shot_type(analysis_file)
                 if shot_type:
                     complete_step("shot_type", shot_type.model_dump())
                 else:
@@ -219,22 +221,22 @@ def run_extraction_job(
                 logger.warning(f"Shot type failed: {e}")
                 complete_step("shot_type", None)
 
-        # Scenes
+        # Scenes (frame-based)
         if request.enable_scenes:
             update_step("scenes")
             try:
-                scenes = extract_scenes(file_path)
+                scenes = extract_scenes(analysis_file)
                 complete_step("scenes", scenes.model_dump() if scenes else None)
             except Exception as e:
                 logger.warning(f"Scenes failed: {e}")
                 complete_step("scenes", None)
 
-        # Transcript
+        # Transcript (audio-based)
         if request.enable_transcript:
             update_step("transcript")
             try:
                 transcript = extract_transcript(
-                    file_path,
+                    analysis_file,
                     model=request.whisper_model,
                     language=request.language,
                     fallback_language=request.fallback_language,
@@ -247,7 +249,7 @@ def run_extraction_job(
                 logger.warning(f"Transcript failed: {e}")
                 complete_step("transcript", None)
 
-        # Faces
+        # Faces (frame-based)
         if request.enable_faces:
             update_step("faces")
             try:
@@ -261,7 +263,7 @@ def run_extraction_job(
                     ]
 
                 faces = extract_faces(
-                    file_path,
+                    analysis_file,
                     scenes=scene_detections,
                     sample_fps=request.face_sample_fps,
                 )
@@ -289,11 +291,11 @@ def run_extraction_job(
                 logger.warning(f"Faces failed: {e}")
                 complete_step("faces", None)
 
-        # Motion analysis
+        # Motion analysis (frame-based)
         if request.enable_motion:
             update_step("motion")
             try:
-                motion_analysis = analyze_motion(file_path)
+                motion_analysis = analyze_motion(analysis_file)
                 motion_result = MotionResult(
                     duration=motion_analysis.duration,
                     fps=motion_analysis.fps,
@@ -316,7 +318,7 @@ def run_extraction_job(
                 logger.warning(f"Motion analysis failed: {e}")
                 complete_step("motion", None)
 
-        # Objects (use configurable detector)
+        # Objects (frame-based, use configurable detector)
         if request.enable_objects:
             update_step("objects")
             try:
@@ -342,13 +344,13 @@ def run_extraction_job(
                         logger.info("No timestamps provided, Qwen will sample from middle")
 
                     objects = extract_objects_qwen(
-                        file_path,
+                        analysis_file,
                         timestamps=timestamps,
                         context=qwen_context,
                         progress_callback=update_progress,
                     )
                 else:
-                    objects = extract_objects(file_path, scenes=scene_detections)
+                    objects = extract_objects(analysis_file, scenes=scene_detections)
 
                 # Only include summary for job polling (full detections too large)
                 if objects:
@@ -362,21 +364,21 @@ def run_extraction_job(
                 logger.warning(f"Objects failed: {e}")
                 complete_step("objects", None)
 
-        # CLIP
+        # CLIP (frame-based)
         if request.enable_clip:
             update_step("clip")
             try:
-                embeddings = extract_clip(file_path)
+                embeddings = extract_clip(analysis_file)
                 complete_step("clip", {"count": len(embeddings.segments)} if embeddings else None)
             except Exception as e:
                 logger.warning(f"CLIP failed: {e}")
                 complete_step("clip", None)
 
-        # OCR
+        # OCR (frame-based)
         if request.enable_ocr:
             update_step("ocr")
             try:
-                ocr = extract_ocr(file_path)
+                ocr = extract_ocr(analysis_file)
                 complete_step("ocr", ocr.model_dump() if ocr else None)
             except Exception as e:
                 logger.warning(f"OCR failed: {e}")
@@ -693,6 +695,10 @@ async def extract(request: ExtractRequest):
 
     This endpoint runs enabled extractors on the video file and returns
     the combined results. Use enable_* flags to select extractors.
+
+    For RAW formats (BRAW, ARRIRAW) that ffmpeg can't decode, provide a
+    proxy_file for frame-based analysis. Metadata is extracted from the
+    main file, while transcript/faces/motion/etc. use the proxy.
     """
     start_time = time.time()
 
@@ -703,6 +709,25 @@ async def extract(request: ExtractRequest):
 
     if not file_path.is_file():
         raise HTTPException(status_code=400, detail=f"Not a file: {request.file}")
+
+    # Validate proxy file if provided
+    proxy_path: str | None = None
+    if request.proxy_file:
+        proxy = Path(request.proxy_file)
+        if not proxy.exists():
+            raise HTTPException(
+                status_code=404, detail=f"Proxy file not found: {request.proxy_file}"
+            )
+        if not proxy.is_file():
+            raise HTTPException(
+                status_code=400, detail=f"Proxy is not a file: {request.proxy_file}"
+            )
+        proxy_path = request.proxy_file
+        logger.info(f"Using proxy file for frame analysis: {proxy.name}")
+
+    # Determine which file to use for frame-based analysis
+    # Metadata always from original, frames from proxy if provided
+    analysis_file = proxy_path or request.file
 
     settings = get_settings()
     logger.info(f"Starting extraction for: {request.file}")
@@ -715,9 +740,9 @@ async def extract(request: ExtractRequest):
             res = metadata.resolution
             logger.info(f"Metadata extracted: {metadata.duration}s, {res.width}x{res.height}")
 
-            # Detect shot type (part of metadata)
+            # Detect shot type (part of metadata) - uses frames
             try:
-                shot_type = detect_shot_type(request.file)
+                shot_type = detect_shot_type(analysis_file)
                 if shot_type:
                     metadata.shot_type = shot_type
                     logger.info(f"Shot type detected: {shot_type.primary} ({shot_type.confidence:.2f})")
@@ -727,21 +752,21 @@ async def extract(request: ExtractRequest):
             logger.error(f"Metadata extraction failed: {e}")
             raise HTTPException(status_code=500, detail=f"Metadata extraction failed: {e}")
 
-    # Extract scenes
+    # Extract scenes (frame-based)
     scenes = None
     if request.enable_scenes:
         try:
-            scenes = extract_scenes(request.file)
+            scenes = extract_scenes(analysis_file)
             logger.info(f"Scene detection complete: {scenes.count} scenes")
         except Exception as e:
             logger.warning(f"Scene detection failed: {e}")
 
-    # Extract transcript
+    # Extract transcript (audio-based, uses analysis file)
     transcript = None
     if request.enable_transcript:
         try:
             transcript = extract_transcript(
-                request.file,
+                analysis_file,
                 model=request.whisper_model,
                 language=request.language,
                 fallback_language=request.fallback_language,
@@ -752,12 +777,12 @@ async def extract(request: ExtractRequest):
         except Exception as e:
             logger.warning(f"Transcription failed: {e}")
 
-    # Extract faces
+    # Extract faces (frame-based)
     faces = None
     if request.enable_faces:
         try:
             faces = extract_faces(
-                request.file,
+                analysis_file,
                 scenes=scenes.detections if scenes else None,
                 sample_fps=request.face_sample_fps,
             )
@@ -765,12 +790,12 @@ async def extract(request: ExtractRequest):
         except Exception as e:
             logger.warning(f"Face detection failed: {e}")
 
-    # Motion analysis
+    # Motion analysis (frame-based)
     motion_result: MotionResult | None = None
     motion_analysis = None
     if request.enable_motion:
         try:
-            motion_analysis = analyze_motion(request.file)
+            motion_analysis = analyze_motion(analysis_file)
             motion_result = MotionResult(
                 duration=motion_analysis.duration,
                 fps=motion_analysis.fps,
@@ -791,7 +816,7 @@ async def extract(request: ExtractRequest):
         except Exception as e:
             logger.warning(f"Motion analysis failed: {e}")
 
-    # Extract objects
+    # Extract objects (frame-based)
     objects = None
     if request.enable_objects:
         try:
@@ -806,14 +831,14 @@ async def extract(request: ExtractRequest):
                     logger.info("No timestamps provided, Qwen will sample from middle")
 
                 objects = extract_objects_qwen(
-                    request.file,
+                    analysis_file,
                     timestamps=timestamps,
                     context=request.context,
                 )
                 logger.info(f"Qwen object detection: {len(objects.summary)} types")
             else:
                 objects = extract_objects(
-                    request.file,
+                    analysis_file,
                     scenes=scene_detections,
                     sample_fps=request.object_sample_fps,
                 )
@@ -821,20 +846,20 @@ async def extract(request: ExtractRequest):
         except Exception as e:
             logger.warning(f"Object detection failed: {e}")
 
-    # Extract CLIP embeddings
+    # Extract CLIP embeddings (frame-based)
     embeddings = None
     if request.enable_clip:
         try:
-            embeddings = extract_clip(request.file, scenes=scenes)
+            embeddings = extract_clip(analysis_file, scenes=scenes)
             logger.info(f"CLIP extraction complete: {len(embeddings.segments)} segments")
         except Exception as e:
             logger.warning(f"CLIP extraction failed: {e}")
 
-    # Extract OCR
+    # Extract OCR (frame-based)
     ocr = None
     if request.enable_ocr:
         try:
-            ocr = extract_ocr(request.file, scenes=scenes)
+            ocr = extract_ocr(analysis_file, scenes=scenes)
             logger.info(f"OCR complete: {len(ocr.detections)} text regions")
         except Exception as e:
             logger.warning(f"OCR failed: {e}")

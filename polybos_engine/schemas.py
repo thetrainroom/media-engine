@@ -35,6 +35,11 @@ class ExtractRequest(BaseModel):
     """Request body for /extract endpoint."""
 
     file: str = Field(..., description="Path to video file")
+    proxy_file: str | None = Field(
+        default=None,
+        description="Path to proxy file for RAW formats (BRAW, ARRIRAW). "
+        "Metadata is extracted from main file, frame analysis uses proxy."
+    )
 
     # Extractor toggles (all default to off)
     enable_metadata: bool = Field(default=False, description="Extract metadata")
