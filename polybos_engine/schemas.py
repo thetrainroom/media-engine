@@ -42,6 +42,7 @@ class ExtractRequest(BaseModel):
     enable_objects: bool = Field(default=False, description="Extract objects")
     enable_clip: bool = Field(default=False, description="Extract CLIP embeddings")
     enable_ocr: bool = Field(default=False, description="Extract OCR")
+    enable_motion: bool = Field(default=False, description="Analyze camera motion")
 
     # Whisper options
     whisper_model: str = Field(default="large-v3", description="Whisper model size")
@@ -63,6 +64,10 @@ class ExtractRequest(BaseModel):
     context: dict[str, str] | None = Field(
         default=None,
         description="Context for VLM (person, location, topic, language, etc.)"
+    )
+    qwen_timestamps: list[float] | None = Field(
+        default=None,
+        description="Timestamps (seconds) for Qwen frame analysis. If None, samples from middle."
     )
 
 
@@ -291,6 +296,26 @@ class OcrResult(BaseModel):
     detections: list[OcrDetection]
 
 
+class MotionSegment(BaseModel):
+    """A segment of video with consistent camera motion."""
+
+    start: float
+    end: float
+    motion_type: str  # static, pan_left, pan_right, tilt_up, tilt_down, zoom_in, zoom_out, handheld
+    intensity: float  # Average flow magnitude
+
+
+class MotionResult(BaseModel):
+    """Camera motion analysis results."""
+
+    duration: float
+    fps: float
+    primary_motion: str  # Most common motion type
+    segments: list[MotionSegment]
+    avg_intensity: float
+    is_stable: bool  # True if mostly static/tripod
+
+
 class TelemetryPoint(BaseModel):
     """Single telemetry point from drone/camera."""
 
@@ -354,6 +379,7 @@ class ExtractResponse(BaseModel):
     objects: ObjectsResult | None = None
     embeddings: ClipResult | None = None
     ocr: OcrResult | None = None
+    motion: MotionResult | None = None
 
 
 class HealthResponse(BaseModel):

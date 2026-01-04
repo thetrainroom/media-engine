@@ -10,20 +10,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
-from PIL import Image
 
-from polybos_engine.config import get_device, get_settings, DeviceType
-from polybos_engine.schemas import BoundingBox, ObjectDetection, ObjectsResult, SceneDetection
+from polybos_engine.config import DeviceType, get_device, get_settings
+from polybos_engine.schemas import BoundingBox, ObjectDetection, ObjectsResult
 
 logger = logging.getLogger(__name__)
 
 # Progress callback type: (message, current, total) -> None
 ProgressCallback = Callable[[str, int | None, int | None], None]
-
-# Similarity threshold - frames more similar than this are considered duplicates
-FRAME_SIMILARITY_THRESHOLD = 0.92
 
 # Singleton model instances (lazy loaded, stays in memory between calls)
 _qwen_model: Any = None
@@ -72,7 +67,7 @@ def _get_qwen_model(
         return _qwen_model, _qwen_processor, _qwen_device  # type: ignore
 
     # Need to load new model
-    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+    from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
     # Determine device
     device = get_device()
@@ -101,89 +96,6 @@ def _get_qwen_model(
     _qwen_device = torch_device
 
     return _qwen_model, _qwen_processor, torch_device
-
-
-def _compute_frame_histogram(image_path: str) -> np.ndarray | None:
-    """Compute a normalized color histogram for an image."""
-    try:
-        img = Image.open(image_path).convert("RGB")
-        # Resize to small size for faster comparison
-        img = img.resize((64, 64))
-        arr = np.array(img)
-
-        # Compute histogram for each channel and concatenate
-        hist_r = np.histogram(arr[:, :, 0], bins=32, range=(0, 256))[0]
-        hist_g = np.histogram(arr[:, :, 1], bins=32, range=(0, 256))[0]
-        hist_b = np.histogram(arr[:, :, 2], bins=32, range=(0, 256))[0]
-
-        hist = np.concatenate([hist_r, hist_g, hist_b]).astype(float)
-        # Normalize
-        hist = hist / (hist.sum() + 1e-7)
-        return hist
-    except Exception:
-        return None
-
-
-def _histogram_similarity(hist1: np.ndarray, hist2: np.ndarray) -> float:
-    """Compute similarity between two histograms using correlation."""
-    # Correlation coefficient (-1 to 1, higher = more similar)
-    if hist1 is None or hist2 is None:
-        return 0.0
-
-    h1 = hist1 - hist1.mean()
-    h2 = hist2 - hist2.mean()
-
-    denom = np.sqrt((h1 ** 2).sum() * (h2 ** 2).sum())
-    if denom < 1e-7:
-        return 1.0  # Both are flat/similar
-
-    return float(np.dot(h1, h2) / denom)
-
-
-def _select_diverse_frames(
-    frame_paths: list[str],
-    timestamps: list[float],
-    similarity_threshold: float = FRAME_SIMILARITY_THRESHOLD,
-    max_frames: int = 5,
-) -> tuple[list[str], list[float]]:
-    """Select diverse frames by filtering out similar consecutive frames.
-
-    Returns frames that are visually different from each other.
-    """
-    if not frame_paths:
-        return [], []
-
-    # Compute histograms for all frames
-    histograms = [_compute_frame_histogram(p) if p else None for p in frame_paths]
-
-    # Always keep the first valid frame
-    selected_paths: list[str] = []
-    selected_timestamps: list[float] = []
-    last_hist: np.ndarray | None = None
-
-    for i, (path, ts, hist) in enumerate(zip(frame_paths, timestamps, histograms)):
-        if not path or hist is None:
-            continue
-
-        if last_hist is None:
-            # First valid frame - always keep
-            selected_paths.append(path)
-            selected_timestamps.append(ts)
-            last_hist = hist
-        else:
-            # Compare with last selected frame
-            similarity = _histogram_similarity(last_hist, hist)
-
-            if similarity < similarity_threshold:
-                # Frame is different enough - keep it
-                selected_paths.append(path)
-                selected_timestamps.append(ts)
-                last_hist = hist
-
-                if len(selected_paths) >= max_frames:
-                    break
-
-    return selected_paths, selected_timestamps
 
 
 def _build_analysis_prompt(context: dict[str, str] | None = None) -> str:
@@ -262,8 +174,7 @@ For description:
 
 def extract_objects_qwen(
     file_path: str,
-    scenes: list[SceneDetection] | None = None,
-    frames_per_scene: int | None = None,
+    timestamps: list[float] | None = None,
     model_name: str | None = None,
     context: dict[str, str] | None = None,
     progress_callback: ProgressCallback | None = None,
@@ -271,12 +182,10 @@ def extract_objects_qwen(
     """Extract objects using Qwen2-VL vision-language model.
 
     Much more accurate than YOLO for contextual understanding.
-    Samples one frame per scene by default.
 
     Args:
         file_path: Path to video file
-        scenes: Scene boundaries (required for scene-based sampling)
-        frames_per_scene: Frames to analyze per scene (default from config)
+        timestamps: Specific timestamps to analyze. If None, samples from middle.
         model_name: Qwen model name (default from config)
         context: Optional context from earlier extraction steps, e.g.:
             - "person": Name of identified person
@@ -294,7 +203,6 @@ def extract_objects_qwen(
 
     settings = get_settings()
     model_name = model_name or settings.qwen_model
-    frames_per_scene = frames_per_scene or settings.qwen_frames_per_scene
 
     path = Path(file_path)
     if not path.exists():
@@ -307,34 +215,18 @@ def extract_objects_qwen(
     temp_dir = tempfile.mkdtemp(prefix="polybos_qwen_")
 
     try:
-        # Get timestamps to sample
-        if scenes:
-            timestamps = _get_timestamps_from_scenes(scenes, frames_per_scene)
-            logger.info(f"Sampling {len(timestamps)} frames from {len(scenes)} scenes")
-        else:
-            # No scenes - sample candidate frames every 2-3 seconds, then filter for diversity
+        # Use provided timestamps, or default to middle of video
+        if timestamps is None:
             duration = _get_video_duration(file_path)
-            # Sample candidates every 2 seconds (we'll filter similar ones)
-            candidate_interval = 2.0
-            candidate_count = max(3, int(duration / candidate_interval))
-            timestamps = [duration * i / (candidate_count + 1) for i in range(1, candidate_count + 1)]
-            logger.info(f"Sampling {len(timestamps)} candidate frames from {duration:.0f}s video")
+            timestamps = [duration / 2]
+            logger.info(f"No timestamps provided, sampling from middle ({duration/2:.1f}s)")
+        else:
+            logger.info(f"Analyzing {len(timestamps)} provided timestamps")
 
-        # Extract candidate frames
+        # Extract frames at specified timestamps
         if progress_callback:
             progress_callback("Extracting frames...", None, None)
         frame_paths = _extract_frames_at_timestamps(file_path, temp_dir, timestamps)
-
-        # Filter for diverse frames (skip similar consecutive frames)
-        if not scenes and len(frame_paths) > 1:
-            if progress_callback:
-                progress_callback("Filtering similar frames...", None, None)
-            original_count = len([p for p in frame_paths if p])
-            frame_paths, timestamps = _select_diverse_frames(
-                frame_paths, timestamps, max_frames=5
-            )
-            logger.info(f"Selected {len(frame_paths)} diverse frames from {original_count} candidates")
-
         total_frames = len([p for p in frame_paths if p])
 
         all_objects: dict[str, int] = {}
@@ -449,26 +341,6 @@ def _get_video_duration(video_path: str) -> float:
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     return float(result.stdout.strip())
-
-
-def _get_timestamps_from_scenes(
-    scenes: list[SceneDetection], frames_per_scene: int
-) -> list[float]:
-    """Generate sample timestamps from scenes."""
-    timestamps: list[float] = []
-
-    for scene in scenes:
-        scene_duration = scene.end - scene.start
-        if frames_per_scene == 1:
-            # Sample from middle of scene
-            timestamps.append(scene.start + scene_duration / 2)
-        else:
-            # Sample evenly across scene
-            for i in range(frames_per_scene):
-                offset = scene_duration * (i + 1) / (frames_per_scene + 1)
-                timestamps.append(scene.start + offset)
-
-    return sorted(timestamps)
 
 
 def _extract_frames_at_timestamps(

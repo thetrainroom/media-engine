@@ -95,6 +95,10 @@
                     <input type="checkbox" id="chkOcr" class="w-4 h-4 accent-blue-500">
                     <span class="text-sm">OCR</span>
                 </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="chkMotion" class="w-4 h-4 accent-blue-500">
+                    <span class="text-sm">Motion</span>
+                </label>
                 <div class="flex items-center gap-2 ml-4 pl-4 border-l border-gray-600">
                     <label class="text-sm text-gray-400">Objects:</label>
                     <select id="objectDetector" class="bg-gray-700 text-sm px-2 py-1 rounded border border-gray-600">
@@ -122,6 +126,11 @@
                        class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none">
                 <input type="text" id="contextLanguage" placeholder="Language hint"
                        class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none">
+            </div>
+            <!-- Timestamps for Qwen -->
+            <div id="timestampRow" class="hidden mt-3 pt-3 border-t border-gray-700">
+                <input type="text" id="timestampInput" placeholder="Timestamps for Qwen (e.g., 1.5, 5.0, 10.2)"
+                       class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-cyan-500 focus:outline-none font-mono">
             </div>
         </div>
 
@@ -207,6 +216,9 @@
                     </div>
                     <div class="progress-step pending" data-step="faces">
                         <span class="step-icon">○</span> Faces
+                    </div>
+                    <div class="progress-step pending" data-step="motion">
+                        <span class="step-icon">○</span> Motion
                     </div>
                     <div class="progress-step pending" data-step="objects">
                         <span class="step-icon">○</span> Objects
@@ -347,6 +359,22 @@
                 </div>
             </div>
 
+            <!-- Motion -->
+            <div id="motionCard" class="result-card">
+                <div class="card-header">
+                    <div class="card-icon bg-cyan-500/20 text-cyan-400">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7"/>
+                        </svg>
+                    </div>
+                    <span class="card-title">Camera Motion</span>
+                    <span id="motionPrimary" class="card-badge bg-cyan-500/20 text-cyan-300">—</span>
+                </div>
+                <div id="motionContent" class="space-y-2">
+                    <p class="empty-state">—</p>
+                </div>
+            </div>
+
             <!-- Scenes -->
             <div id="scenesCard" class="result-card">
                 <div class="card-header">
@@ -411,6 +439,16 @@
         let currentDir = '/Volumes/Backup';
         let selectedPath = null;
         let lastResults = {};  // Store results for incremental runs
+        // Parse timestamps from input field
+        function getTimestampsFromInput() {
+            const input = document.getElementById('timestampInput').value.trim();
+            if (!input) return null;
+            const timestamps = input.split(',')
+                .map(s => parseFloat(s.trim()))
+                .filter(n => !isNaN(n) && n >= 0)
+                .sort((a, b) => a - b);
+            return timestamps.length > 0 ? timestamps : null;
+        }
 
         // Load initial directory
         loadDirectory(currentDir);
@@ -438,6 +476,14 @@
             } else {
                 panel.classList.add('hidden');
             }
+
+            // Show/hide timestamp row
+            const timestampRow = document.getElementById('timestampRow');
+            if (objectsWithQwen) {
+                timestampRow.classList.remove('hidden');
+            } else {
+                timestampRow.classList.add('hidden');
+            }
         }
 
         // Listen for checkbox/select changes
@@ -447,7 +493,7 @@
 
         // Select all/none helper
         function selectAll(checked) {
-            ['chkMetadata', 'chkScenes', 'chkFaces', 'chkTranscript', 'chkObjects', 'chkClip', 'chkOcr']
+            ['chkMetadata', 'chkScenes', 'chkFaces', 'chkTranscript', 'chkObjects', 'chkClip', 'chkOcr', 'chkMotion']
                 .forEach(id => document.getElementById(id).checked = checked);
             updateContextPanel();
         }
@@ -519,6 +565,7 @@
             const enableObjects = document.getElementById('chkObjects').checked;
             const enableClip = document.getElementById('chkClip').checked;
             const enableOcr = document.getElementById('chkOcr').checked;
+            const enableMotion = document.getElementById('chkMotion').checked;
             const objectDetector = document.getElementById('objectDetector').value;
 
             // Build context from form
@@ -561,9 +608,11 @@
                     enable_objects: enableObjects,
                     enable_clip: enableClip,
                     enable_ocr: enableOcr,
+                    enable_motion: enableMotion,
                     object_detector: objectDetector,
                     context: Object.keys(context).length > 0 ? context : null,
-                    context_hint: contextHint
+                    context_hint: contextHint,
+                    qwen_timestamps: getTimestampsFromInput()
                 };
 
                 const createResponse = await fetch(`${API_URL}/jobs`, {
@@ -736,6 +785,76 @@
             } else if (jobData.completed_steps.includes('ocr')) {
                 document.getElementById('ocrContent').innerHTML = '<p class="text-gray-500">No text detected</p>';
             }
+
+            // Motion
+            if (jobData.completed_steps.includes('motion') && r.motion) {
+                const m = r.motion;
+                document.getElementById('motionPrimary').textContent = m.primary_motion.replace('_', ' ');
+
+                // Build motion segment display
+                const motionColors = {
+                    static: 'bg-gray-500',
+                    pan_left: 'bg-blue-500',
+                    pan_right: 'bg-blue-400',
+                    tilt_up: 'bg-green-500',
+                    tilt_down: 'bg-green-400',
+                    zoom_in: 'bg-purple-500',
+                    zoom_out: 'bg-purple-400',
+                    handheld: 'bg-yellow-500',
+                    complex: 'bg-red-500'
+                };
+
+                let html = `<div class="text-sm text-gray-400 mb-2">`;
+                html += `<span class="text-cyan-300">${m.segments.length}</span> segments, `;
+                html += `avg intensity: <span class="text-cyan-300">${m.avg_intensity.toFixed(1)}</span>, `;
+                html += m.is_stable ? '<span class="text-green-400">stable</span>' : '<span class="text-yellow-400">moving</span>';
+                html += `</div>`;
+
+                // Segment timeline
+                if (m.segments.length > 0 && m.duration > 0) {
+                    html += `<div class="flex gap-0.5 h-6 rounded overflow-hidden bg-gray-700/50">`;
+                    m.segments.forEach(seg => {
+                        const widthPct = ((seg.end - seg.start) / m.duration * 100).toFixed(1);
+                        const color = motionColors[seg.motion_type] || 'bg-gray-500';
+                        const label = seg.motion_type.replace('_', ' ');
+                        html += `<div class="${color} opacity-80 hover:opacity-100 transition" style="width: ${widthPct}%" title="${label}: ${seg.start.toFixed(1)}s - ${seg.end.toFixed(1)}s"></div>`;
+                    });
+                    html += `</div>`;
+
+                    // Legend
+                    const types = [...new Set(m.segments.map(s => s.motion_type))];
+                    html += `<div class="flex flex-wrap gap-2 mt-2 text-xs">`;
+                    types.forEach(t => {
+                        const color = motionColors[t] || 'bg-gray-500';
+                        html += `<span class="flex items-center gap-1"><span class="w-3 h-3 rounded ${color}"></span>${t.replace('_', ' ')}</span>`;
+                    });
+                    html += `</div>`;
+
+                    // Generate suggested timestamps
+                    let suggested = [];
+                    for (const seg of m.segments) {
+                        const segDuration = seg.end - seg.start;
+                        if (seg.motion_type === 'static' || seg.motion_type === 'handheld') {
+                            suggested.push((seg.start + seg.end) / 2);
+                        } else {
+                            suggested.push(seg.start + 0.2);
+                            if (segDuration > 1.0) suggested.push(seg.end - 0.2);
+                        }
+                    }
+                    suggested = [...new Set(suggested)].sort((a, b) => a - b).slice(0, 5);
+                    suggested = suggested.map(t => Math.max(0.1, Math.min(t, m.duration - 0.1)));
+                    const suggestedStr = suggested.map(t => t.toFixed(1)).join(', ');
+
+                    html += `<div class="mt-3 pt-3 border-t border-gray-700">`;
+                    html += `<span class="text-xs text-gray-500">Suggested timestamps: </span>`;
+                    html += `<code class="text-xs text-cyan-300 bg-gray-800 px-2 py-1 rounded select-all cursor-pointer" title="Click to select">${suggestedStr}</code>`;
+                    html += `</div>`;
+                }
+
+                document.getElementById('motionContent').innerHTML = html;
+            } else if (jobData.completed_steps.includes('motion')) {
+                document.getElementById('motionContent').innerHTML = '<p class="text-gray-500">No motion data</p>';
+            }
         }
 
         function updateMetadataCard(metadata, filePath) {
@@ -855,6 +974,7 @@
                 scenes: jobData.results.scenes,
                 objects: jobData.results.objects,
                 ocr: jobData.results.ocr,
+                motion: jobData.results.motion,
             };
 
             // Track which steps completed (even if null result)
@@ -881,6 +1001,7 @@
                 objects: document.getElementById('chkObjects').checked,
                 clip: document.getElementById('chkClip').checked,
                 ocr: document.getElementById('chkOcr').checked,
+                motion: document.getElementById('chkMotion').checked,
             };
 
             document.querySelectorAll('.progress-step').forEach(el => {
@@ -924,6 +1045,12 @@
             // OCR
             if (!enabledSteps.ocr && !lastResults.ocr) {
                 document.getElementById('ocrContent').innerHTML = disabledMsg;
+            }
+
+            // Motion
+            if (!enabledSteps.motion && !lastResults.motion) {
+                document.getElementById('motionContent').innerHTML = disabledMsg;
+                document.getElementById('motionPrimary').textContent = '—';
             }
 
             // Scenes
@@ -1138,6 +1265,79 @@
                     '<p class="empty-state">No text detected</p>';
             }
 
+            // Motion
+            if (data.motion && data.motion.segments) {
+                const m = data.motion;
+                document.getElementById('motionPrimary').textContent = m.primary_motion.replace('_', ' ');
+
+                const motionColors = {
+                    static: 'bg-gray-500',
+                    pan_left: 'bg-blue-500',
+                    pan_right: 'bg-blue-400',
+                    tilt_up: 'bg-green-500',
+                    tilt_down: 'bg-green-400',
+                    zoom_in: 'bg-purple-500',
+                    zoom_out: 'bg-purple-400',
+                    handheld: 'bg-yellow-500',
+                    complex: 'bg-red-500'
+                };
+
+                let html = `<div class="text-sm text-gray-400 mb-2">`;
+                html += `<span class="text-cyan-300">${m.segments.length}</span> segments, `;
+                html += `avg intensity: <span class="text-cyan-300">${m.avg_intensity.toFixed(1)}</span>, `;
+                html += m.is_stable ? '<span class="text-green-400">stable</span>' : '<span class="text-yellow-400">moving</span>';
+                html += `</div>`;
+
+                if (m.segments.length > 0 && m.duration > 0) {
+                    html += `<div class="flex gap-0.5 h-6 rounded overflow-hidden bg-gray-700/50">`;
+                    m.segments.forEach(seg => {
+                        const widthPct = ((seg.end - seg.start) / m.duration * 100).toFixed(1);
+                        const color = motionColors[seg.motion_type] || 'bg-gray-500';
+                        const label = seg.motion_type.replace('_', ' ');
+                        html += `<div class="${color} opacity-80 hover:opacity-100 transition" style="width: ${widthPct}%" title="${label}: ${seg.start.toFixed(1)}s - ${seg.end.toFixed(1)}s"></div>`;
+                    });
+                    html += `</div>`;
+
+                    const types = [...new Set(m.segments.map(s => s.motion_type))];
+                    html += `<div class="flex flex-wrap gap-2 mt-2 text-xs">`;
+                    types.forEach(t => {
+                        const color = motionColors[t] || 'bg-gray-500';
+                        html += `<span class="flex items-center gap-1"><span class="w-3 h-3 rounded ${color}"></span>${t.replace('_', ' ')}</span>`;
+                    });
+                    html += `</div>`;
+
+                    // Generate suggested timestamps
+                    let suggested = [];
+                    for (const seg of m.segments) {
+                        const segDuration = seg.end - seg.start;
+                        if (seg.motion_type === 'static' || seg.motion_type === 'handheld') {
+                            suggested.push((seg.start + seg.end) / 2);
+                        } else {
+                            suggested.push(seg.start + 0.2);
+                            if (segDuration > 1.0) suggested.push(seg.end - 0.2);
+                        }
+                    }
+                    suggested = [...new Set(suggested)].sort((a, b) => a - b).slice(0, 5);
+                    suggested = suggested.map(t => Math.max(0.1, Math.min(t, m.duration - 0.1)));
+                    const suggestedStr = suggested.map(t => t.toFixed(1)).join(', ');
+
+                    html += `<div class="mt-3 pt-3 border-t border-gray-700">`;
+                    html += `<span class="text-xs text-gray-500">Suggested timestamps: </span>`;
+                    html += `<code class="text-xs text-cyan-300 bg-gray-800 px-2 py-1 rounded select-all cursor-pointer" title="Click to select">${suggestedStr}</code>`;
+                    html += `</div>`;
+                }
+
+                document.getElementById('motionContent').innerHTML = html;
+            } else if (stepFailed('motion', data.motion)) {
+                document.getElementById('motionContent').innerHTML =
+                    '<p class="empty-state text-yellow-500">Motion analysis failed</p>';
+                document.getElementById('motionPrimary').textContent = '—';
+            } else {
+                document.getElementById('motionContent').innerHTML =
+                    '<p class="empty-state">No motion data</p>';
+                document.getElementById('motionPrimary').textContent = '—';
+            }
+
             // Scenes
             const sceneCount = data.scenes?.count || 0;
             document.getElementById('sceneCount').textContent = sceneCount;
@@ -1183,6 +1383,7 @@
 
                 // Reset stored results
                 lastResults = {};
+                document.getElementById('timestampInput').value = '';
 
                 // Reset result card placeholders (use dash for "not run yet")
                 const emptyMsg = '<p class="text-gray-600 text-center py-4">—</p>';
@@ -1196,6 +1397,8 @@
                 document.getElementById('objectsList').innerHTML = emptyMsg;
                 document.getElementById('descriptionsSection').classList.add('hidden');
                 document.getElementById('ocrContent').innerHTML = emptyMsg;
+                document.getElementById('motionContent').innerHTML = emptyMsg;
+                document.getElementById('motionPrimary').textContent = '—';
                 document.getElementById('sceneCount').textContent = '—';
                 document.getElementById('scenesTimeline').innerHTML = '<div class="text-gray-600 text-sm py-2 text-center">—</div>';
                 document.getElementById('mapCard').classList.add('hidden');

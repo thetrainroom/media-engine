@@ -8,15 +8,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from polybos_engine import __version__
-from polybos_engine.config import get_settings, ObjectDetector
+from polybos_engine.config import ObjectDetector, get_settings
 from polybos_engine.extractors import (
+    analyze_motion,
     extract_clip,
     extract_faces,
     extract_metadata,
@@ -26,6 +27,7 @@ from polybos_engine.extractors import (
     extract_scenes,
     extract_telemetry,
     extract_transcript,
+    get_sample_timestamps,
     unload_qwen_model,
     unload_whisper_model,
 )
@@ -34,6 +36,8 @@ from polybos_engine.schemas import (
     ExtractRequest,
     ExtractResponse,
     HealthResponse,
+    MotionResult,
+    MotionSegment,
     TelemetryResult,
 )
 
@@ -285,6 +289,33 @@ def run_extraction_job(
                 logger.warning(f"Faces failed: {e}")
                 complete_step("faces", None)
 
+        # Motion analysis
+        if request.enable_motion:
+            update_step("motion")
+            try:
+                motion_analysis = analyze_motion(file_path)
+                motion_result = MotionResult(
+                    duration=motion_analysis.duration,
+                    fps=motion_analysis.fps,
+                    primary_motion=str(motion_analysis.primary_motion),
+                    segments=[
+                        MotionSegment(
+                            start=s.start,
+                            end=s.end,
+                            motion_type=str(s.motion_type),
+                            intensity=s.intensity,
+                        )
+                        for s in motion_analysis.segments
+                    ],
+                    avg_intensity=motion_analysis.avg_intensity,
+                    is_stable=motion_analysis.is_stable,
+                )
+                complete_step("motion", motion_result.model_dump())
+                logger.info(f"Motion: {motion_result.primary_motion}, {len(motion_result.segments)} segments")
+            except Exception as e:
+                logger.warning(f"Motion analysis failed: {e}")
+                complete_step("motion", None)
+
         # Objects (use configurable detector)
         if request.enable_objects:
             update_step("objects")
@@ -302,9 +333,19 @@ def run_extraction_job(
                 if detector == ObjectDetector.QWEN:
                     # Use passed context, or build from earlier extraction results
                     qwen_context = context or _build_qwen_context(jobs[job_id].results)
+
+                    # Use timestamps from request (frontend decides)
+                    timestamps = request.qwen_timestamps
+                    if timestamps:
+                        logger.info(f"Using {len(timestamps)} timestamps from request")
+                    else:
+                        logger.info("No timestamps provided, Qwen will sample from middle")
+
                     objects = extract_objects_qwen(
-                        file_path, scenes=scene_detections, context=qwen_context,
-                        progress_callback=update_progress
+                        file_path,
+                        timestamps=timestamps,
+                        context=qwen_context,
+                        progress_callback=update_progress,
                     )
                 else:
                     objects = extract_objects(file_path, scenes=scene_detections)
@@ -534,9 +575,19 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             if detector == ObjectDetector.QWEN:
                 update_batch_progress("objects", "Loading Qwen model...", 0, total_files)
                 for i, file_path in enumerate(files):
-                    update_batch_progress("objects", f"Analyzing {Path(file_path).name}", i + 1, total_files)
+                    fname = Path(file_path).name
+                    update_batch_progress("objects", f"Analyzing motion: {fname}", i + 1, total_files)
                     try:
-                        objects = extract_objects_qwen(file_path)
+                        # Run motion analysis to get optimal sample timestamps
+                        timestamps: list[float] | None = None
+                        try:
+                            motion = analyze_motion(file_path)
+                            timestamps = get_sample_timestamps(motion, max_samples=5)
+                        except Exception:
+                            pass  # Fall back to middle sampling
+
+                        update_batch_progress("objects", f"Analyzing: {fname}", i + 1, total_files)
+                        objects = extract_objects_qwen(file_path, timestamps=timestamps)
                         objects_data: dict[str, Any] = {"summary": objects.summary}
                         if objects.descriptions:
                             objects_data["descriptions"] = objects.descriptions
@@ -714,6 +765,32 @@ async def extract(request: ExtractRequest):
         except Exception as e:
             logger.warning(f"Face detection failed: {e}")
 
+    # Motion analysis
+    motion_result: MotionResult | None = None
+    motion_analysis = None
+    if request.enable_motion:
+        try:
+            motion_analysis = analyze_motion(request.file)
+            motion_result = MotionResult(
+                duration=motion_analysis.duration,
+                fps=motion_analysis.fps,
+                primary_motion=str(motion_analysis.primary_motion),
+                segments=[
+                    MotionSegment(
+                        start=s.start,
+                        end=s.end,
+                        motion_type=str(s.motion_type),
+                        intensity=s.intensity,
+                    )
+                    for s in motion_analysis.segments
+                ],
+                avg_intensity=motion_analysis.avg_intensity,
+                is_stable=motion_analysis.is_stable,
+            )
+            logger.info(f"Motion: {motion_result.primary_motion}, {len(motion_result.segments)} segments")
+        except Exception as e:
+            logger.warning(f"Motion analysis failed: {e}")
+
     # Extract objects
     objects = None
     if request.enable_objects:
@@ -721,9 +798,16 @@ async def extract(request: ExtractRequest):
             scene_detections = scenes.detections if scenes else None
             detector = request.object_detector or settings.object_detector
             if detector == ObjectDetector.QWEN:
+                # Use timestamps from request (frontend decides)
+                timestamps = request.qwen_timestamps
+                if timestamps:
+                    logger.info(f"Using {len(timestamps)} timestamps from request")
+                else:
+                    logger.info("No timestamps provided, Qwen will sample from middle")
+
                 objects = extract_objects_qwen(
                     request.file,
-                    scenes=scene_detections,
+                    timestamps=timestamps,
                     context=request.context,
                 )
                 logger.info(f"Qwen object detection: {len(objects.summary)} types")
@@ -772,6 +856,7 @@ async def extract(request: ExtractRequest):
         objects=objects,
         embeddings=embeddings,
         ocr=ocr,
+        motion=motion_result,
     )
 
 
