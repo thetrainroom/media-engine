@@ -668,6 +668,12 @@
             errorState.classList.add('hidden');
             document.getElementById('processingFile').textContent = filename;
 
+            // Reset video player
+            const videoPlayer = document.getElementById('videoPlayer');
+            videoPlayer.pause();
+            videoPlayer.removeAttribute('src');
+            videoPlayer.load();
+
             // Reset all cards to waiting state
             document.getElementById('metadataContent').innerHTML = '<p class="text-gray-500">Waiting...</p>';
             document.getElementById('metadataContent').dataset.filled = '';
