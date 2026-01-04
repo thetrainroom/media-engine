@@ -37,6 +37,12 @@ cpu = [
     "torch>=2.0.0",
     "ultralytics>=8.0.0",
 ]
+qwen = [
+    "transformers>=4.40.0",
+    "accelerate>=0.30.0",
+    "qwen-vl-utils>=0.0.8",
+    "torch>=2.0.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.0.0",

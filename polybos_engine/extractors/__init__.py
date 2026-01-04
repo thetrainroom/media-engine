@@ -4,6 +4,7 @@ from .clip import extract_clip
 from .faces import extract_faces
 from .metadata import extract_metadata
 from .objects import extract_objects
+from .objects_qwen import extract_objects_qwen
 from .ocr import extract_ocr
 from .scenes import extract_scenes
 from .telemetry import extract_telemetry
@@ -15,6 +16,7 @@ __all__ = [
     "extract_faces",
     "extract_scenes",
     "extract_objects",
+    "extract_objects_qwen",
     "extract_clip",
     "extract_ocr",
     "extract_telemetry",

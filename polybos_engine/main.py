@@ -21,6 +21,7 @@ from polybos_engine.extractors import (
     extract_faces,
     extract_metadata,
     extract_objects,
+    extract_objects_qwen,
     extract_ocr,
     extract_scenes,
     extract_telemetry,
@@ -86,9 +87,72 @@ jobs: dict[str, JobStatus] = {}
 jobs_lock = threading.Lock()
 
 
-def run_extraction_job(job_id: str, file_path: str) -> None:
+def _build_qwen_context(results: dict[str, Any]) -> dict[str, str] | None:
+    """Build context for Qwen from earlier extraction results.
+
+    Extracts relevant information from metadata, transcript, faces, etc.
+    to provide context for more accurate scene descriptions.
+    """
+    context: dict[str, str] = {}
+
+    # From metadata
+    metadata = results.get("metadata")
+    if metadata:
+        # Device info
+        device = metadata.get("device")
+        if device and device.get("make"):
+            device_str = device.get("make", "")
+            if device.get("model"):
+                device_str += f" {device['model']}"
+            if device_str:
+                context["device"] = device_str
+
+        # Shot type
+        shot_type = metadata.get("shot_type")
+        if shot_type and shot_type.get("primary"):
+            context["shot_type"] = shot_type["primary"]
+
+        # GPS location (could be reverse geocoded in future)
+        gps = metadata.get("gps")
+        if gps and gps.get("latitude"):
+            context["coordinates"] = f"{gps['latitude']:.4f}, {gps['longitude']:.4f}"
+
+    # From transcript
+    transcript = results.get("transcript")
+    if transcript:
+        # Language
+        lang = transcript.get("language")
+        if lang and isinstance(lang, str):
+            # Map language codes to readable names
+            lang_names = {
+                "en": "English", "de": "German", "fr": "French",
+                "es": "Spanish", "it": "Italian", "no": "Norwegian",
+                "sv": "Swedish", "da": "Danish", "nl": "Dutch",
+                "ja": "Japanese", "zh": "Chinese", "ko": "Korean",
+            }
+            context["language"] = lang_names.get(lang, lang)
+
+        # Speaker count
+        speaker_count = transcript.get("speaker_count")
+        if speaker_count and speaker_count > 0:
+            context["speakers"] = f"{speaker_count} speaker(s)"
+
+    # From faces (could be matched to database in future)
+    faces = results.get("faces")
+    if faces:
+        unique_count = faces.get("unique_estimate", 0)
+        if unique_count > 0:
+            context["people_visible"] = f"{unique_count} person(s)"
+
+    # Return None if no context was found
+    return context if context else None
+
+
+def run_extraction_job(job_id: str, file_path: str, object_detector: str | None = None) -> None:
     """Run extraction in background thread."""
     settings = get_settings()
+    # Use request parameter or fall back to settings
+    detector = object_detector or settings.object_detector
 
     def update_step(step: str) -> None:
         with jobs_lock:
@@ -171,13 +235,34 @@ def run_extraction_job(job_id: str, file_path: str) -> None:
             logger.warning(f"Faces failed: {e}")
             complete_step("faces", None)
 
-        # Objects
+        # Objects (use configurable detector)
         update_step("objects")
         try:
-            objects = extract_objects(file_path)
+            # Get scene detections for scene-aware sampling
+            scene_detections = None
+            if "scenes" in jobs[job_id].results and jobs[job_id].results["scenes"]:
+                from polybos_engine.schemas import SceneDetection
+                scene_data = jobs[job_id].results["scenes"]
+                scene_detections = [
+                    SceneDetection(**s) for s in scene_data.get("detections", [])
+                ]
+
+            # Use configured detector (yolo or qwen)
+            if detector == "qwen":
+                # Build context from earlier extraction results
+                context = _build_qwen_context(jobs[job_id].results)
+                objects = extract_objects_qwen(
+                    file_path, scenes=scene_detections, context=context
+                )
+            else:
+                objects = extract_objects(file_path, scenes=scene_detections)
+
             # Only include summary for job polling (full detections too large)
             if objects:
-                complete_step("objects", {"summary": objects.summary})
+                objects_data: dict[str, Any] = {"summary": objects.summary}
+                if objects.descriptions:
+                    objects_data["descriptions"] = objects.descriptions
+                complete_step("objects", objects_data)
             else:
                 complete_step("objects", None)
         except Exception as e:
@@ -244,7 +329,10 @@ async def create_job(request: ExtractRequest) -> dict[str, str]:
         jobs[job_id] = job
 
     # Start background thread
-    thread = threading.Thread(target=run_extraction_job, args=(job_id, request.file))
+    thread = threading.Thread(
+        target=run_extraction_job,
+        args=(job_id, request.file, request.object_detector)
+    )
     thread.start()
 
     return {"job_id": job_id}
@@ -347,15 +435,24 @@ async def extract(request: ExtractRequest):
         except Exception as e:
             logger.warning(f"Face detection failed: {e}")
 
-    # Extract objects
+    # Extract objects (use configurable detector)
     objects = None
     if not request.skip_objects:
         try:
-            objects = extract_objects(
-                request.file,
-                sample_fps=request.object_sample_fps,
-            )
-            logger.info(f"Object detection complete: {len(objects.detections)} detections")
+            scene_detections = scenes.detections if scenes else None
+            if settings.object_detector == "qwen":
+                objects = extract_objects_qwen(
+                    request.file,
+                    scenes=scene_detections,
+                )
+                logger.info(f"Qwen object detection: {len(objects.summary)} types")
+            else:
+                objects = extract_objects(
+                    request.file,
+                    scenes=scene_detections,
+                    sample_fps=request.object_sample_fps,
+                )
+                logger.info(f"YOLO object detection: {len(objects.detections)} detections")
         except Exception as e:
             logger.warning(f"Object detection failed: {e}")
 
@@ -541,8 +638,9 @@ async def list_extractors():
             },
             {
                 "name": "objects",
-                "description": "Object detection using YOLO",
+                "description": "Object detection (YOLO or Qwen2-VL)",
                 "skip_flag": "skip_objects",
+                "backend": get_settings().object_detector,
             },
             {
                 "name": "clip",

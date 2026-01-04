@@ -55,6 +55,9 @@ class ExtractRequest(BaseModel):
     face_sample_fps: float = Field(default=1.0, description="Face detection sample rate")
     object_sample_fps: float = Field(default=2.0, description="Object detection sample rate")
 
+    # Object detection
+    object_detector: str | None = Field(default=None, description="Object detector: 'yolo' or 'qwen'")
+
 
 # === Response Models ===
 
@@ -247,6 +250,7 @@ class ObjectsResult(BaseModel):
 
     summary: dict[str, int]
     detections: list[ObjectDetection]
+    descriptions: list[str] | None = None  # Scene descriptions from VLM
 
 
 class ClipSegment(BaseModel):

@@ -35,6 +35,11 @@ DEFAULT_FACE_SAMPLE_FPS = 1.0
 DEFAULT_OBJECT_SAMPLE_FPS = 2.0
 DEFAULT_MIN_FACE_SIZE = 80
 
+# Object detection
+DEFAULT_OBJECT_DETECTOR = "yolo"
+DEFAULT_QWEN_MODEL = "Qwen/Qwen2-VL-2B-Instruct"
+DEFAULT_QWEN_FRAMES_PER_SCENE = 1
+
 # OCR - Latin script languages (see https://www.jaided.ai/easyocr/)
 # For CJK: ch_sim, ch_tra, ja, ko
 DEFAULT_OCR_LANGUAGES: list[str] = [
@@ -69,6 +74,13 @@ class DeviceType(StrEnum):
     CPU = "cpu"
 
 
+class ObjectDetector(StrEnum):
+    """Object detection backend."""
+
+    YOLO = "yolo"
+    QWEN = "qwen"
+
+
 # =============================================================================
 # Settings (loaded from JSON config file)
 # =============================================================================
@@ -96,6 +108,11 @@ class Settings(BaseModel):
     face_sample_fps: float = DEFAULT_FACE_SAMPLE_FPS
     object_sample_fps: float = DEFAULT_OBJECT_SAMPLE_FPS
     min_face_size: int = DEFAULT_MIN_FACE_SIZE
+
+    # Object detection settings
+    object_detector: str = DEFAULT_OBJECT_DETECTOR  # "yolo" or "qwen"
+    qwen_model: str = DEFAULT_QWEN_MODEL
+    qwen_frames_per_scene: int = DEFAULT_QWEN_FRAMES_PER_SCENE
 
     # OCR settings
     ocr_languages: list[str] = DEFAULT_OCR_LANGUAGES.copy()
