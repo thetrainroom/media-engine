@@ -9,16 +9,48 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <style>
         .drop-zone.dragover { border-color: #3b82f6; background-color: rgba(59, 130, 246, 0.1); }
-        .card { @apply bg-gray-800 rounded-xl p-6 shadow-lg; }
+        .card { @apply bg-gray-800/80 backdrop-blur rounded-xl p-6 shadow-lg border border-gray-700/50; }
+        .result-card {
+            @apply bg-gradient-to-br from-gray-800/90 to-gray-800/70 backdrop-blur rounded-xl p-5 shadow-xl border border-gray-700/50;
+            transition: all 0.2s ease;
+        }
+        .result-card:hover {
+            @apply border-gray-600/70 shadow-2xl;
+            transform: translateY(-1px);
+        }
+        .card-header {
+            @apply flex items-center gap-2.5 mb-4 pb-3 border-b border-gray-700/50;
+        }
+        .card-icon {
+            @apply w-8 h-8 rounded-md flex items-center justify-center flex-shrink-0;
+        }
+        .card-icon svg { @apply w-4 h-4; }
+        .card-title { @apply text-lg font-semibold; }
+        .card-badge {
+            @apply text-xs px-2.5 py-1 rounded-full font-medium ml-auto;
+        }
         #map { height: 300px; border-radius: 0.75rem; }
         .face-thumb { @apply w-20 h-20 rounded-lg object-cover border-2 border-gray-600; }
-        .segment { @apply p-3 rounded-lg bg-gray-700 hover:bg-gray-600 cursor-pointer transition; }
+        .segment {
+            @apply p-3 rounded-lg bg-gray-700/50 hover:bg-gray-600/50 cursor-pointer transition border border-transparent hover:border-gray-500/30;
+        }
         .spinner { animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
         .progress-step { @apply flex items-center gap-2 text-sm; }
         .progress-step.done { @apply text-green-400; }
         .progress-step.active { @apply text-blue-400; }
         .progress-step.pending { @apply text-gray-500; }
+        .tag-pill {
+            @apply px-3 py-1.5 rounded-full text-sm font-medium transition;
+        }
+        .empty-state {
+            @apply text-gray-500 text-center py-6 text-sm;
+        }
+        .metadata-row {
+            @apply flex justify-between py-2 border-b border-gray-700/30 last:border-0;
+        }
+        .metadata-label { @apply text-gray-400; }
+        .metadata-value { @apply text-gray-100 font-medium; }
     </style>
 </head>
 <body class="bg-gray-900 text-gray-100 min-h-screen">
@@ -93,6 +125,23 @@
             </div>
         </div>
 
+        <!-- Action Buttons (shown after extraction) -->
+        <div id="actionBar" class="hidden card mb-6 flex gap-4 items-center flex-wrap">
+            <button id="rerunBtn" class="flex items-center gap-2 bg-gradient-to-r from-green-600 to-green-500 hover:from-green-500 hover:to-green-400 px-5 py-2.5 rounded-lg font-medium transition shadow-lg shadow-green-500/20">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                </svg>
+                Re-run
+            </button>
+            <button id="newExtractBtn" class="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-5 py-2.5 rounded-lg font-medium transition">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
+                </svg>
+                Change File
+            </button>
+            <span id="actionFileName" class="text-sm text-gray-400 font-mono truncate ml-auto"></span>
+        </div>
+
         <!-- File Browser -->
         <div id="uploadZone" class="mb-8">
             <div class="card">
@@ -135,12 +184,14 @@
         </div>
 
         <!-- Processing State -->
-        <div id="processingState" class="hidden mb-8">
-            <div class="card">
-                <div class="flex items-center gap-4 mb-6">
-                    <div class="spinner w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full"></div>
+        <div id="processingState" class="hidden mb-6">
+            <div class="result-card">
+                <div class="flex items-center gap-3 mb-5 pb-4 border-b border-gray-700/50">
+                    <div class="w-8 h-8 rounded-md bg-blue-500/20 flex items-center justify-center">
+                        <div class="spinner w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full"></div>
+                    </div>
                     <div>
-                        <h3 class="text-lg font-semibold" id="processingTitle">Processing video...</h3>
+                        <h3 class="text-lg font-semibold" id="processingTitle">Processing...</h3>
                         <p class="text-sm text-gray-400" id="processingFile"></p>
                     </div>
                 </div>
@@ -174,91 +225,103 @@
         </div>
 
         <!-- Results -->
-        <div id="results" class="hidden space-y-6">
+        <div id="results" class="hidden space-y-5">
             <!-- Top Row: Video + Metadata -->
-            <div class="grid md:grid-cols-2 gap-6">
+            <div class="grid md:grid-cols-2 gap-5">
                 <!-- Video Player -->
-                <div class="card">
-                    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                        </svg>
-                        Video
-                    </h2>
+                <div class="result-card">
+                    <div class="card-header">
+                        <div class="card-icon bg-blue-500/20 text-blue-400">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                            </svg>
+                        </div>
+                        <span class="card-title">Video</span>
+                    </div>
                     <video id="videoPlayer" controls class="w-full rounded-lg bg-black"></video>
                 </div>
 
                 <!-- Metadata Card -->
-                <div class="card">
-                    <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-                        </svg>
-                        Metadata
-                    </h2>
-                    <div id="metadataContent" class="space-y-3 text-sm">
+                <div class="result-card">
+                    <div class="card-header">
+                        <div class="card-icon bg-cyan-500/20 text-cyan-400">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                            </svg>
+                        </div>
+                        <span class="card-title">Metadata</span>
+                    </div>
+                    <div id="metadataContent" class="text-sm">
                         <!-- Filled by JS -->
                     </div>
                 </div>
             </div>
 
             <!-- Map (if GPS available) -->
-            <div id="mapCard" class="card hidden">
-                <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
-                    </svg>
-                    Location
-                    <span id="locationName" class="text-gray-400 font-normal text-sm ml-2"></span>
-                </h2>
+            <div id="mapCard" class="result-card hidden">
+                <div class="card-header">
+                    <div class="card-icon bg-green-500/20 text-green-400">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"/>
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"/>
+                        </svg>
+                    </div>
+                    <span class="card-title">Location</span>
+                    <span id="locationName" class="text-gray-400 font-normal text-sm"></span>
+                </div>
                 <div id="map"></div>
             </div>
 
             <!-- Transcript -->
-            <div id="transcriptCard" class="card">
-                <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"/>
-                    </svg>
-                    Transcript
-                    <span id="transcriptLang" class="text-gray-400 font-normal text-sm ml-2"></span>
-                </h2>
-                <div id="transcriptContent" class="space-y-2 max-h-64 overflow-y-auto">
-                    <p class="text-gray-600 text-center py-4">—</p>
+            <div id="transcriptCard" class="result-card">
+                <div class="card-header">
+                    <div class="card-icon bg-violet-500/20 text-violet-400">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"/>
+                        </svg>
+                    </div>
+                    <span class="card-title">Transcript</span>
+                    <span id="transcriptLang" class="card-badge bg-violet-500/20 text-violet-300"></span>
+                </div>
+                <div id="transcriptContent" class="space-y-2 max-h-72 overflow-y-auto pr-2">
+                    <p class="empty-state">—</p>
                 </div>
             </div>
 
             <!-- Faces -->
-            <div id="facesCard" class="card">
-                <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/>
-                    </svg>
-                    Faces Detected
-                    <span id="faceCount" class="bg-gray-600 text-white text-xs px-2 py-1 rounded-full ml-2">—</span>
-                </h2>
+            <div id="facesCard" class="result-card">
+                <div class="card-header">
+                    <div class="card-icon bg-amber-500/20 text-amber-400">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/>
+                        </svg>
+                    </div>
+                    <span class="card-title">Faces</span>
+                    <span id="faceCount" class="card-badge bg-amber-500/20 text-amber-300">—</span>
+                </div>
                 <p id="facesSummary" class="text-gray-400 text-sm mb-4"></p>
-                <div id="facesGrid" class="flex flex-wrap gap-2">
-                    <p class="text-gray-600 text-center py-4">—</p>
+                <div id="facesGrid" class="flex flex-wrap gap-3">
+                    <p class="empty-state w-full">—</p>
                 </div>
             </div>
 
             <!-- Objects -->
-            <div id="objectsCard" class="card">
-                <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
-                    </svg>
-                    Objects Detected
-                </h2>
+            <div id="objectsCard" class="result-card">
+                <div class="card-header">
+                    <div class="card-icon bg-rose-500/20 text-rose-400">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                        </svg>
+                    </div>
+                    <span class="card-title">Objects</span>
+                </div>
                 <div id="objectsList" class="flex flex-wrap gap-2">
-                    <p class="text-gray-600 text-center py-4">—</p>
+                    <p class="empty-state w-full">—</p>
                 </div>
                 <!-- Scene Descriptions (from VLM) -->
-                <div id="descriptionsSection" class="hidden mt-4 pt-4 border-t border-gray-700">
-                    <h3 class="text-sm font-medium text-gray-400 mb-2 flex items-center gap-2">
+                <div id="descriptionsSection" class="hidden mt-5 pt-4 border-t border-gray-700/50">
+                    <h3 class="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
                         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h7"/>
                         </svg>
@@ -270,48 +333,46 @@
             </div>
 
             <!-- OCR -->
-            <div id="ocrCard" class="card">
-                <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
-                    </svg>
-                    Text Detected (OCR)
-                </h2>
+            <div id="ocrCard" class="result-card">
+                <div class="card-header">
+                    <div class="card-icon bg-teal-500/20 text-teal-400">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                        </svg>
+                    </div>
+                    <span class="card-title">Text (OCR)</span>
+                </div>
                 <div id="ocrContent" class="space-y-2">
-                    <p class="text-gray-600 text-center py-4">—</p>
+                    <p class="empty-state">—</p>
                 </div>
             </div>
 
             <!-- Scenes -->
-            <div id="scenesCard" class="card">
-                <h2 class="text-lg font-semibold mb-4 flex items-center gap-2">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"/>
-                    </svg>
-                    Scenes
-                    <span id="sceneCount" class="bg-gray-600 text-white text-xs px-2 py-1 rounded-full ml-2">—</span>
-                </h2>
-                <div id="scenesTimeline" class="flex gap-1 h-8 rounded overflow-hidden bg-gray-700">
+            <div id="scenesCard" class="result-card">
+                <div class="card-header">
+                    <div class="card-icon bg-purple-500/20 text-purple-400">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"/>
+                        </svg>
+                    </div>
+                    <span class="card-title">Scenes</span>
+                    <span id="sceneCount" class="card-badge bg-purple-500/20 text-purple-300">—</span>
+                </div>
+                <div id="scenesTimeline" class="flex gap-1 h-10 rounded-lg overflow-hidden bg-gray-700/50">
                     <!-- Filled by JS -->
                 </div>
             </div>
 
-            <!-- Actions -->
-            <div class="card flex gap-4">
-                <button id="newExtractBtn" class="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-lg transition">
-                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
-                    </svg>
-                    New Extraction
-                </button>
-                <button id="toggleJson" class="flex items-center gap-2 text-gray-400 hover:text-white transition">
+            <!-- JSON Toggle -->
+            <div class="result-card flex justify-end">
+                <button id="toggleJson" class="flex items-center gap-2 text-gray-400 hover:text-white px-4 py-2 rounded-lg hover:bg-gray-700/50 transition">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/>
                     </svg>
-                    Show Raw JSON
+                    JSON
                 </button>
             </div>
-            <pre id="jsonOutput" class="hidden card text-xs bg-gray-900 p-4 overflow-auto max-h-96"></pre>
+            <pre id="jsonOutput" class="hidden result-card text-xs font-mono bg-gray-900/80 p-4 overflow-auto max-h-96 border border-gray-700"></pre>
         </div>
 
         <!-- Error State -->
@@ -559,9 +620,9 @@
                 updateStep(step, 'done');
             }
 
-            // Mark current step as active
+            // Mark current step as active with progress info
             if (jobData.current_step) {
-                updateStep(jobData.current_step, 'active');
+                updateStep(jobData.current_step, 'active', jobData.progress);
             }
 
             // Update results display as they come in
@@ -569,7 +630,7 @@
 
             // Metadata
             if (r.metadata && !document.getElementById('metadataContent').dataset.filled) {
-                updateMetadataCard(r.metadata);
+                updateMetadataCard(r.metadata, selectedPath);
             }
 
             // Transcript
@@ -644,10 +705,10 @@
                     document.getElementById('objectsList').innerHTML = entries
                         .sort((a, b) => b[1] - a[1])
                         .map(([label, count]) =>
-                            `<span class="bg-gray-700 px-3 py-1 rounded-full text-sm">${label} <span class="text-gray-400">${count}</span></span>`
+                            `<span class="tag-pill bg-rose-500/10 text-rose-300 border border-rose-500/20 hover:bg-rose-500/20">${label}</span>`
                         ).join('');
                 } else {
-                    document.getElementById('objectsList').innerHTML = '<p class="text-gray-500">No objects detected</p>';
+                    document.getElementById('objectsList').innerHTML = '<p class="empty-state w-full">No objects detected</p>';
                 }
 
                 // Display scene descriptions if available (from VLM)
@@ -656,13 +717,13 @@
                 if (r.objects.descriptions && r.objects.descriptions.length > 0) {
                     descriptionsSection.classList.remove('hidden');
                     descriptionsList.innerHTML = r.objects.descriptions
-                        .map((desc, i) => `<p class="bg-gray-700/50 rounded-lg p-3 italic">"${desc}"</p>`)
+                        .map((desc, i) => `<p class="bg-gray-700/30 rounded-lg p-3 text-gray-300 border-l-2 border-rose-500/50">"${desc}"</p>`)
                         .join('');
                 } else {
                     descriptionsSection.classList.add('hidden');
                 }
             } else if (jobData.completed_steps.includes('objects')) {
-                document.getElementById('objectsList').innerHTML = '<p class="text-gray-500">No objects detected</p>';
+                document.getElementById('objectsList').innerHTML = '<p class="empty-state w-full">No objects detected</p>';
                 document.getElementById('descriptionsSection').classList.add('hidden');
             }
 
@@ -670,71 +731,84 @@
             if (jobData.completed_steps.includes('ocr') && r.ocr?.detections?.length > 0) {
                 const texts = [...new Set(r.ocr.detections.map(d => d.text))].slice(0, 10);
                 document.getElementById('ocrContent').innerHTML = texts.map(t =>
-                    `<div class="bg-gray-700 px-3 py-2 rounded text-sm">"${t}"</div>`
+                    `<div class="bg-teal-500/10 border border-teal-500/20 px-3 py-2 rounded-lg text-sm text-teal-200">"${t}"</div>`
                 ).join('');
             } else if (jobData.completed_steps.includes('ocr')) {
                 document.getElementById('ocrContent').innerHTML = '<p class="text-gray-500">No text detected</p>';
             }
         }
 
-        function updateMetadataCard(metadata) {
+        function updateMetadataCard(metadata, filePath) {
             const container = document.getElementById('metadataContent');
-            let html = buildMetadataHtml(metadata);
+            let html = buildMetadataHtml(metadata, filePath);
             container.innerHTML = html;
             container.dataset.filled = 'true';
         }
 
-        function buildMetadataHtml(meta) {
+        function buildMetadataHtml(meta, filePath) {
             let html = '';
 
+            // Helper for metadata rows
+            const row = (label, value) => `<div class="flex justify-between py-1.5 border-b border-gray-700/30 last:border-0"><span class="text-gray-400">${label}</span><span class="text-gray-100 font-medium">${value}</span></div>`;
+
+            // File info at top
+            if (filePath) {
+                const filename = filePath.split('/').pop();
+                const dir = filePath.substring(0, filePath.lastIndexOf('/'));
+                html += `<div class="mb-3 pb-3 border-b border-gray-600/50">`;
+                html += `<div class="font-semibold text-white mb-1">${filename}</div>`;
+                html += `<div class="text-xs text-gray-500 font-mono break-all select-all cursor-pointer hover:text-gray-400" title="Click to select">${filePath}</div>`;
+                html += `</div>`;
+            }
+
             // Basic info
-            html += `<div class="flex justify-between"><span class="text-gray-400">Duration</span><span>${formatDuration(meta.duration)}</span></div>`;
-            html += `<div class="flex justify-between"><span class="text-gray-400">Resolution</span><span>${meta.resolution.width}x${meta.resolution.height}</span></div>`;
-            if (meta.fps) html += `<div class="flex justify-between"><span class="text-gray-400">FPS</span><span>${meta.fps}</span></div>`;
+            html += row('Duration', formatDuration(meta.duration));
+            html += row('Resolution', `${meta.resolution.width}×${meta.resolution.height}`);
+            if (meta.fps) html += row('Frame Rate', `${meta.fps} fps`);
 
             // Video codec details
             if (meta.video_codec) {
                 let codecInfo = meta.video_codec.name;
                 if (meta.video_codec.profile) codecInfo += ` (${meta.video_codec.profile})`;
                 if (meta.video_codec.bit_depth) codecInfo += ` ${meta.video_codec.bit_depth}-bit`;
-                html += `<div class="flex justify-between"><span class="text-gray-400">Video Codec</span><span>${codecInfo}</span></div>`;
+                html += row('Video Codec', codecInfo);
                 if (meta.video_codec.pixel_format) {
-                    html += `<div class="flex justify-between"><span class="text-gray-400">Pixel Format</span><span>${meta.video_codec.pixel_format}</span></div>`;
+                    html += row('Pixel Format', meta.video_codec.pixel_format);
                 }
             } else if (meta.codec?.video) {
-                html += `<div class="flex justify-between"><span class="text-gray-400">Video Codec</span><span>${meta.codec.video}</span></div>`;
+                html += row('Video Codec', meta.codec.video);
             }
 
             // Audio info
             if (meta.audio) {
                 let audioInfo = meta.audio.codec || 'unknown';
                 if (meta.audio.bit_depth) audioInfo += ` ${meta.audio.bit_depth}-bit`;
-                html += `<div class="flex justify-between"><span class="text-gray-400">Audio Codec</span><span>${audioInfo}</span></div>`;
+                html += row('Audio', audioInfo);
                 if (meta.audio.sample_rate) {
-                    html += `<div class="flex justify-between"><span class="text-gray-400">Sample Rate</span><span>${(meta.audio.sample_rate / 1000).toFixed(1)} kHz</span></div>`;
+                    html += row('Sample Rate', `${(meta.audio.sample_rate / 1000).toFixed(1)} kHz`);
                 }
                 if (meta.audio.channels) {
-                    const chLabel = meta.audio.channels === 1 ? 'Mono' : meta.audio.channels === 2 ? 'Stereo' : `${meta.audio.channels} channels`;
-                    html += `<div class="flex justify-between"><span class="text-gray-400">Audio Channels</span><span>${chLabel}</span></div>`;
+                    const chLabel = meta.audio.channels === 1 ? 'Mono' : meta.audio.channels === 2 ? 'Stereo' : `${meta.audio.channels}ch`;
+                    html += row('Channels', chLabel);
                 }
             }
 
             // File info
             if (meta.file_size) {
-                html += `<div class="flex justify-between"><span class="text-gray-400">File Size</span><span>${formatFileSize(meta.file_size)}</span></div>`;
+                html += row('File Size', formatFileSize(meta.file_size));
             }
             if (meta.bitrate) {
-                html += `<div class="flex justify-between"><span class="text-gray-400">Data Rate</span><span>${(meta.bitrate / 1_000_000).toFixed(1)} Mbps</span></div>`;
+                html += row('Data Rate', `${(meta.bitrate / 1_000_000).toFixed(1)} Mbps`);
             }
             if (meta.timecode) {
-                html += `<div class="flex justify-between"><span class="text-gray-400">Timecode</span><span class="font-mono">${meta.timecode}</span></div>`;
+                html += row('Timecode', `<span class="font-mono">${meta.timecode}</span>`);
             }
 
             // Device info
             if (meta.device) {
-                html += `<div class="flex justify-between"><span class="text-gray-400">Device</span><span>${meta.device.make} ${meta.device.model || ''}</span></div>`;
+                html += row('Device', `${meta.device.make} ${meta.device.model || ''}`);
                 if (meta.device.type && meta.device.type !== 'unknown') {
-                    html += `<div class="flex justify-between"><span class="text-gray-400">Type</span><span class="capitalize">${meta.device.type}</span></div>`;
+                    html += row('Type', `<span class="capitalize">${meta.device.type}</span>`);
                 }
             }
 
@@ -742,7 +816,7 @@
             if (meta.color_space) {
                 let colorInfo = [meta.color_space.transfer, meta.color_space.primaries].filter(Boolean).join(' / ');
                 if (colorInfo) {
-                    html += `<div class="flex justify-between"><span class="text-gray-400">Color Space</span><span>${colorInfo}</span></div>`;
+                    html += row('Color Space', colorInfo);
                 }
             }
 
@@ -751,15 +825,15 @@
                 let lensInfo = '';
                 if (meta.lens.focal_length) lensInfo += `${meta.lens.focal_length}mm`;
                 if (meta.lens.focal_length_35mm) lensInfo += ` (${meta.lens.focal_length_35mm}mm equiv)`;
-                if (meta.lens.aperture) lensInfo += ` f/${meta.lens.aperture}`;
+                if (meta.lens.aperture) lensInfo += ` ƒ/${meta.lens.aperture}`;
                 if (lensInfo) {
-                    html += `<div class="flex justify-between"><span class="text-gray-400">Lens</span><span>${lensInfo}</span></div>`;
+                    html += row('Lens', lensInfo);
                 }
             }
 
             // Shot type
             if (meta.shot_type) {
-                html += `<div class="flex justify-between"><span class="text-gray-400">Shot Type</span><span class="capitalize">${meta.shot_type.primary} (${Math.round(meta.shot_type.confidence * 100)}%)</span></div>`;
+                html += row('Shot Type', `<span class="capitalize">${meta.shot_type.primary}</span> <span class="text-gray-500">${Math.round(meta.shot_type.confidence * 100)}%</span>`);
             }
 
             return html;
@@ -864,17 +938,35 @@
             processingState.classList.add('hidden');
         }
 
-        function updateStep(step, state) {
+        function updateStep(step, state, progress = null) {
             const el = document.querySelector(`[data-step="${step}"]`);
             if (!el) return;
 
             el.classList.remove('pending', 'active', 'done');
             el.classList.add(state);
 
+            // Find or create progress element
+            let progressEl = el.querySelector('.step-progress');
+            if (!progressEl && state === 'active' && progress) {
+                progressEl = document.createElement('div');
+                progressEl.className = 'step-progress text-xs text-blue-300 mt-0.5';
+                el.appendChild(progressEl);
+            }
+
             if (state === 'done') {
                 el.querySelector('.step-icon').textContent = '✓';
+                if (progressEl) progressEl.remove();
             } else if (state === 'active') {
                 el.querySelector('.step-icon').textContent = '◉';
+                if (progress && progressEl) {
+                    if (progress.current && progress.total) {
+                        progressEl.textContent = `${progress.message} (${progress.current}/${progress.total})`;
+                    } else {
+                        progressEl.textContent = progress.message;
+                    }
+                }
+            } else {
+                if (progressEl) progressEl.remove();
             }
         }
 
@@ -894,6 +986,10 @@
             processingState.classList.add('hidden');
             results.classList.remove('hidden');
 
+            // Show action bar with current filename
+            document.getElementById('actionBar').classList.remove('hidden');
+            document.getElementById('actionFileName').textContent = filePath.split('/').pop();
+
             // Helper to check if step failed (completed but no result)
             const stepFailed = (step, result) => completedSteps.has(step) && !result;
 
@@ -902,7 +998,7 @@
 
             // Metadata
             const meta = data.metadata;
-            document.getElementById('metadataContent').innerHTML = buildMetadataHtml(meta);
+            document.getElementById('metadataContent').innerHTML = buildMetadataHtml(meta, filePath);
 
             // Map
             if (meta.gps) {
@@ -1002,7 +1098,7 @@
                 const objHtml = Object.entries(data.objects.summary)
                     .sort((a, b) => b[1] - a[1])
                     .map(([label, count]) =>
-                        `<span class="bg-gray-700 px-3 py-1 rounded-full text-sm">${label} <span class="text-gray-400">${count}</span></span>`
+                        `<span class="tag-pill bg-rose-500/10 text-rose-300 border border-rose-500/20 hover:bg-rose-500/20">${label}</span>`
                     ).join('');
                 document.getElementById('objectsList').innerHTML = objHtml;
 
@@ -1012,18 +1108,18 @@
                 if (data.objects.descriptions && data.objects.descriptions.length > 0) {
                     descriptionsSection.classList.remove('hidden');
                     descriptionsList.innerHTML = data.objects.descriptions
-                        .map((desc, i) => `<p class="bg-gray-700/50 rounded-lg p-3 italic">"${desc}"</p>`)
+                        .map((desc, i) => `<p class="bg-gray-700/30 rounded-lg p-3 text-gray-300 border-l-2 border-rose-500/50">"${desc}"</p>`)
                         .join('');
                 } else {
                     descriptionsSection.classList.add('hidden');
                 }
             } else if (stepFailed('objects', data.objects)) {
                 document.getElementById('objectsList').innerHTML =
-                    '<p class="text-yellow-500">⚠ Object detection failed</p>';
+                    '<p class="empty-state w-full text-yellow-500">Object detection failed</p>';
                 document.getElementById('descriptionsSection').classList.add('hidden');
             } else {
                 document.getElementById('objectsList').innerHTML =
-                    '<p class="text-gray-500">No objects detected</p>';
+                    '<p class="empty-state w-full">No objects detected</p>';
                 document.getElementById('descriptionsSection').classList.add('hidden');
             }
 
@@ -1031,26 +1127,26 @@
             if (data.ocr && data.ocr.detections && data.ocr.detections.length > 0) {
                 const uniqueTexts = [...new Set(data.ocr.detections.map(d => d.text))];
                 const ocrHtml = uniqueTexts.slice(0, 10).map(text =>
-                    `<div class="bg-gray-700 px-3 py-2 rounded text-sm">"${text}"</div>`
+                    `<div class="bg-teal-500/10 border border-teal-500/20 px-3 py-2 rounded-lg text-sm text-teal-200">"${text}"</div>`
                 ).join('');
                 document.getElementById('ocrContent').innerHTML = ocrHtml;
             } else if (stepFailed('ocr', data.ocr)) {
                 document.getElementById('ocrContent').innerHTML =
-                    '<p class="text-yellow-500">⚠ OCR failed</p>';
+                    '<p class="empty-state text-yellow-500">OCR failed</p>';
             } else {
                 document.getElementById('ocrContent').innerHTML =
-                    '<p class="text-gray-500">No text detected in video</p>';
+                    '<p class="empty-state">No text detected</p>';
             }
 
             // Scenes
             const sceneCount = data.scenes?.count || 0;
             document.getElementById('sceneCount').textContent = sceneCount;
             if (sceneCount > 0) {
-                const colors = ['bg-blue-500', 'bg-purple-500', 'bg-green-500', 'bg-yellow-500', 'bg-pink-500', 'bg-cyan-500'];
+                const colors = ['bg-purple-500', 'bg-indigo-500', 'bg-violet-500', 'bg-fuchsia-500', 'bg-pink-500', 'bg-purple-400'];
                 const totalDuration = meta.duration;
                 const scenesHtml = data.scenes.detections.map((scene, i) => {
                     const width = (scene.duration / totalDuration * 100).toFixed(2);
-                    return `<div class="${colors[i % colors.length]} cursor-pointer hover:opacity-80"
+                    return `<div class="${colors[i % colors.length]} cursor-pointer hover:brightness-110 transition"
                                 style="width: ${width}%"
                                 title="Scene ${i + 1}: ${formatTime(scene.start)} - ${formatTime(scene.end)}"
                                 onclick="seekTo(${scene.start})"></div>`;
@@ -1070,10 +1166,20 @@
                 document.getElementById('jsonOutput').classList.toggle('hidden');
             };
 
-            // New extraction button
+            // Re-run button - run again on same file with current checkbox settings
+            document.getElementById('rerunBtn').onclick = () => {
+                if (selectedPath) {
+                    // Clear the metadata filled flag so it can be updated
+                    document.getElementById('metadataContent').dataset.filled = '';
+                    handleExtract(selectedPath);
+                }
+            };
+
+            // Change file button
             document.getElementById('newExtractBtn').onclick = () => {
                 results.classList.add('hidden');
                 uploadZone.classList.remove('hidden');
+                document.getElementById('actionBar').classList.add('hidden');
 
                 // Reset stored results
                 lastResults = {};

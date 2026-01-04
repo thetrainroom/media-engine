@@ -6,14 +6,184 @@ import os
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import torch
+from PIL import Image
 
 from polybos_engine.config import get_device, get_settings, DeviceType
 from polybos_engine.schemas import BoundingBox, ObjectDetection, ObjectsResult, SceneDetection
 
 logger = logging.getLogger(__name__)
+
+# Progress callback type: (message, current, total) -> None
+ProgressCallback = Callable[[str, int | None, int | None], None]
+
+# Similarity threshold - frames more similar than this are considered duplicates
+FRAME_SIMILARITY_THRESHOLD = 0.92
+
+# Singleton model instances (lazy loaded, stays in memory between calls)
+_qwen_model: Any = None
+_qwen_processor: Any = None
+_qwen_model_name: str | None = None
+_qwen_device: str | None = None
+
+
+def unload_qwen_model() -> None:
+    """Unload Qwen model from memory to free GPU/MPS memory."""
+    global _qwen_model, _qwen_processor, _qwen_model_name, _qwen_device
+
+    if _qwen_model is not None:
+        logger.info("Unloading Qwen model from memory")
+        del _qwen_model
+        del _qwen_processor
+        _qwen_model = None
+        _qwen_processor = None
+        _qwen_model_name = None
+        _qwen_device = None
+
+        # Free GPU memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
+
+        import gc
+        gc.collect()
+
+
+def _get_qwen_model(
+    model_name: str,
+    progress_callback: ProgressCallback | None = None,
+) -> tuple[Any, Any, str]:
+    """Get or create the Qwen model and processor (singleton).
+
+    Returns (model, processor, device_str).
+    Model stays loaded in memory for subsequent calls.
+    """
+    global _qwen_model, _qwen_processor, _qwen_model_name, _qwen_device
+
+    # Return cached model if same model requested
+    if _qwen_model is not None and _qwen_model_name == model_name:
+        logger.info(f"Reusing cached Qwen model: {model_name}")
+        return _qwen_model, _qwen_processor, _qwen_device  # type: ignore
+
+    # Need to load new model
+    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+
+    # Determine device
+    device = get_device()
+    if device == DeviceType.MPS:
+        torch_device = "mps"
+        torch_dtype = torch.float16
+    elif device == DeviceType.CUDA:
+        torch_device = "cuda"
+        torch_dtype = torch.float16
+    else:
+        torch_device = "cpu"
+        torch_dtype = torch.float32
+
+    logger.info(f"Loading Qwen2-VL model: {model_name} on {torch_device}")
+    if progress_callback:
+        progress_callback("Loading Qwen model...", None, None)
+
+    # Load model and processor
+    _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+        model_name,
+        torch_dtype=torch_dtype,
+        device_map=torch_device,
+    )
+    _qwen_processor = AutoProcessor.from_pretrained(model_name)
+    _qwen_model_name = model_name
+    _qwen_device = torch_device
+
+    return _qwen_model, _qwen_processor, torch_device
+
+
+def _compute_frame_histogram(image_path: str) -> np.ndarray | None:
+    """Compute a normalized color histogram for an image."""
+    try:
+        img = Image.open(image_path).convert("RGB")
+        # Resize to small size for faster comparison
+        img = img.resize((64, 64))
+        arr = np.array(img)
+
+        # Compute histogram for each channel and concatenate
+        hist_r = np.histogram(arr[:, :, 0], bins=32, range=(0, 256))[0]
+        hist_g = np.histogram(arr[:, :, 1], bins=32, range=(0, 256))[0]
+        hist_b = np.histogram(arr[:, :, 2], bins=32, range=(0, 256))[0]
+
+        hist = np.concatenate([hist_r, hist_g, hist_b]).astype(float)
+        # Normalize
+        hist = hist / (hist.sum() + 1e-7)
+        return hist
+    except Exception:
+        return None
+
+
+def _histogram_similarity(hist1: np.ndarray, hist2: np.ndarray) -> float:
+    """Compute similarity between two histograms using correlation."""
+    # Correlation coefficient (-1 to 1, higher = more similar)
+    if hist1 is None or hist2 is None:
+        return 0.0
+
+    h1 = hist1 - hist1.mean()
+    h2 = hist2 - hist2.mean()
+
+    denom = np.sqrt((h1 ** 2).sum() * (h2 ** 2).sum())
+    if denom < 1e-7:
+        return 1.0  # Both are flat/similar
+
+    return float(np.dot(h1, h2) / denom)
+
+
+def _select_diverse_frames(
+    frame_paths: list[str],
+    timestamps: list[float],
+    similarity_threshold: float = FRAME_SIMILARITY_THRESHOLD,
+    max_frames: int = 5,
+) -> tuple[list[str], list[float]]:
+    """Select diverse frames by filtering out similar consecutive frames.
+
+    Returns frames that are visually different from each other.
+    """
+    if not frame_paths:
+        return [], []
+
+    # Compute histograms for all frames
+    histograms = [_compute_frame_histogram(p) if p else None for p in frame_paths]
+
+    # Always keep the first valid frame
+    selected_paths: list[str] = []
+    selected_timestamps: list[float] = []
+    last_hist: np.ndarray | None = None
+
+    for i, (path, ts, hist) in enumerate(zip(frame_paths, timestamps, histograms)):
+        if not path or hist is None:
+            continue
+
+        if last_hist is None:
+            # First valid frame - always keep
+            selected_paths.append(path)
+            selected_timestamps.append(ts)
+            last_hist = hist
+        else:
+            # Compare with last selected frame
+            similarity = _histogram_similarity(last_hist, hist)
+
+            if similarity < similarity_threshold:
+                # Frame is different enough - keep it
+                selected_paths.append(path)
+                selected_timestamps.append(ts)
+                last_hist = hist
+
+                if len(selected_paths) >= max_frames:
+                    break
+
+    return selected_paths, selected_timestamps
 
 
 def _build_analysis_prompt(context: dict[str, str] | None = None) -> str:
@@ -96,6 +266,7 @@ def extract_objects_qwen(
     frames_per_scene: int | None = None,
     model_name: str | None = None,
     context: dict[str, str] | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> ObjectsResult:
     """Extract objects using Qwen2-VL vision-language model.
 
@@ -114,11 +285,11 @@ def extract_objects_qwen(
             - "language": Language spoken in the video
             - "device": Camera/device used
             - "topic": Subject matter of the video
+        progress_callback: Optional callback for progress updates (message, current, total)
 
     Returns:
         ObjectsResult with detected objects and contextual descriptions
     """
-    from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
     from qwen_vl_utils import process_vision_info
 
     settings = get_settings()
@@ -129,27 +300,8 @@ def extract_objects_qwen(
     if not path.exists():
         raise FileNotFoundError(f"Video file not found: {file_path}")
 
-    # Determine device
-    device = get_device()
-    if device == DeviceType.MPS:
-        torch_device = "mps"
-        torch_dtype = torch.float16
-    elif device == DeviceType.CUDA:
-        torch_device = "cuda"
-        torch_dtype = torch.float16
-    else:
-        torch_device = "cpu"
-        torch_dtype = torch.float32
-
-    logger.info(f"Loading Qwen2-VL model: {model_name} on {torch_device}")
-
-    # Load model and processor
-    model = Qwen2VLForConditionalGeneration.from_pretrained(
-        model_name,
-        torch_dtype=torch_dtype,
-        device_map=torch_device,
-    )
-    processor = AutoProcessor.from_pretrained(model_name)
+    # Get or create singleton model (stays loaded between calls)
+    model, processor, torch_device = _get_qwen_model(model_name, progress_callback)
 
     # Create temp directory for frames
     temp_dir = tempfile.mkdtemp(prefix="polybos_qwen_")
@@ -160,22 +312,43 @@ def extract_objects_qwen(
             timestamps = _get_timestamps_from_scenes(scenes, frames_per_scene)
             logger.info(f"Sampling {len(timestamps)} frames from {len(scenes)} scenes")
         else:
-            # No scenes - sample evenly across video
+            # No scenes - sample candidate frames every 2-3 seconds, then filter for diversity
             duration = _get_video_duration(file_path)
-            sample_count = max(5, int(duration / 30))  # ~1 frame per 30 seconds
-            timestamps = [duration * i / (sample_count + 1) for i in range(1, sample_count + 1)]
-            logger.info(f"No scenes provided, sampling {len(timestamps)} frames evenly")
+            # Sample candidates every 2 seconds (we'll filter similar ones)
+            candidate_interval = 2.0
+            candidate_count = max(3, int(duration / candidate_interval))
+            timestamps = [duration * i / (candidate_count + 1) for i in range(1, candidate_count + 1)]
+            logger.info(f"Sampling {len(timestamps)} candidate frames from {duration:.0f}s video")
 
-        # Extract frames
+        # Extract candidate frames
+        if progress_callback:
+            progress_callback("Extracting frames...", None, None)
         frame_paths = _extract_frames_at_timestamps(file_path, temp_dir, timestamps)
+
+        # Filter for diverse frames (skip similar consecutive frames)
+        if not scenes and len(frame_paths) > 1:
+            if progress_callback:
+                progress_callback("Filtering similar frames...", None, None)
+            original_count = len([p for p in frame_paths if p])
+            frame_paths, timestamps = _select_diverse_frames(
+                frame_paths, timestamps, max_frames=5
+            )
+            logger.info(f"Selected {len(frame_paths)} diverse frames from {original_count} candidates")
+
+        total_frames = len([p for p in frame_paths if p])
 
         all_objects: dict[str, int] = {}
         detections: list[ObjectDetection] = []
         descriptions: list[str] = []
+        frame_count = 0
 
         for frame_path, timestamp in zip(frame_paths, timestamps):
             if not frame_path or not os.path.exists(frame_path):
                 continue
+
+            frame_count += 1
+            if progress_callback:
+                progress_callback(f"Analyzing frame {frame_count}/{total_frames}...", frame_count, total_frames)
 
             try:
                 # Build the prompt with optional context

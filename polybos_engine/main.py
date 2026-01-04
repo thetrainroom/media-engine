@@ -26,6 +26,8 @@ from polybos_engine.extractors import (
     extract_scenes,
     extract_telemetry,
     extract_transcript,
+    unload_qwen_model,
+    unload_whisper_model,
 )
 from polybos_engine.extractors.shot_type import detect_shot_type
 from polybos_engine.schemas import (
@@ -68,6 +70,13 @@ if demo_path.exists():
 # Job Queue System
 # ============================================================================
 
+class JobProgress(BaseModel):
+    """Progress within current extraction step."""
+    message: str  # e.g., "Loading model...", "Processing frame 2/5"
+    current: int | None = None
+    total: int | None = None
+
+
 class JobStatus(BaseModel):
     """Status of an extraction job."""
     job_id: str
@@ -75,6 +84,7 @@ class JobStatus(BaseModel):
     file: str
     filename: str
     current_step: str | None = None
+    progress: JobProgress | None = None  # Progress within current step
     completed_steps: list[str] = []
     results: dict[str, Any] = {}
     error: str | None = None
@@ -163,12 +173,22 @@ def run_extraction_job(
         with jobs_lock:
             if job_id in jobs:
                 jobs[job_id].current_step = step
+                jobs[job_id].progress = None
+
+    def update_progress(message: str, current: int | None = None, total: int | None = None) -> None:
+        """Update progress within current step."""
+        with jobs_lock:
+            if job_id in jobs:
+                jobs[job_id].progress = JobProgress(
+                    message=message, current=current, total=total
+                )
 
     def complete_step(step: str, result: Any) -> None:
         with jobs_lock:
             if job_id in jobs:
                 jobs[job_id].completed_steps.append(step)
                 jobs[job_id].current_step = None
+                jobs[job_id].progress = None
                 if result is not None:
                     jobs[job_id].results[step] = result
 
@@ -216,6 +236,7 @@ def run_extraction_job(
                     fallback_language=request.fallback_language,
                     language_hints=request.language_hints,
                     context_hint=request.context_hint,
+                    progress_callback=update_progress,
                 )
                 complete_step("transcript", transcript.model_dump() if transcript else None)
             except Exception as e:
@@ -282,7 +303,8 @@ def run_extraction_job(
                     # Use passed context, or build from earlier extraction results
                     qwen_context = context or _build_qwen_context(jobs[job_id].results)
                     objects = extract_objects_qwen(
-                        file_path, scenes=scene_detections, context=qwen_context
+                        file_path, scenes=scene_detections, context=qwen_context,
+                        progress_callback=update_progress
                     )
                 else:
                     objects = extract_objects(file_path, scenes=scene_detections)
@@ -377,6 +399,230 @@ async def get_job(job_id: str) -> JobStatus:
         if job_id not in jobs:
             raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
         return jobs[job_id]
+
+
+# ============================================================================
+# Batch Job System (extractor-first processing for memory efficiency)
+# ============================================================================
+
+class BatchRequest(BaseModel):
+    """Request for batch extraction."""
+    files: list[str]
+    enable_metadata: bool = True
+    enable_scenes: bool = False
+    enable_transcript: bool = False
+    enable_faces: bool = False
+    enable_objects: bool = False
+    enable_clip: bool = False
+    enable_ocr: bool = False
+    object_detector: ObjectDetector | None = None
+    whisper_model: str = "large-v3"
+
+
+class BatchFileStatus(BaseModel):
+    """Status for a single file in a batch."""
+    file: str
+    filename: str
+    status: str  # pending, running, completed, failed
+    results: dict[str, Any] = {}
+    error: str | None = None
+
+
+class BatchJobStatus(BaseModel):
+    """Status of a batch extraction job."""
+    batch_id: str
+    status: str  # pending, running, completed, failed
+    current_extractor: str | None = None
+    progress: JobProgress | None = None
+    files: list[BatchFileStatus] = []
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
+# In-memory batch store
+batch_jobs: dict[str, BatchJobStatus] = {}
+batch_jobs_lock = threading.Lock()
+
+
+def run_batch_job(batch_id: str, request: BatchRequest) -> None:
+    """Run batch extraction - processes all files per extractor stage.
+
+    This is more memory efficient as each model is loaded once,
+    processes all files, then is unloaded before the next model.
+    """
+    settings = get_settings()
+    detector = request.object_detector or settings.object_detector
+
+    def update_batch_progress(extractor: str, message: str, current: int | None = None, total: int | None = None) -> None:
+        with batch_jobs_lock:
+            if batch_id in batch_jobs:
+                batch_jobs[batch_id].current_extractor = extractor
+                batch_jobs[batch_id].progress = JobProgress(
+                    message=message, current=current, total=total
+                )
+
+    def update_file_status(file_idx: int, status: str, result_key: str | None = None, result: Any = None, error: str | None = None) -> None:
+        with batch_jobs_lock:
+            if batch_id in batch_jobs and file_idx < len(batch_jobs[batch_id].files):
+                batch_jobs[batch_id].files[file_idx].status = status
+                if result_key and result is not None:
+                    batch_jobs[batch_id].files[file_idx].results[result_key] = result
+                if error:
+                    batch_jobs[batch_id].files[file_idx].error = error
+
+    try:
+        with batch_jobs_lock:
+            batch_jobs[batch_id].status = "running"
+
+        files = request.files
+        total_files = len(files)
+
+        # Stage 1: Metadata (fast, no ML model)
+        if request.enable_metadata:
+            update_batch_progress("metadata", "Extracting metadata...", 0, total_files)
+            for i, file_path in enumerate(files):
+                update_batch_progress("metadata", f"Processing {Path(file_path).name}", i + 1, total_files)
+                try:
+                    metadata = extract_metadata(file_path)
+                    update_file_status(i, "running", "metadata", metadata.model_dump())
+                except Exception as e:
+                    logger.warning(f"Metadata failed for {file_path}: {e}")
+
+        # Stage 2: Scenes (PySceneDetect - moderate memory)
+        if request.enable_scenes:
+            update_batch_progress("scenes", "Detecting scenes...", 0, total_files)
+            for i, file_path in enumerate(files):
+                update_batch_progress("scenes", f"Processing {Path(file_path).name}", i + 1, total_files)
+                try:
+                    scenes = extract_scenes(file_path)
+                    update_file_status(i, "running", "scenes", scenes.model_dump() if scenes else None)
+                except Exception as e:
+                    logger.warning(f"Scenes failed for {file_path}: {e}")
+
+        # Stage 3: Transcript (Whisper - heavy model)
+        if request.enable_transcript:
+            update_batch_progress("transcript", "Loading Whisper model...", 0, total_files)
+            for i, file_path in enumerate(files):
+                update_batch_progress("transcript", f"Transcribing {Path(file_path).name}", i + 1, total_files)
+                try:
+                    transcript = extract_transcript(file_path, model=request.whisper_model)
+                    update_file_status(i, "running", "transcript", transcript.model_dump() if transcript else None)
+                except Exception as e:
+                    logger.warning(f"Transcript failed for {file_path}: {e}")
+            # Unload Whisper to free memory
+            update_batch_progress("transcript", "Unloading Whisper model...", None, None)
+            unload_whisper_model()
+
+        # Stage 4: Faces (DeepFace - moderate model)
+        if request.enable_faces:
+            update_batch_progress("faces", "Detecting faces...", 0, total_files)
+            for i, file_path in enumerate(files):
+                update_batch_progress("faces", f"Processing {Path(file_path).name}", i + 1, total_files)
+                try:
+                    faces = extract_faces(file_path)
+                    if faces:
+                        faces_data = {
+                            "count": faces.count,
+                            "unique_estimate": faces.unique_estimate,
+                        }
+                        update_file_status(i, "running", "faces", faces_data)
+                except Exception as e:
+                    logger.warning(f"Faces failed for {file_path}: {e}")
+
+        # Stage 5: Objects (YOLO or Qwen - heavy model)
+        if request.enable_objects:
+            if detector == ObjectDetector.QWEN:
+                update_batch_progress("objects", "Loading Qwen model...", 0, total_files)
+                for i, file_path in enumerate(files):
+                    update_batch_progress("objects", f"Analyzing {Path(file_path).name}", i + 1, total_files)
+                    try:
+                        objects = extract_objects_qwen(file_path)
+                        objects_data: dict[str, Any] = {"summary": objects.summary}
+                        if objects.descriptions:
+                            objects_data["descriptions"] = objects.descriptions
+                        update_file_status(i, "running", "objects", objects_data)
+                    except Exception as e:
+                        logger.warning(f"Objects failed for {file_path}: {e}")
+                # Unload Qwen to free memory
+                update_batch_progress("objects", "Unloading Qwen model...", None, None)
+                unload_qwen_model()
+            else:
+                update_batch_progress("objects", "Detecting objects with YOLO...", 0, total_files)
+                for i, file_path in enumerate(files):
+                    update_batch_progress("objects", f"Processing {Path(file_path).name}", i + 1, total_files)
+                    try:
+                        objects = extract_objects(file_path)
+                        update_file_status(i, "running", "objects", {"summary": objects.summary} if objects else None)
+                    except Exception as e:
+                        logger.warning(f"Objects failed for {file_path}: {e}")
+
+        # Stage 6: OCR (EasyOCR - moderate model)
+        if request.enable_ocr:
+            update_batch_progress("ocr", "Extracting text...", 0, total_files)
+            for i, file_path in enumerate(files):
+                update_batch_progress("ocr", f"Processing {Path(file_path).name}", i + 1, total_files)
+                try:
+                    ocr = extract_ocr(file_path)
+                    update_file_status(i, "running", "ocr", ocr.model_dump() if ocr else None)
+                except Exception as e:
+                    logger.warning(f"OCR failed for {file_path}: {e}")
+
+        # Mark all files as completed
+        with batch_jobs_lock:
+            for i in range(len(files)):
+                batch_jobs[batch_id].files[i].status = "completed"
+            batch_jobs[batch_id].status = "completed"
+            batch_jobs[batch_id].current_extractor = None
+            batch_jobs[batch_id].progress = None
+            batch_jobs[batch_id].completed_at = datetime.now(timezone.utc)
+
+    except Exception as e:
+        logger.error(f"Batch {batch_id} failed: {e}")
+        with batch_jobs_lock:
+            if batch_id in batch_jobs:
+                batch_jobs[batch_id].status = "failed"
+                batch_jobs[batch_id].completed_at = datetime.now(timezone.utc)
+
+
+@app.post("/batch")
+async def create_batch(request: BatchRequest) -> dict[str, str]:
+    """Create a new batch extraction job (memory-efficient extractor-first processing)."""
+    # Validate all files exist
+    for file_path in request.files:
+        if not Path(file_path).exists():
+            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+
+    batch_id = str(uuid.uuid4())[:8]
+    batch = BatchJobStatus(
+        batch_id=batch_id,
+        status="pending",
+        files=[
+            BatchFileStatus(file=f, filename=Path(f).name, status="pending")
+            for f in request.files
+        ],
+        created_at=datetime.now(timezone.utc),
+    )
+
+    with batch_jobs_lock:
+        batch_jobs[batch_id] = batch
+
+    # Start background thread
+    thread = threading.Thread(
+        target=run_batch_job,
+        args=(batch_id, request)
+    )
+    thread.start()
+
+    return {"batch_id": batch_id}
+
+
+@app.get("/batch/{batch_id}")
+async def get_batch(batch_id: str) -> BatchJobStatus:
+    """Get batch job status and results."""
+    with batch_jobs_lock:
+        if batch_id not in batch_jobs:
+            raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
+        return batch_jobs[batch_id]
 
 
 @app.get("/health", response_model=HealthResponse)

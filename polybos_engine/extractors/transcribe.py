@@ -5,12 +5,16 @@ import os
 import subprocess
 import tempfile
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from polybos_engine.config import get_settings, has_cuda, is_apple_silicon
 from polybos_engine.schemas import Transcript, TranscriptHints, TranscriptSegment
+
+# Progress callback type: (message, current, total) -> None
+ProgressCallback = Callable[[str, int | None, int | None], None]
 
 
 @dataclass
@@ -246,6 +250,32 @@ def get_transcription_backend() -> TranscriptionBackend:
         )
 
 
+def unload_whisper_model() -> None:
+    """Unload Whisper model from memory to free GPU/MPS memory."""
+    global _backend
+
+    if _backend is not None:
+        logger.info("Unloading Whisper model from memory")
+        # Clear internal model references
+        if hasattr(_backend, "_model"):
+            del _backend._model
+            _backend._model = None
+        _backend = None
+
+        # Free GPU memory
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
+        except ImportError:
+            pass
+
+        import gc
+        gc.collect()
+
+
 # Singleton diarization pipeline
 _diarization_pipeline: Any = None
 
@@ -409,6 +439,7 @@ def extract_transcript(
     fallback_language: str = "en",
     language_hints: list[str] | None = None,
     context_hint: str | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> Transcript:
     """Extract transcript from video file.
 
@@ -428,6 +459,8 @@ def extract_transcript(
         raise FileNotFoundError(f"Video file not found: {file_path}")
 
     # Extract audio
+    if progress_callback:
+        progress_callback("Extracting audio...", None, None)
     logger.info(f"Extracting audio from {file_path}")
     audio_path = extract_audio(file_path)
 
@@ -444,6 +477,8 @@ def extract_transcript(
 
         if use_language is None:
             # First pass: detect language
+            if progress_callback:
+                progress_callback("Detecting language...", None, None)
             logger.info("Detecting language...")
             detect_result = backend.transcribe(
                 audio_path, model=model, language=None, initial_prompt=None
@@ -463,6 +498,8 @@ def extract_transcript(
                 use_language = detected_lang
 
         # Main transcription
+        if progress_callback:
+            progress_callback("Transcribing audio...", None, None)
         logger.info(f"Transcribing with language={use_language}, model={model}")
         result = backend.transcribe(
             audio_path,
@@ -472,6 +509,8 @@ def extract_transcript(
         )
 
         # Run diarization if available
+        if progress_callback:
+            progress_callback("Speaker diarization...", None, None)
         diarization = run_diarization(audio_path)
         speaker_count: int | None = None
 
