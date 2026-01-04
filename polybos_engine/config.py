@@ -41,6 +41,7 @@ DEFAULT_QWEN_FRAMES_PER_SCENE = 1
 
 # OCR - Latin script languages (see https://www.jaided.ai/easyocr/)
 # For CJK: ch_sim, ch_tra, ja, ko
+# Note: Finnish (fi) not supported by EasyOCR
 DEFAULT_OCR_LANGUAGES: list[str] = [
     "en",  # English
     "no",  # Norwegian
@@ -52,7 +53,6 @@ DEFAULT_OCR_LANGUAGES: list[str] = [
     "nl",  # Dutch
     "sv",  # Swedish
     "da",  # Danish
-    "fi",  # Finnish
     "pl",  # Polish
 ]
 
