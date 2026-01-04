@@ -30,6 +30,7 @@ from . import (
     blackmagic,  # noqa: F401
     canon,  # noqa: F401
     dji,  # noqa: F401
+    ffmpeg,  # noqa: F401
     sony,  # noqa: F401
 )
 from .base import build_base_metadata, run_ffprobe
