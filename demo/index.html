@@ -113,24 +113,44 @@
 
         <!-- Context (for Qwen/Whisper) -->
         <div id="contextPanel" class="card mb-6 hidden">
-            <div class="flex items-center gap-2 mb-3">
-                <span class="text-gray-400 text-sm">Context:</span>
-                <span class="text-xs text-gray-500">(optional, helps Qwen & Whisper)</span>
+            <!-- Transcript Context -->
+            <div id="transcriptContextRow" class="hidden mb-4">
+                <div class="flex items-center gap-2 mb-2">
+                    <svg class="w-4 h-4 text-violet-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"/>
+                    </svg>
+                    <span class="text-gray-300 text-sm font-medium">Transcript Context</span>
+                    <span class="text-xs text-gray-500">(helps Whisper with names, terms, accents)</span>
+                </div>
+                <textarea id="transcriptContext" rows="2"
+                    placeholder="e.g., Interview with John Smith and Jane Doe about machine learning. Technical terms: transformer, LLM, fine-tuning. Norwegian accent."
+                    class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm focus:border-violet-500 focus:outline-none resize-none"></textarea>
             </div>
-            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-                <input type="text" id="contextPerson" placeholder="Person name"
-                       class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none">
-                <input type="text" id="contextLocation" placeholder="Location"
-                       class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none">
-                <input type="text" id="contextActivity" placeholder="Activity/Topic"
-                       class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none">
-                <input type="text" id="contextLanguage" placeholder="Language hint"
-                       class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-blue-500 focus:outline-none">
-            </div>
-            <!-- Timestamps for Qwen -->
-            <div id="timestampRow" class="hidden mt-3 pt-3 border-t border-gray-700">
-                <input type="text" id="timestampInput" placeholder="Timestamps for Qwen (e.g., 1.5, 5.0, 10.2)"
-                       class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-cyan-500 focus:outline-none font-mono">
+            <!-- Qwen Context -->
+            <div id="qwenContextRow" class="hidden">
+                <div class="flex items-center gap-2 mb-2">
+                    <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                    </svg>
+                    <span class="text-gray-300 text-sm font-medium">Scene Context</span>
+                    <span class="text-xs text-gray-500">(helps Qwen identify people & objects)</span>
+                </div>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <input type="text" id="contextPerson" placeholder="Person(s): John, Jane"
+                           class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-cyan-500 focus:outline-none">
+                    <input type="text" id="contextLocation" placeholder="Location"
+                           class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-cyan-500 focus:outline-none">
+                    <input type="text" id="contextActivity" placeholder="Activity/Topic"
+                           class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-cyan-500 focus:outline-none">
+                    <input type="text" id="contextLanguage" placeholder="Language"
+                           class="bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-cyan-500 focus:outline-none">
+                </div>
+                <!-- Timestamps for Qwen -->
+                <div class="mt-3 pt-3 border-t border-gray-700">
+                    <input type="text" id="timestampInput" placeholder="Timestamps (e.g., 1.5, 5.0, 10.2) - leave empty for auto"
+                           class="w-full bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-sm focus:border-cyan-500 focus:outline-none font-mono">
+                </div>
             </div>
         </div>
 
@@ -471,18 +491,27 @@
             const transcriptEnabled = document.getElementById('chkTranscript').checked;
             const needsContext = objectsWithQwen || transcriptEnabled;
             const panel = document.getElementById('contextPanel');
+
             if (needsContext) {
                 panel.classList.remove('hidden');
             } else {
                 panel.classList.add('hidden');
             }
 
-            // Show/hide timestamp row
-            const timestampRow = document.getElementById('timestampRow');
-            if (objectsWithQwen) {
-                timestampRow.classList.remove('hidden');
+            // Show/hide transcript context row
+            const transcriptRow = document.getElementById('transcriptContextRow');
+            if (transcriptEnabled) {
+                transcriptRow.classList.remove('hidden');
             } else {
-                timestampRow.classList.add('hidden');
+                transcriptRow.classList.add('hidden');
+            }
+
+            // Show/hide Qwen context row
+            const qwenRow = document.getElementById('qwenContextRow');
+            if (objectsWithQwen) {
+                qwenRow.classList.remove('hidden');
+            } else {
+                qwenRow.classList.add('hidden');
             }
         }
 
@@ -568,33 +597,21 @@
             const enableMotion = document.getElementById('chkMotion').checked;
             const objectDetector = document.getElementById('objectDetector').value;
 
-            // Build context from form
+            // Build context for Qwen (structured fields)
             const context = {};
-            const contextHintParts = [];
-
             const person = document.getElementById('contextPerson').value.trim();
             const location = document.getElementById('contextLocation').value.trim();
             const activity = document.getElementById('contextActivity').value.trim();
             const language = document.getElementById('contextLanguage').value.trim();
 
-            if (person) {
-                context.person = person;
-                contextHintParts.push(`Speaker: ${person}`);
-            }
-            if (location) {
-                context.location = location;
-                contextHintParts.push(`Location: ${location}`);
-            }
-            if (activity) {
-                context.activity = activity;
-                contextHintParts.push(`Topic: ${activity}`);
-            }
-            if (language) {
-                context.language = language;
-                contextHintParts.push(`Language: ${language}`);
-            }
+            if (person) context.person = person;
+            if (location) context.location = location;
+            if (activity) context.activity = activity;
+            if (language) context.language = language;
 
-            const contextHint = contextHintParts.length > 0 ? contextHintParts.join('. ') + '.' : null;
+            // Get transcript context (free-form text for Whisper)
+            const transcriptContext = document.getElementById('transcriptContext').value.trim();
+            const contextHint = transcriptContext || null;
 
             showProcessing(filename);
 
