@@ -2,7 +2,13 @@
 
 from .clip import extract_clip
 from .faces import extract_faces
-from .metadata import extract_metadata, list_extractors
+from .metadata import (
+    FFPROBE_WORKERS,
+    extract_metadata,
+    list_extractors,
+    run_ffprobe_batch,
+    shutdown_ffprobe_pool,
+)
 from .motion import MotionAnalysis, MotionType, analyze_motion, get_sample_timestamps
 from .objects import extract_objects
 from .objects_qwen import extract_objects_qwen, unload_qwen_model
@@ -13,7 +19,10 @@ from .transcribe import extract_transcript, unload_whisper_model
 
 __all__ = [
     "extract_metadata",
+    "run_ffprobe_batch",
     "list_extractors",
+    "FFPROBE_WORKERS",
+    "shutdown_ffprobe_pool",
     "extract_transcript",
     "extract_faces",
     "extract_scenes",

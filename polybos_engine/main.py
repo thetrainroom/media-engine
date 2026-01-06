@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from polybos_engine import __version__
 from polybos_engine.config import ObjectDetector, get_settings
 from polybos_engine.extractors import (
+    FFPROBE_WORKERS,
     analyze_motion,
     extract_clip,
     extract_faces,
@@ -28,6 +29,7 @@ from polybos_engine.extractors import (
     extract_telemetry,
     extract_transcript,
     get_sample_timestamps,
+    run_ffprobe_batch,
     unload_qwen_model,
     unload_whisper_model,
 )
@@ -522,16 +524,34 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         files = request.files
         total_files = len(files)
 
-        # Stage 1: Metadata (fast, no ML model)
+        # Stage 1: Metadata (parallel ffprobe for speed)
         if request.enable_metadata:
-            update_batch_progress("metadata", "Extracting metadata...", 0, total_files)
+            update_batch_progress(
+                "metadata",
+                f"Running ffprobe ({FFPROBE_WORKERS} parallel workers)...",
+                0,
+                total_files
+            )
+
+            # Run all ffprobe calls in parallel
+            probe_results = run_ffprobe_batch(files)
+
+            # Extract metadata from each probe result
             for i, file_path in enumerate(files):
                 update_batch_progress("metadata", f"Processing {Path(file_path).name}", i + 1, total_files)
+                probe_data = probe_results.get(file_path)
+
+                if isinstance(probe_data, Exception):
+                    logger.warning(f"Metadata failed for {file_path}: {probe_data}")
+                    update_file_status(i, "running", "metadata", None, str(probe_data))
+                    continue
+
                 try:
-                    metadata = extract_metadata(file_path)
+                    metadata = extract_metadata(file_path, probe_data)
                     update_file_status(i, "running", "metadata", metadata.model_dump())
                 except Exception as e:
                     logger.warning(f"Metadata failed for {file_path}: {e}")
+                    update_file_status(i, "running", "metadata", None, str(e))
 
         # Stage 2: Scenes (PySceneDetect - moderate memory)
         if request.enable_scenes:

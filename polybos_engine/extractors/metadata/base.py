@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -22,6 +23,35 @@ from polybos_engine.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Pool for parallel ffprobe calls
+_ffprobe_pool: ThreadPoolExecutor | None = None
+
+# Number of workers based on CPU cores (leave 2 cores free, minimum 2 workers)
+FFPROBE_WORKERS = max(2, (os.cpu_count() or 4) - 2)
+
+# Timeout for ffprobe calls (seconds)
+FFPROBE_TIMEOUT = 30
+
+
+def get_ffprobe_pool() -> ThreadPoolExecutor:
+    """Get or create the ffprobe thread pool."""
+    global _ffprobe_pool
+    if _ffprobe_pool is None:
+        _ffprobe_pool = ThreadPoolExecutor(
+            max_workers=FFPROBE_WORKERS,
+            thread_name_prefix="ffprobe"
+        )
+        logger.info(f"Created ffprobe pool with {FFPROBE_WORKERS} workers")
+    return _ffprobe_pool
+
+
+def shutdown_ffprobe_pool() -> None:
+    """Shutdown the ffprobe pool (call on app shutdown)."""
+    global _ffprobe_pool
+    if _ffprobe_pool is not None:
+        _ffprobe_pool.shutdown(wait=False)
+        _ffprobe_pool = None
 
 
 @dataclass
@@ -43,28 +73,79 @@ class SidecarMetadata:
     lens: LensInfo | None = None
 
 
-def run_ffprobe(file_path: str) -> dict[str, Any]:
-    """Run ffprobe and return parsed JSON output."""
+def run_ffprobe(file_path: str, select_streams: bool = True) -> dict[str, Any]:
+    """Run ffprobe and return parsed JSON output.
+
+    Args:
+        file_path: Path to the media file
+        select_streams: If True, only get first video and audio stream (faster)
+    """
     cmd = [
         "ffprobe",
-        "-v",
-        "quiet",
-        "-print_format",
-        "json",
+        "-v", "quiet",
+        "-print_format", "json",
         "-show_format",
         "-show_streams",
-        file_path,
     ]
 
+    # Only get first video and first audio stream (much faster for files with many streams)
+    if select_streams:
+        cmd.extend(["-select_streams", "v:0,a:0"])
+
+    cmd.append(file_path)
+
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=FFPROBE_TIMEOUT
+        )
         return json.loads(result.stdout)
+    except subprocess.TimeoutExpired:
+        logger.error(f"ffprobe timed out after {FFPROBE_TIMEOUT}s for {file_path}")
+        raise RuntimeError(f"ffprobe timed out for {file_path}")
     except subprocess.CalledProcessError as e:
         logger.error(f"ffprobe failed: {e.stderr}")
         raise RuntimeError(f"ffprobe failed for {file_path}: {e.stderr}")
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse ffprobe output: {e}")
         raise RuntimeError(f"Failed to parse ffprobe output: {e}")
+
+
+def run_ffprobe_batch(
+    file_paths: list[str],
+    select_streams: bool = True
+) -> dict[str, dict[str, Any] | Exception]:
+    """Run ffprobe on multiple files in parallel.
+
+    Args:
+        file_paths: List of file paths to probe
+        select_streams: If True, only get first video and audio stream
+
+    Returns:
+        Dict mapping file path to probe result or Exception if failed
+    """
+    if not file_paths:
+        return {}
+
+    pool = get_ffprobe_pool()
+    futures = {
+        pool.submit(run_ffprobe, path, select_streams): path
+        for path in file_paths
+    }
+
+    results: dict[str, dict[str, Any] | Exception] = {}
+    for future in as_completed(futures):
+        path = futures[future]
+        try:
+            results[path] = future.result()
+        except Exception as e:
+            logger.warning(f"ffprobe failed for {path}: {e}")
+            results[path] = e
+
+    return results
 
 
 def parse_fps(video_stream: dict[str, Any]) -> float | None:

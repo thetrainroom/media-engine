@@ -36,7 +36,13 @@ from . import (
     red,  # noqa: F401
     sony,  # noqa: F401
 )
-from .base import build_base_metadata, run_ffprobe
+from .base import (
+    FFPROBE_WORKERS,
+    build_base_metadata,
+    run_ffprobe,
+    run_ffprobe_batch,
+    shutdown_ffprobe_pool,
+)
 
 # Import and register generic fallback LAST
 from .generic import GenericExtractor
@@ -48,20 +54,27 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "extract_metadata",
+    "run_ffprobe_batch",
     "list_extractors",
+    "FFPROBE_WORKERS",
+    "shutdown_ffprobe_pool",
 ]
 
 
-def extract_metadata(file_path: str) -> Metadata:
+def extract_metadata(
+    file_path: str,
+    probe_data: dict | None = None
+) -> Metadata:
     """Extract metadata from video file.
 
     This function:
-    1. Runs ffprobe to get basic metadata
+    1. Runs ffprobe to get basic metadata (or uses provided probe_data)
     2. Detects the manufacturer/device
     3. Calls the appropriate extractor for enhanced metadata
 
     Args:
         file_path: Path to video file
+        probe_data: Optional pre-fetched ffprobe data (for batch processing)
 
     Returns:
         Metadata object with video information
@@ -70,8 +83,9 @@ def extract_metadata(file_path: str) -> Metadata:
     if not path.exists():
         raise FileNotFoundError(f"Video file not found: {file_path}")
 
-    # Run ffprobe
-    probe_data = run_ffprobe(file_path)
+    # Run ffprobe if not provided
+    if probe_data is None:
+        probe_data = run_ffprobe(file_path)
 
     # Build base metadata (device-agnostic)
     base_metadata = build_base_metadata(probe_data, file_path)
