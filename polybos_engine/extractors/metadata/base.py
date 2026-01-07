@@ -211,28 +211,66 @@ def extract_timecode(
     return None
 
 
-def parse_creation_time(tags: dict[str, str]) -> datetime | None:
-    """Parse creation time from metadata tags."""
+def parse_creation_time(
+    tags: dict[str, str], stream_tags: dict[str, str] | None = None
+) -> datetime | None:
+    """Parse creation time from metadata tags.
+
+    Checks format-level tags first, then stream tags as fallback.
+    Normalizes keys to lowercase for case-insensitive lookup.
+    """
+    # Normalize keys to lowercase for case-insensitive lookup
+    tags_lower = {k.lower(): v for k, v in tags.items()}
+
     time_str = (
-        tags.get("creation_time")
-        or tags.get("date")
-        or tags.get("com.apple.quicktime.creationdate")
+        tags_lower.get("creation_time")
+        or tags_lower.get("date")
+        or tags_lower.get("com.apple.quicktime.creationdate")
+        or tags_lower.get("date_recorded")
+        or tags_lower.get("date-eng")  # Some MKV files
     )
+
+    # Fallback to stream tags if format tags don't have the date
+    if not time_str and stream_tags:
+        stream_tags_lower = {k.lower(): v for k, v in stream_tags.items()}
+        time_str = (
+            stream_tags_lower.get("creation_time")
+            or stream_tags_lower.get("date")
+        )
 
     if not time_str:
         return None
 
+    # Handle timezone suffixes by stripping them for parsing
+    # ffprobe can return: "2024-06-15T10:30:00.000000Z"
+    #                  or "2024-06-15 10:30:00+0200"
+    #                  or "2024-06-15T10:30:00+02:00"
+    time_str_clean = time_str.strip()
+
+    # Remove timezone offset for parsing (we'll treat as UTC if present)
+    # Patterns like +0200, +02:00, -0500, -05:00
+    tz_pattern = r"[+-]\d{2}:?\d{2}$"
+    time_str_no_tz = re.sub(tz_pattern, "", time_str_clean)
+
     formats = [
-        ("%Y-%m-%dT%H:%M:%S.%fZ", 27),
-        ("%Y-%m-%dT%H:%M:%SZ", 20),
+        ("%Y-%m-%dT%H:%M:%S.%f", None),  # Variable microseconds
         ("%Y-%m-%dT%H:%M:%S", 19),
         ("%Y-%m-%d %H:%M:%S", 19),
-        ("%Y:%m:%d %H:%M:%S", 19),
+        ("%Y:%m:%d %H:%M:%S", 19),  # EXIF format
+        ("%Y/%m/%d %H:%M:%S", 19),
+        ("%d/%m/%Y %H:%M:%S", 19),  # European format
+        ("%Y-%m-%d", 10),  # Date only
     ]
 
     for fmt, length in formats:
         try:
-            return datetime.strptime(time_str[:length], fmt)
+            if length:
+                return datetime.strptime(time_str_no_tz[:length], fmt)
+            else:
+                # Variable length (for microseconds)
+                # Find the 'T' and parse accordingly
+                if "T" in time_str_no_tz:
+                    return datetime.strptime(time_str_no_tz.rstrip("Z"), fmt)
         except ValueError:
             continue
 
@@ -402,7 +440,10 @@ def build_base_metadata(
     duration = float(format_info.get("duration", 0))
     bitrate = int(format_info.get("bit_rate", 0)) if format_info.get("bit_rate") else None
     file_size = os.path.getsize(file_path)
-    created_at = parse_creation_time(tags)
+
+    # Get stream tags for fallback date extraction
+    video_stream_tags = video_stream.get("tags", {}) if video_stream else None
+    created_at = parse_creation_time(tags, video_stream_tags)
     timecode = extract_timecode(tags, video_stream)
     gps = extract_gps_from_tags(tags)
     color_space = extract_color_space_from_stream(video_stream, tags)
