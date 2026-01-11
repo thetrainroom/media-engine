@@ -19,6 +19,7 @@ from polybos_engine.config import ObjectDetector, get_settings
 from polybos_engine.extractors import (
     FFPROBE_WORKERS,
     analyze_motion,
+    detect_voice_activity,
     extract_clip,
     extract_faces,
     extract_metadata,
@@ -31,6 +32,7 @@ from polybos_engine.extractors import (
     get_sample_timestamps,
     run_ffprobe_batch,
     unload_qwen_model,
+    unload_vad_model,
     unload_whisper_model,
 )
 from polybos_engine.extractors.shot_type import detect_shot_type
@@ -455,6 +457,7 @@ class BatchRequest(BaseModel):
     """Request for batch extraction."""
     files: list[str]
     enable_metadata: bool = True
+    enable_vad: bool = False  # Voice Activity Detection
     enable_scenes: bool = False
     enable_transcript: bool = False
     enable_faces: bool = False
@@ -553,7 +556,21 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     logger.warning(f"Metadata failed for {file_path}: {e}")
                     update_file_status(i, "running", "metadata", None, str(e))
 
-        # Stage 2: Scenes (PySceneDetect - moderate memory)
+        # Stage 2: Voice Activity Detection (Silero VAD - lightweight)
+        if request.enable_vad:
+            update_batch_progress("vad", "Loading VAD model...", 0, total_files)
+            for i, file_path in enumerate(files):
+                update_batch_progress("vad", f"Analyzing {Path(file_path).name}", i + 1, total_files)
+                try:
+                    vad_result = detect_voice_activity(file_path)
+                    update_file_status(i, "running", "vad", vad_result)
+                except Exception as e:
+                    logger.warning(f"VAD failed for {file_path}: {e}")
+            # Unload VAD model to free memory
+            update_batch_progress("vad", "Unloading VAD model...", None, None)
+            unload_vad_model()
+
+        # Stage 3: Scenes (PySceneDetect - moderate memory)
         if request.enable_scenes:
             update_batch_progress("scenes", "Detecting scenes...", 0, total_files)
             for i, file_path in enumerate(files):
@@ -564,7 +581,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 except Exception as e:
                     logger.warning(f"Scenes failed for {file_path}: {e}")
 
-        # Stage 3: Transcript (Whisper - heavy model)
+        # Stage 4: Transcript (Whisper - heavy model)
         if request.enable_transcript:
             update_batch_progress("transcript", "Loading Whisper model...", 0, total_files)
             for i, file_path in enumerate(files):
@@ -578,7 +595,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             update_batch_progress("transcript", "Unloading Whisper model...", None, None)
             unload_whisper_model()
 
-        # Stage 4: Faces (DeepFace - moderate model)
+        # Stage 5: Faces (DeepFace - moderate model)
         if request.enable_faces:
             update_batch_progress("faces", "Detecting faces...", 0, total_files)
             for i, file_path in enumerate(files):
@@ -594,7 +611,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 except Exception as e:
                     logger.warning(f"Faces failed for {file_path}: {e}")
 
-        # Stage 5: Objects (YOLO or Qwen - heavy model)
+        # Stage 6: Objects (YOLO or Qwen - heavy model)
         if request.enable_objects:
             if detector == ObjectDetector.QWEN:
                 update_batch_progress("objects", "Loading Qwen model...", 0, total_files)
@@ -631,7 +648,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     except Exception as e:
                         logger.warning(f"Objects failed for {file_path}: {e}")
 
-        # Stage 6: OCR (EasyOCR - moderate model)
+        # Stage 7: OCR (EasyOCR - moderate model)
         if request.enable_ocr:
             update_batch_progress("ocr", "Extracting text...", 0, total_files)
             for i, file_path in enumerate(files):

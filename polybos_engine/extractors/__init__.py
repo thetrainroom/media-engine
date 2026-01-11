@@ -16,6 +16,7 @@ from .ocr import extract_ocr
 from .scenes import extract_scenes
 from .telemetry import extract_telemetry
 from .transcribe import extract_transcript, unload_whisper_model
+from .vad import AudioContent, detect_voice_activity, unload_vad_model
 
 __all__ = [
     "extract_metadata",
@@ -37,4 +38,7 @@ __all__ = [
     "MotionType",
     "unload_qwen_model",
     "unload_whisper_model",
+    "detect_voice_activity",
+    "AudioContent",
+    "unload_vad_model",
 ]
