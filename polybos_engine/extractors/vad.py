@@ -1,4 +1,4 @@
-"""Voice Activity Detection using Silero VAD.
+"""Voice Activity Detection using WebRTC VAD.
 
 Fast detection of speech presence in audio files.
 Used to skip Whisper transcription for silent/ambient clips.
@@ -7,17 +7,13 @@ Used to skip Whisper transcription for silent/ambient clips.
 import logging
 import subprocess
 import tempfile
+import wave
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
 
-import torch
+import webrtcvad
 
 logger = logging.getLogger(__name__)
-
-# Lazy-loaded model
-_vad_model: Any = None
-_vad_utils: tuple[Any, ...] | None = None
 
 
 class AudioContent(StrEnum):
@@ -28,32 +24,6 @@ class AudioContent(StrEnum):
     MUSIC = "music"
     SILENT = "silent"
     UNKNOWN = "unknown"
-
-
-def _load_vad_model() -> tuple[Any, tuple[Any, ...]]:
-    """Load Silero VAD model (cached)."""
-    global _vad_model, _vad_utils
-
-    if _vad_model is not None and _vad_utils is not None:
-        return _vad_model, _vad_utils
-
-    logger.info("Loading Silero VAD model...")
-
-    # Load from torch hub - returns (model, utils) tuple
-    # Type ignore needed as torch.hub.load has dynamic return type
-    model, utils = torch.hub.load(  # type: ignore[misc]
-        repo_or_dir="snakers4/silero-vad",
-        model="silero_vad",
-        force_reload=False,
-        onnx=False,
-        trust_repo=True,
-    )
-
-    _vad_model = model
-    _vad_utils = utils
-
-    logger.info("Silero VAD model loaded")
-    return model, utils
 
 
 def _extract_audio(video_path: str, output_path: str, sample_rate: int = 16000) -> bool:
@@ -93,17 +63,62 @@ def _extract_audio(video_path: str, output_path: str, sample_rate: int = 16000) 
         return False
 
 
+def _read_wav_frames(
+    wav_path: str,
+    frame_duration_ms: int = 30,
+    max_duration_seconds: float = 120.0,
+) -> tuple[list[bytes], int, float]:
+    """Read WAV file and split into frames for VAD.
+
+    Args:
+        wav_path: Path to WAV file
+        frame_duration_ms: Frame duration in milliseconds (10, 20, or 30)
+        max_duration_seconds: Maximum audio duration to analyze
+
+    Returns:
+        Tuple of (frames, sample_rate, total_duration)
+    """
+    with wave.open(wav_path, "rb") as wf:
+        sample_rate = wf.getframerate()
+        n_channels = wf.getnchannels()
+        sample_width = wf.getsampwidth()
+
+        if sample_rate not in (8000, 16000, 32000, 48000):
+            raise ValueError(f"Unsupported sample rate: {sample_rate}")
+        if n_channels != 1:
+            raise ValueError(f"Expected mono audio, got {n_channels} channels")
+        if sample_width != 2:
+            raise ValueError(f"Expected 16-bit audio, got {sample_width * 8}-bit")
+
+        # Calculate frame size
+        frame_size = int(sample_rate * frame_duration_ms / 1000) * sample_width
+        max_frames = int(max_duration_seconds * 1000 / frame_duration_ms)
+
+        frames = []
+        total_samples = 0
+
+        while len(frames) < max_frames:
+            frame = wf.readframes(int(sample_rate * frame_duration_ms / 1000))
+            if len(frame) < frame_size:
+                break
+            frames.append(frame)
+            total_samples += int(sample_rate * frame_duration_ms / 1000)
+
+        total_duration = total_samples / sample_rate
+        return frames, sample_rate, total_duration
+
+
 def detect_voice_activity(
     file_path: str,
-    threshold: float = 0.5,
+    aggressiveness: int = 2,
     min_speech_duration: float = 0.5,
     sample_limit_seconds: float = 120.0,
 ) -> dict:
-    """Detect voice activity in a video/audio file.
+    """Detect voice activity in a video/audio file using WebRTC VAD.
 
     Args:
         file_path: Path to video or audio file
-        threshold: VAD confidence threshold (0.0-1.0)
+        aggressiveness: VAD aggressiveness (0-3, higher = less sensitive to speech)
         min_speech_duration: Minimum seconds of speech to classify as "speech"
         sample_limit_seconds: Maximum seconds to analyze (for long files)
 
@@ -118,97 +133,112 @@ def detect_voice_activity(
     if not path.exists():
         logger.error(f"File not found: {file_path}")
         return {
-            "audio_content": AudioContent.UNKNOWN,
+            "audio_content": str(AudioContent.UNKNOWN),
             "speech_ratio": 0.0,
             "speech_segments": [],
             "total_duration": 0.0,
         }
 
-    # Load model - utils is (get_speech_timestamps, save_audio, read_audio, ...)
-    model, utils = _load_vad_model()
-    get_speech_timestamps = utils[0]
-    read_audio = utils[2]
+    # Create VAD instance
+    vad = webrtcvad.Vad(aggressiveness)
+    frame_duration_ms = 30  # 30ms frames
 
-    # Extract or read audio
     with tempfile.TemporaryDirectory() as tmpdir:
         # Check if it's a video file that needs audio extraction
         video_extensions = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mxf"}
+        audio_extensions = {".wav", ".mp3", ".aac", ".m4a", ".flac", ".ogg"}
+
         if path.suffix.lower() in video_extensions:
             audio_path = Path(tmpdir) / "audio.wav"
             if not _extract_audio(file_path, str(audio_path)):
                 logger.warning(f"Could not extract audio from {file_path}")
                 return {
-                    "audio_content": AudioContent.UNKNOWN,
+                    "audio_content": str(AudioContent.UNKNOWN),
+                    "speech_ratio": 0.0,
+                    "speech_segments": [],
+                    "total_duration": 0.0,
+                }
+            wav_path = str(audio_path)
+        elif path.suffix.lower() in audio_extensions:
+            # Convert to WAV format for webrtcvad
+            audio_path = Path(tmpdir) / "audio.wav"
+            if not _extract_audio(file_path, str(audio_path)):
+                logger.warning(f"Could not convert audio from {file_path}")
+                return {
+                    "audio_content": str(AudioContent.UNKNOWN),
                     "speech_ratio": 0.0,
                     "speech_segments": [],
                     "total_duration": 0.0,
                 }
             wav_path = str(audio_path)
         else:
-            # Assume it's already an audio file
+            # Assume it's already a WAV file
             wav_path = file_path
 
-        # Read audio
+        # Read audio frames
         try:
-            wav = read_audio(wav_path, sampling_rate=16000)
+            frames, sample_rate, total_duration = _read_wav_frames(
+                wav_path,
+                frame_duration_ms=frame_duration_ms,
+                max_duration_seconds=sample_limit_seconds,
+            )
         except Exception as e:
             logger.warning(f"Could not read audio from {wav_path}: {e}")
             return {
-                "audio_content": AudioContent.UNKNOWN,
+                "audio_content": str(AudioContent.UNKNOWN),
                 "speech_ratio": 0.0,
                 "speech_segments": [],
                 "total_duration": 0.0,
             }
 
-        # Limit sample length for performance
-        sample_rate = 16000
-        max_samples = int(sample_limit_seconds * sample_rate)
-        if len(wav) > max_samples:
-            wav = wav[:max_samples]
-
-        total_duration = len(wav) / sample_rate
-
-        # Detect speech timestamps
-        try:
-            speech_timestamps = get_speech_timestamps(
-                wav,
-                model,
-                threshold=threshold,
-                sampling_rate=sample_rate,
-                min_speech_duration_ms=250,  # Minimum speech segment
-                min_silence_duration_ms=100,  # Minimum silence between segments
-            )
-        except Exception as e:
-            logger.warning(f"VAD failed for {file_path}: {e}")
+        if not frames:
+            logger.warning(f"No audio frames extracted from {file_path}")
             return {
-                "audio_content": AudioContent.UNKNOWN,
+                "audio_content": str(AudioContent.SILENT),
                 "speech_ratio": 0.0,
                 "speech_segments": [],
-                "total_duration": total_duration,
+                "total_duration": 0.0,
             }
 
+        # Analyze each frame
+        speech_frames = []
+        for frame in frames:
+            try:
+                is_speech = vad.is_speech(frame, sample_rate)
+                speech_frames.append(is_speech)
+            except Exception:
+                speech_frames.append(False)
+
     # Calculate speech statistics
+    speech_count = sum(speech_frames)
+    total_frames = len(speech_frames)
+    speech_ratio = speech_count / total_frames if total_frames > 0 else 0.0
+    total_speech_duration = speech_count * frame_duration_ms / 1000
+
+    # Build speech segments (consecutive speech frames)
     speech_segments = []
-    total_speech_samples = 0
+    segment_start = None
 
-    for ts in speech_timestamps:
-        start_sec = ts["start"] / sample_rate
-        end_sec = ts["end"] / sample_rate
-        speech_segments.append((start_sec, end_sec))
-        total_speech_samples += ts["end"] - ts["start"]
+    for i, is_speech in enumerate(speech_frames):
+        time_sec = i * frame_duration_ms / 1000
+        if is_speech and segment_start is None:
+            segment_start = time_sec
+        elif not is_speech and segment_start is not None:
+            speech_segments.append((segment_start, time_sec))
+            segment_start = None
 
-    speech_ratio = total_speech_samples / len(wav) if len(wav) > 0 else 0.0
-    total_speech_duration = total_speech_samples / sample_rate
+    # Close final segment if needed
+    if segment_start is not None:
+        speech_segments.append((segment_start, total_duration))
 
     # Classify audio content
     if total_speech_duration >= min_speech_duration and speech_ratio > 0.1:
         audio_content = AudioContent.SPEECH
-    elif speech_ratio < 0.01:
-        # Very little audio activity - could be silent or very quiet ambient
+    elif speech_ratio < 0.02:
+        # Very little audio activity - silent or very quiet
         audio_content = AudioContent.SILENT
     else:
-        # Some audio but not speech - ambient or music
-        # TODO: Could add music detection in the future
+        # Some audio but not classified as speech - ambient or music
         audio_content = AudioContent.AMBIENT
 
     logger.info(
@@ -225,11 +255,5 @@ def detect_voice_activity(
 
 
 def unload_vad_model():
-    """Unload VAD model to free memory."""
-    global _vad_model, _vad_utils
-
-    if _vad_model is not None:
-        del _vad_model
-        _vad_model = None
-        _vad_utils = None
-        logger.info("VAD model unloaded")
+    """No-op for WebRTC VAD (no model to unload)."""
+    pass

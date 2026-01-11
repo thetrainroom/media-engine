@@ -73,12 +73,11 @@ class SidecarMetadata:
     lens: LensInfo | None = None
 
 
-def run_ffprobe(file_path: str, select_streams: bool = True) -> dict[str, Any]:
+def run_ffprobe(file_path: str) -> dict[str, Any]:
     """Run ffprobe and return parsed JSON output.
 
     Args:
         file_path: Path to the media file
-        select_streams: If True, only get first video and audio stream (faster)
     """
     cmd = [
         "ffprobe",
@@ -88,9 +87,8 @@ def run_ffprobe(file_path: str, select_streams: bool = True) -> dict[str, Any]:
         "-show_streams",
     ]
 
-    # Only get first video and first audio stream (much faster for files with many streams)
-    if select_streams:
-        cmd.extend(["-select_streams", "v:0,a:0"])
+    # Note: -select_streams with comma syntax (v:0,a:0) doesn't work reliably
+    # across ffprobe versions, so we get all streams and filter in code
 
     cmd.append(file_path)
 
@@ -116,13 +114,11 @@ def run_ffprobe(file_path: str, select_streams: bool = True) -> dict[str, Any]:
 
 def run_ffprobe_batch(
     file_paths: list[str],
-    select_streams: bool = True
 ) -> dict[str, dict[str, Any] | Exception]:
     """Run ffprobe on multiple files in parallel.
 
     Args:
         file_paths: List of file paths to probe
-        select_streams: If True, only get first video and audio stream
 
     Returns:
         Dict mapping file path to probe result or Exception if failed
@@ -132,7 +128,7 @@ def run_ffprobe_batch(
 
     pool = get_ffprobe_pool()
     futures = {
-        pool.submit(run_ffprobe, path, select_streams): path
+        pool.submit(run_ffprobe, path): path
         for path in file_paths
     }
 

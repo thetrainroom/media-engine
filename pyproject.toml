@@ -15,6 +15,7 @@ dependencies = [
     "deepface>=0.0.79",
     "paddleocr>=2.7.0",
     "paddlepaddle>=2.5.0",
+    "webrtcvad>=2.0.10",
 ]
 
 [project.optional-dependencies]
