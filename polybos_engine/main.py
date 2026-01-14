@@ -29,6 +29,7 @@ from polybos_engine.extractors import (
     extract_scenes,
     extract_telemetry,
     extract_transcript,
+    get_adaptive_timestamps,
     get_sample_timestamps,
     run_ffprobe_batch,
     unload_qwen_model,
@@ -464,6 +465,7 @@ class BatchRequest(BaseModel):
     enable_objects: bool = False
     enable_clip: bool = False
     enable_ocr: bool = False
+    enable_motion: bool = False
     object_detector: ObjectDetector | None = None
     whisper_model: str = "large-v3"
 
@@ -595,13 +597,130 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             update_batch_progress("transcript", "Unloading Whisper model...", None, None)
             unload_whisper_model()
 
-        # Stage 5: Faces (DeepFace - moderate model)
+        # Stage 5: Motion Analysis (for smart sampling of faces/objects/clip/ocr)
+        # Store motion data per file for later use
+        motion_data: dict[int, Any] = {}  # file_idx -> MotionAnalysis
+        adaptive_timestamps: dict[int, list[float]] = {}  # file_idx -> timestamps
+
+        needs_motion = request.enable_motion or request.enable_objects or request.enable_faces or request.enable_clip or request.enable_ocr
+        if needs_motion:
+            update_batch_progress("motion", "Analyzing camera motion...", 0, total_files)
+            for i, file_path in enumerate(files):
+                update_batch_progress("motion", f"Analyzing {Path(file_path).name}", i + 1, total_files)
+                try:
+                    motion = analyze_motion(file_path)
+                    motion_data[i] = motion
+                    adaptive_timestamps[i] = get_adaptive_timestamps(motion)
+
+                    # Store motion results for client use (editing tools)
+                    motion_result = {
+                        "duration": motion.duration,
+                        "fps": motion.fps,
+                        "primary_motion": motion.primary_motion.value,
+                        "avg_intensity": float(motion.avg_intensity),
+                        "is_stable": bool(motion.is_stable),
+                        "segments": [
+                            {
+                                "start": seg.start,
+                                "end": seg.end,
+                                "motion_type": seg.motion_type.value,
+                                "intensity": float(seg.intensity),
+                            }
+                            for seg in motion.segments
+                        ],
+                    }
+                    update_file_status(i, "running", "motion", motion_result)
+                    logger.info(
+                        f"Motion for {Path(file_path).name}: "
+                        f"avg_intensity={motion.avg_intensity:.1f}, "
+                        f"stable={motion.is_stable}, "
+                        f"adaptive_timestamps={len(adaptive_timestamps[i])}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Motion analysis failed for {file_path}: {e}")
+                    # Fall back to None (will use default sampling)
+                    motion_data[i] = None
+                    adaptive_timestamps[i] = []
+
+        # Stage 6: Objects (YOLO with motion-adaptive timestamps, or Qwen)
+        # Store person timestamps for face detection
+        person_timestamps: dict[int, list[float]] = {}  # file_idx -> timestamps where persons detected
+
+        if request.enable_objects:
+            if detector == ObjectDetector.QWEN:
+                update_batch_progress("objects", "Loading Qwen model...", 0, total_files)
+                for i, file_path in enumerate(files):
+                    fname = Path(file_path).name
+                    update_batch_progress("objects", f"Analyzing: {fname}", i + 1, total_files)
+                    try:
+                        # Use motion-based timestamps for Qwen (fewer samples for VLM)
+                        motion = motion_data.get(i)
+                        timestamps: list[float] | None = None
+                        if motion:
+                            timestamps = get_sample_timestamps(motion, max_samples=5)
+
+                        objects = extract_objects_qwen(file_path, timestamps=timestamps)
+                        objects_data: dict[str, Any] = {"summary": objects.summary}
+                        if objects.descriptions:
+                            objects_data["descriptions"] = objects.descriptions
+                        update_file_status(i, "running", "objects", objects_data)
+
+                        # Qwen doesn't return per-detection timestamps, so no person_timestamps
+                        person_timestamps[i] = []
+                    except Exception as e:
+                        logger.warning(f"Objects failed for {file_path}: {e}")
+                        person_timestamps[i] = []
+                # Unload Qwen to free memory
+                update_batch_progress("objects", "Unloading Qwen model...", None, None)
+                unload_qwen_model()
+            else:
+                # YOLO with motion-adaptive timestamps
+                update_batch_progress("objects", "Detecting objects with YOLO...", 0, total_files)
+                for i, file_path in enumerate(files):
+                    update_batch_progress("objects", f"Processing {Path(file_path).name}", i + 1, total_files)
+                    try:
+                        # Use motion-adaptive timestamps if available
+                        timestamps = adaptive_timestamps.get(i) if adaptive_timestamps.get(i) else None
+                        objects = extract_objects(file_path, timestamps=timestamps)
+
+                        if objects:
+                            update_file_status(i, "running", "objects", {"summary": objects.summary})
+
+                            # Collect timestamps where persons were detected (for smart face sampling)
+                            person_ts = list(set(
+                                d.timestamp for d in objects.detections if d.label == "person"
+                            ))
+                            person_timestamps[i] = sorted(person_ts)
+                            if person_ts:
+                                logger.info(f"Found {len(person_ts)} person frames in {Path(file_path).name}")
+                        else:
+                            person_timestamps[i] = []
+                    except Exception as e:
+                        logger.warning(f"Objects failed for {file_path}: {e}")
+                        person_timestamps[i] = []
+
+        # Stage 7: Faces (YOLO-triggered - only where persons detected)
         if request.enable_faces:
             update_batch_progress("faces", "Detecting faces...", 0, total_files)
             for i, file_path in enumerate(files):
                 update_batch_progress("faces", f"Processing {Path(file_path).name}", i + 1, total_files)
                 try:
-                    faces = extract_faces(file_path)
+                    # Smart sampling: use person timestamps from YOLO if available
+                    person_ts = person_timestamps.get(i, [])
+
+                    if request.enable_objects and person_ts:
+                        # YOLO-triggered: only detect faces where persons were found
+                        faces = extract_faces(file_path, timestamps=person_ts)
+                        logger.info(f"Face detection on {len(person_ts)} person frames for {Path(file_path).name}")
+                    elif request.enable_objects and not person_ts:
+                        # YOLO ran but found no persons - skip face detection
+                        logger.info(f"Skipping face detection for {Path(file_path).name} - no persons detected by YOLO")
+                        faces = None
+                    else:
+                        # Objects disabled - fall back to motion-adaptive sampling
+                        timestamps = adaptive_timestamps.get(i) if adaptive_timestamps.get(i) else None
+                        faces = extract_faces(file_path, timestamps=timestamps)
+
                     if faces:
                         faces_data = {
                             "count": faces.count,
@@ -620,56 +739,40 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             ],
                         }
                         update_file_status(i, "running", "faces", faces_data)
+                    else:
+                        # No faces - store empty result
+                        update_file_status(i, "running", "faces", {"count": 0, "unique_estimate": 0, "detections": []})
                 except Exception as e:
                     logger.warning(f"Faces failed for {file_path}: {e}")
 
-        # Stage 6: Objects (YOLO or Qwen - heavy model)
-        if request.enable_objects:
-            if detector == ObjectDetector.QWEN:
-                update_batch_progress("objects", "Loading Qwen model...", 0, total_files)
-                for i, file_path in enumerate(files):
-                    fname = Path(file_path).name
-                    update_batch_progress("objects", f"Analyzing motion: {fname}", i + 1, total_files)
-                    try:
-                        # Run motion analysis to get optimal sample timestamps
-                        timestamps: list[float] | None = None
-                        try:
-                            motion = analyze_motion(file_path)
-                            timestamps = get_sample_timestamps(motion, max_samples=5)
-                        except Exception:
-                            pass  # Fall back to middle sampling
-
-                        update_batch_progress("objects", f"Analyzing: {fname}", i + 1, total_files)
-                        objects = extract_objects_qwen(file_path, timestamps=timestamps)
-                        objects_data: dict[str, Any] = {"summary": objects.summary}
-                        if objects.descriptions:
-                            objects_data["descriptions"] = objects.descriptions
-                        update_file_status(i, "running", "objects", objects_data)
-                    except Exception as e:
-                        logger.warning(f"Objects failed for {file_path}: {e}")
-                # Unload Qwen to free memory
-                update_batch_progress("objects", "Unloading Qwen model...", None, None)
-                unload_qwen_model()
-            else:
-                update_batch_progress("objects", "Detecting objects with YOLO...", 0, total_files)
-                for i, file_path in enumerate(files):
-                    update_batch_progress("objects", f"Processing {Path(file_path).name}", i + 1, total_files)
-                    try:
-                        objects = extract_objects(file_path)
-                        update_file_status(i, "running", "objects", {"summary": objects.summary} if objects else None)
-                    except Exception as e:
-                        logger.warning(f"Objects failed for {file_path}: {e}")
-
-        # Stage 7: OCR (EasyOCR - moderate model)
+        # Stage 8: OCR (EasyOCR - moderate model) with motion-adaptive timestamps
         if request.enable_ocr:
             update_batch_progress("ocr", "Extracting text...", 0, total_files)
             for i, file_path in enumerate(files):
                 update_batch_progress("ocr", f"Processing {Path(file_path).name}", i + 1, total_files)
                 try:
-                    ocr = extract_ocr(file_path)
+                    # Use motion-adaptive timestamps if available
+                    timestamps = adaptive_timestamps.get(i) if adaptive_timestamps.get(i) else None
+                    ocr = extract_ocr(file_path, timestamps=timestamps)
                     update_file_status(i, "running", "ocr", ocr.model_dump() if ocr else None)
                 except Exception as e:
                     logger.warning(f"OCR failed for {file_path}: {e}")
+
+        # Stage 9: CLIP embeddings with motion-adaptive timestamps
+        if request.enable_clip:
+            update_batch_progress("clip", "Extracting CLIP embeddings...", 0, total_files)
+            for i, file_path in enumerate(files):
+                update_batch_progress("clip", f"Processing {Path(file_path).name}", i + 1, total_files)
+                try:
+                    # Use motion-adaptive timestamps if available
+                    timestamps = adaptive_timestamps.get(i) if adaptive_timestamps.get(i) else None
+                    clip = extract_clip(file_path, timestamps=timestamps)
+                    if clip:
+                        update_file_status(i, "running", "clip", {"model": clip.model, "count": len(clip.segments)})
+                    else:
+                        update_file_status(i, "running", "clip", None)
+                except Exception as e:
+                    logger.warning(f"CLIP failed for {file_path}: {e}")
 
         # Mark all files as completed
         with batch_jobs_lock:

@@ -25,6 +25,7 @@ def extract_faces(
     file_path: str,
     scenes: list[SceneDetection] | None = None,
     sample_fps: float = 0.5,  # Default: every 2 seconds
+    timestamps: list[float] | None = None,  # Direct timestamp list (e.g., from YOLO persons)
     min_face_size: int = 80,
     min_confidence: float = 0.5,  # Lowered from 0.9 - user can discard false positives
     extract_images: bool = True,
@@ -32,14 +33,16 @@ def extract_faces(
 ) -> FacesResult:
     """Extract faces from video file.
 
-    Sampling strategy:
-    - If scenes provided: sample at scene boundaries + every sample_interval within scenes
-    - If no scenes: sample at fixed fps
+    Sampling strategy (in priority order):
+    1. If timestamps provided: use those directly (e.g., from YOLO person detections)
+    2. If scenes provided: sample at scene boundaries + every sample_interval within scenes
+    3. Otherwise: sample at fixed fps
 
     Args:
         file_path: Path to video file
         scenes: Optional scene boundaries for smarter sampling
         sample_fps: Frame sampling rate (e.g., 0.5 = every 2 seconds)
+        timestamps: Optional list of specific timestamps to sample (overrides scenes/fps)
         min_face_size: Minimum face size in pixels
         min_confidence: Minimum detection confidence
         extract_images: Whether to extract face thumbnail images
@@ -58,24 +61,27 @@ def extract_faces(
     temp_dir = tempfile.mkdtemp(prefix="polybos_faces_")
 
     try:
-        # Calculate sample timestamps
-        if scenes:
-            timestamps = _get_sample_timestamps_from_scenes(scenes, sample_fps)
-            logger.info(f"Sampling {len(timestamps)} frames from {len(scenes)} scenes")
+        # Determine sample timestamps (priority: explicit > scenes > fixed fps)
+        if timestamps is not None:
+            sample_timestamps = sorted(set(timestamps))
+            logger.info(f"Using {len(sample_timestamps)} provided timestamps for face detection")
+        elif scenes:
+            sample_timestamps = _get_sample_timestamps_from_scenes(scenes, sample_fps)
+            logger.info(f"Sampling {len(sample_timestamps)} frames from {len(scenes)} scenes")
         else:
             # Get video duration and sample at fixed intervals
             duration = _get_video_duration(file_path)
             interval = 1.0 / sample_fps
-            timestamps = [float(t) for t in np.arange(0, duration, interval)]
-            logger.info(f"Sampling {len(timestamps)} frames at {sample_fps} fps")
+            sample_timestamps = [float(t) for t in np.arange(0, duration, interval)]
+            logger.info(f"Sampling {len(sample_timestamps)} frames at {sample_fps} fps")
 
         # Extract frames at specific timestamps
-        frame_paths = _extract_frames_at_timestamps(file_path, temp_dir, timestamps)
+        frame_paths = _extract_frames_at_timestamps(file_path, temp_dir, sample_timestamps)
 
         detections: list[FaceDetection] = []
         all_embeddings: list[Embedding] = []
 
-        for frame_path, timestamp in zip(frame_paths, timestamps):
+        for frame_path, timestamp in zip(frame_paths, sample_timestamps):
             if not os.path.exists(frame_path):
                 continue
 

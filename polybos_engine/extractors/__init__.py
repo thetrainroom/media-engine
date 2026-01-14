@@ -10,7 +10,7 @@ from .metadata import (
     run_ffprobe_batch,
     shutdown_ffprobe_pool,
 )
-from .motion import MotionAnalysis, MotionType, analyze_motion, get_sample_timestamps
+from .motion import MotionAnalysis, MotionType, analyze_motion, get_sample_timestamps, get_adaptive_timestamps
 from .objects import extract_objects
 from .objects_qwen import extract_objects_qwen, unload_qwen_model
 from .ocr import extract_ocr
@@ -35,6 +35,7 @@ __all__ = [
     "extract_telemetry",
     "analyze_motion",
     "get_sample_timestamps",
+    "get_adaptive_timestamps",
     "MotionAnalysis",
     "MotionType",
     "unload_qwen_model",

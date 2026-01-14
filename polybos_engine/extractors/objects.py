@@ -14,16 +14,23 @@ def extract_objects(
     file_path: str,
     scenes: list[SceneDetection] | None = None,
     sample_fps: float = 0.5,
+    timestamps: list[float] | None = None,  # Direct timestamp list (e.g., from motion analysis)
     min_confidence: float = 0.6,
     min_size: int = 50,
     model_name: str = "yolov8m.pt",
 ) -> ObjectsResult:
     """Extract objects from video file.
 
+    Sampling strategy (in priority order):
+    1. If timestamps provided: use those directly (e.g., from motion-adaptive sampling)
+    2. If scenes provided: sample at scene boundaries + intervals within scenes
+    3. Otherwise: sample at fixed fps
+
     Args:
         file_path: Path to video file
         scenes: Optional scene boundaries for smarter sampling
         sample_fps: Frame sampling rate (0.5 = every 2 seconds)
+        timestamps: Optional list of specific timestamps to sample (overrides scenes/fps)
         min_confidence: Minimum detection confidence (0.6 recommended)
         min_size: Minimum object size in pixels (filters noise)
         model_name: YOLO model (yolov8m.pt recommended for accuracy)
@@ -45,21 +52,24 @@ def extract_objects(
     # Load model
     model = YOLO(model_name)
 
-    # Get timestamps to sample
-    if scenes:
-        timestamps = _get_timestamps_from_scenes(scenes, sample_fps)
-        logger.info(f"Sampling {len(timestamps)} frames from {len(scenes)} scenes")
+    # Determine timestamps to sample (priority: explicit > scenes > fixed fps)
+    if timestamps is not None:
+        sample_timestamps = sorted(set(timestamps))
+        logger.info(f"Using {len(sample_timestamps)} provided timestamps for object detection")
+    elif scenes:
+        sample_timestamps = _get_timestamps_from_scenes(scenes, sample_fps)
+        logger.info(f"Sampling {len(sample_timestamps)} frames from {len(scenes)} scenes")
     else:
         duration = get_video_duration(file_path)
         interval = 1.0 / sample_fps
-        timestamps = list(_frange(0, duration, interval))
-        logger.info(f"Sampling {len(timestamps)} frames at {sample_fps} fps")
+        sample_timestamps = list(_frange(0, duration, interval))
+        logger.info(f"Sampling {len(sample_timestamps)} frames at {sample_fps} fps")
 
     # Extract frames using OpenCV (much faster than ffmpeg per-frame)
     raw_detections: list[ObjectDetection] = []
 
     with FrameExtractor(file_path) as extractor:
-        for timestamp in timestamps:
+        for timestamp in sample_timestamps:
             frame = extractor.get_frame_at(timestamp)
             if frame is None:
                 continue

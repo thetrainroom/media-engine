@@ -50,15 +50,22 @@ def extract_ocr(
     scenes: ScenesResult | None = None,
     min_confidence: float = 0.5,
     sample_fps: float = 0.5,
+    timestamps: list[float] | None = None,  # Direct timestamp list (e.g., from motion analysis)
     languages: list[str] | None = None,
 ) -> OcrResult:
     """Extract text from video frames using OCR.
+
+    Sampling strategy (in priority order):
+    1. If timestamps provided: use those directly (e.g., from motion-adaptive sampling)
+    2. If scenes provided: sample at scene boundaries
+    3. Otherwise: sample at fixed fps
 
     Args:
         file_path: Path to video file
         scenes: Optional scene detection results (sample at scene changes)
         min_confidence: Minimum detection confidence
         sample_fps: Fallback sample rate if no scenes
+        timestamps: Optional list of specific timestamps to sample (overrides scenes/fps)
         languages: OCR languages (default: ["en", "no"])
 
     Returns:
@@ -67,19 +74,23 @@ def extract_ocr(
     # Get OCR reader
     reader = _get_ocr_reader(languages)
 
-    # Determine which frames to sample
-    if scenes and scenes.detections:
+    # Determine which frames to sample (priority: explicit > scenes > fixed fps)
+    sample_timestamps: list[float]
+    if timestamps is not None:
+        sample_timestamps = sorted(set(timestamps))
+        logger.info(f"Using {len(sample_timestamps)} provided timestamps for OCR")
+    elif scenes and scenes.detections:
         # Sample at scene changes (start of each scene)
         logger.info(f"Sampling OCR at {len(scenes.detections)} scene boundaries")
-        timestamps = [scene.start for scene in scenes.detections]
+        sample_timestamps = [scene.start for scene in scenes.detections]
     else:
         # Fall back to fixed interval
         logger.info(f"Sampling OCR at {sample_fps} fps")
         duration = get_video_duration(file_path)
-        timestamps: list[float] = []
+        sample_timestamps = []
         t = 0.0
         while t < duration:
-            timestamps.append(t)
+            sample_timestamps.append(t)
             t += 1.0 / sample_fps
 
     detections: list[OcrDetection] = []
@@ -87,7 +98,7 @@ def extract_ocr(
 
     # Use OpenCV for fast frame extraction
     with FrameExtractor(file_path) as extractor:
-        for timestamp in timestamps:
+        for timestamp in sample_timestamps:
             frame = extractor.get_frame_at(timestamp)
             if frame is None:
                 continue

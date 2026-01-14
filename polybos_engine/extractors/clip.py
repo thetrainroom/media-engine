@@ -21,7 +21,7 @@ Embedding: TypeAlias = list[float]
 logger = logging.getLogger(__name__)
 
 
-def _load_image_rgb(image_path: str) -> NDArray[np.uint8]:
+def _load_image_rgb(image_path: str) -> NDArray[np.uint8]:  # type: ignore[type-var]
     """Load image using OpenCV and convert to RGB."""
     img = cv2.imread(image_path)
     if img is None:
@@ -162,13 +162,20 @@ def extract_clip(
     file_path: str,
     scenes: ScenesResult | None = None,
     fallback_interval: float = 10.0,
+    timestamps: list[float] | None = None,  # Direct timestamp list (e.g., from motion analysis)
 ) -> ClipResult:
     """Extract CLIP embeddings from video.
+
+    Sampling strategy (in priority order):
+    1. If timestamps provided: use those directly (e.g., from motion-adaptive sampling)
+    2. If scenes provided: one embedding per scene (middle of scene)
+    3. Otherwise: sample at fixed interval
 
     Args:
         file_path: Path to video file
         scenes: Optional scene detection results (one embedding per scene)
         fallback_interval: Interval in seconds if no scenes provided
+        timestamps: Optional list of specific timestamps to sample (overrides scenes/interval)
 
     Returns:
         ClipResult with embeddings per segment
@@ -185,7 +192,27 @@ def extract_clip(
     try:
         segments: list[ClipSegment] = []
 
-        if scenes and scenes.detections:
+        if timestamps is not None:
+            # Use provided timestamps directly
+            logger.info(f"Extracting CLIP embeddings at {len(timestamps)} provided timestamps")
+
+            for i, ts in enumerate(sorted(set(timestamps))):
+                frame_path = _extract_frame_at(file_path, temp_dir, ts)
+
+                if frame_path:
+                    try:
+                        embedding = backend.encode_image(frame_path)
+                        segments.append(
+                            ClipSegment(
+                                start=ts,
+                                end=ts,  # Single point in time
+                                scene_index=i,
+                                embedding=embedding,
+                            )
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to encode frame at {ts}s: {e}")
+        elif scenes and scenes.detections:
             # Extract one frame per scene (middle of scene)
             logger.info(f"Extracting CLIP embeddings for {scenes.count} scenes")
 

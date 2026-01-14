@@ -380,3 +380,93 @@ def get_sample_timestamps(
     logger.info(f"Smart sampling: {len(timestamps)} frames from {len(motion.segments)} motion segments")
 
     return timestamps
+
+
+def get_adaptive_timestamps(
+    motion: MotionAnalysis,
+    min_fps: float = 0.1,
+    max_fps: float = 2.0,
+    max_samples: int = 100,
+) -> list[float]:
+    """Get timestamps with adaptive sampling based on motion intensity.
+
+    Higher motion intensity = more frequent sampling.
+    Lower motion intensity = sparser sampling.
+
+    Intensity to FPS mapping:
+    - 0-0.5:   min_fps (static, nothing changing)
+    - 0.5-2.0: 0.25 fps (stable, minimal change)
+    - 2.0-4.0: 0.5 fps (moderate motion)
+    - 4.0-6.0: 1.0 fps (active motion)
+    - 6.0+:    max_fps (high motion, rapid changes)
+
+    Args:
+        motion: Motion analysis result
+        min_fps: Minimum sample rate for static content (default 0.1 = 1 per 10s)
+        max_fps: Maximum sample rate for high motion (default 2.0)
+        max_samples: Maximum total samples to return
+
+    Returns:
+        List of timestamps to sample
+    """
+    if not motion.segments:
+        # No segments - sample based on overall stability
+        if motion.is_stable:
+            return [motion.duration / 2]  # Single sample for stable video
+        else:
+            # Sample at default rate
+            interval = 1.0 / 0.5
+            return [t for t in _frange(0.1, motion.duration - 0.1, interval)]
+
+    timestamps: list[float] = []
+
+    for seg in motion.segments:
+        intensity = seg.intensity
+
+        # Map intensity to fps
+        if intensity < 0.5:
+            fps = min_fps
+        elif intensity < 2.0:
+            fps = 0.25
+        elif intensity < 4.0:
+            fps = 0.5
+        elif intensity < 6.0:
+            fps = 1.0
+        else:
+            fps = max_fps
+
+        # Generate timestamps for this segment
+        interval = 1.0 / fps
+        t = seg.start + 0.1  # Start slightly after segment boundary
+        while t < seg.end - 0.1:
+            timestamps.append(t)
+            t += interval
+
+        # Always include at least one sample per segment
+        if not any(seg.start <= ts <= seg.end for ts in timestamps):
+            timestamps.append((seg.start + seg.end) / 2)
+
+    # Remove duplicates and sort
+    timestamps = sorted(set(timestamps))
+
+    # Cap at max_samples, keeping even distribution
+    if len(timestamps) > max_samples:
+        step = len(timestamps) / max_samples
+        timestamps = [timestamps[int(i * step)] for i in range(max_samples)]
+
+    # Ensure timestamps are within video bounds
+    timestamps = [max(0.1, min(t, motion.duration - 0.1)) for t in timestamps]
+
+    logger.info(
+        f"Adaptive sampling: {len(timestamps)} frames "
+        f"(avg_intensity={motion.avg_intensity:.1f}, stable={motion.is_stable})"
+    )
+
+    return timestamps
+
+
+def _frange(start: float, stop: float, step: float):
+    """Float range generator."""
+    while start < stop:
+        yield start
+        start += step
