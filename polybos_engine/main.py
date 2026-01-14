@@ -1,5 +1,6 @@
 """FastAPI application for Polybos Media Engine."""
 
+import atexit
 import logging
 import threading
 import time
@@ -7,6 +8,16 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+# Configure file logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(name)s: %(message)s',
+    handlers=[
+        logging.FileHandler('/tmp/polybos_engine.log'),
+        logging.StreamHandler()
+    ]
+)
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -43,14 +54,11 @@ from polybos_engine.schemas import (
     HealthResponse,
     MotionResult,
     MotionSegment,
+    Pass2Request,
+    Pass2Response,
     TelemetryResult,
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 # Create FastAPI app
@@ -73,6 +81,54 @@ app.add_middleware(
 demo_path = Path(__file__).parent.parent / "demo"
 if demo_path.exists():
     app.mount("/demo", StaticFiles(directory=str(demo_path), html=True), name="demo")
+
+
+# ============================================================================
+# Shutdown Handler
+# ============================================================================
+
+def _cleanup_resources():
+    """Clean up all resources."""
+    logger.info("Cleaning up resources...")
+    try:
+        from polybos_engine.extractors import (
+            shutdown_ffprobe_pool,
+            unload_whisper_model,
+            unload_qwen_model,
+            unload_vad_model,
+        )
+        shutdown_ffprobe_pool()
+        unload_whisper_model()
+        unload_qwen_model()
+        unload_vad_model()
+        logger.info("All resources cleaned up")
+    except Exception as e:
+        logger.warning(f"Error cleaning up resources: {e}")
+
+atexit.register(_cleanup_resources)
+
+
+@app.post("/shutdown")
+async def shutdown_engine():
+    """Gracefully shutdown the engine.
+
+    Call this before killing the process to ensure clean resource cleanup.
+    """
+    import os
+    import signal
+
+    logger.info("Shutdown requested via API")
+    _cleanup_resources()
+
+    # Schedule process exit after response is sent
+    def delayed_exit():
+        time.sleep(0.5)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    thread = threading.Thread(target=delayed_exit, daemon=True)
+    thread.start()
+
+    return {"status": "shutting_down"}
 
 
 # ============================================================================
@@ -468,6 +524,12 @@ class BatchRequest(BaseModel):
     enable_motion: bool = False
     object_detector: ObjectDetector | None = None
     whisper_model: str = "large-v3"
+    # Context for Whisper
+    language_hints: list[str] | None = None
+    context_hint: str | None = None
+    # Context for Qwen VLM
+    context: dict[str, str] | None = None
+    qwen_timestamps: list[float] | None = None
 
 
 class BatchFileStatus(BaseModel):
@@ -504,6 +566,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
     settings = get_settings()
     # Resolve object detector (handles "auto")
     detector = request.object_detector or settings.get_object_detector()
+    logger.info(f"Batch request: enable_objects={request.enable_objects}, object_detector={request.object_detector}, resolved detector={detector}")
 
     def update_batch_progress(extractor: str, message: str, current: int | None = None, total: int | None = None) -> None:
         with batch_jobs_lock:
@@ -589,7 +652,12 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             for i, file_path in enumerate(files):
                 update_batch_progress("transcript", f"Transcribing {Path(file_path).name}", i + 1, total_files)
                 try:
-                    transcript = extract_transcript(file_path, model=request.whisper_model)
+                    transcript = extract_transcript(
+                        file_path,
+                        model=request.whisper_model,
+                        language_hints=request.language_hints,
+                        context_hint=request.context_hint,
+                    )
                     update_file_status(i, "running", "transcript", transcript.model_dump() if transcript else None)
                 except Exception as e:
                     logger.warning(f"Transcript failed for {file_path}: {e}")
@@ -649,17 +717,25 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         if request.enable_objects:
             if detector == ObjectDetector.QWEN:
                 update_batch_progress("objects", "Loading Qwen model...", 0, total_files)
+                # Log context for debugging
+                logger.info(f"Qwen batch context: {request.context}")
+
                 for i, file_path in enumerate(files):
                     fname = Path(file_path).name
                     update_batch_progress("objects", f"Analyzing: {fname}", i + 1, total_files)
                     try:
                         # Use motion-based timestamps for Qwen (fewer samples for VLM)
                         motion = motion_data.get(i)
-                        timestamps: list[float] | None = None
-                        if motion:
+                        timestamps = request.qwen_timestamps  # Use provided timestamps first
+                        if timestamps is None and motion:
                             timestamps = get_sample_timestamps(motion, max_samples=5)
 
-                        objects = extract_objects_qwen(file_path, timestamps=timestamps)
+                        logger.info(f"Calling Qwen with context: {request.context}")
+                        objects = extract_objects_qwen(
+                            file_path,
+                            timestamps=timestamps,
+                            context=request.context,
+                        )
                         objects_data: dict[str, Any] = {"summary": objects.summary}
                         if objects.descriptions:
                             objects_data["descriptions"] = objects.descriptions
@@ -1275,6 +1351,90 @@ async def telemetry_gpx(
         content=gpx_content,
         media_type="application/gpx+xml",
         headers={"Content-Disposition": f"attachment; filename={file_path.stem}.gpx"},
+    )
+
+
+# ============================================================================
+# Pass 2: Context-Aware AI Processing
+# ============================================================================
+
+
+@app.post("/pass2", response_model=Pass2Response)
+async def process_pass2(request: Pass2Request):
+    """Run Pass 2 context-aware AI processing.
+
+    Pass 2 runs after user review and includes:
+    1. Whisper transcription (full transcription with timestamps)
+    2. Qwen VLM scene descriptions on motion-selected frames
+
+    The calling application (e.g., Polybos Archive) can use these results
+    to generate summaries via its own LLM integration.
+    """
+    file_path = Path(request.file)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {request.file}")
+
+    logger.info(f"Starting Pass 2 for: {file_path.name}")
+
+    transcript = None
+    qwen_descriptions: list[str] | None = None
+
+    # 1. Whisper transcription (if enabled)
+    if request.enable_whisper:
+        try:
+            logger.info("Running Whisper transcription...")
+            transcript_result = extract_transcript(
+                request.file,
+                model=request.whisper_model,
+            )
+            if transcript_result:
+                transcript = transcript_result
+                logger.info(f"Transcription complete: {len(transcript.segments)} segments")
+        except Exception as e:
+            logger.warning(f"Whisper failed: {e}")
+
+    # 2. Qwen VLM scene descriptions (if enabled)
+    if request.enable_qwen:
+        try:
+            logger.info("Running Qwen scene descriptions...")
+
+            # Use provided timestamps or select from motion data
+            timestamps = request.qwen_timestamps
+            if timestamps is None and request.motion_data:
+                # Extract timestamps from motion data segments
+                segments = request.motion_data.get("segments", [])
+                if segments:
+                    # Pick one frame from each segment
+                    timestamps = [
+                        (seg.get("start", 0) + seg.get("end", 0)) / 2
+                        for seg in segments[:5]  # Max 5 frames
+                    ]
+
+            # Build context for Qwen
+            qwen_context: dict[str, str] = {}
+            if request.faces:
+                qwen_context["person"] = ", ".join(request.faces)
+            if request.location:
+                qwen_context["location"] = request.location
+            if request.notes:
+                qwen_context["topic"] = request.notes
+
+            objects_result = extract_objects_qwen(
+                request.file,
+                timestamps=timestamps,
+                context=qwen_context if qwen_context else None,
+            )
+            if objects_result and objects_result.descriptions:
+                qwen_descriptions = objects_result.descriptions
+                logger.info(f"Qwen complete: {len(qwen_descriptions)} descriptions")
+        except Exception as e:
+            logger.warning(f"Qwen failed: {e}")
+
+    logger.info(f"Pass 2 complete for: {file_path.name}")
+
+    return Pass2Response(
+        transcript=transcript,
+        qwen_descriptions=qwen_descriptions,
     )
 
 

@@ -395,3 +395,46 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     api_version: str
+
+
+# === Pass 2 Models ===
+
+
+class Pass2Request(BaseModel):
+    """Request for Pass 2 processing (Whisper transcription + Qwen scene descriptions).
+
+    This endpoint runs the heavy AI processing after user review:
+    - Whisper: Full transcription (if audio has speech)
+    - Qwen: Scene descriptions on motion-selected frames
+    """
+
+    file: str = Field(..., description="Path to video file")
+
+    # Feature toggles
+    enable_whisper: bool = Field(default=True, description="Run Whisper transcription")
+    enable_qwen: bool = Field(default=True, description="Run Qwen scene descriptions")
+
+    # Whisper settings
+    whisper_model: str = Field(default="large-v3", description="Whisper model size")
+
+    # Qwen settings - motion data for smart frame selection
+    motion_data: dict | None = Field(
+        default=None, description="Motion analysis from Pass 1 for smart sampling"
+    )
+    qwen_timestamps: list[float] | None = Field(
+        default=None, description="Specific timestamps for Qwen (overrides motion_data)"
+    )
+
+    # Context for Qwen scene descriptions
+    faces: list[str] | None = Field(
+        default=None, description="Identified people names for context"
+    )
+    location: str | None = Field(default=None, description="Location for context")
+    notes: str | None = Field(default=None, description="User notes for context")
+
+
+class Pass2Response(BaseModel):
+    """Response from Pass 2 processing."""
+
+    transcript: Transcript | None = None
+    qwen_descriptions: list[str] | None = None
