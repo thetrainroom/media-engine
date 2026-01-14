@@ -26,7 +26,7 @@ def extract_faces(
     scenes: list[SceneDetection] | None = None,
     sample_fps: float = 0.5,  # Default: every 2 seconds
     min_face_size: int = 80,
-    min_confidence: float = 0.9,
+    min_confidence: float = 0.5,  # Lowered from 0.9 - user can discard false positives
     extract_images: bool = True,
     face_image_size: int = 160,  # Output face thumbnail size
 ) -> FacesResult:

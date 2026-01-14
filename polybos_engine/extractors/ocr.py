@@ -1,14 +1,10 @@
 """OCR extraction using EasyOCR."""
 
 import logging
-import os
-import shutil
-import subprocess
-import tempfile
-from pathlib import Path
 from typing import Any
 
-from polybos_engine.config import get_settings
+from polybos_engine.config import get_device, get_settings, DeviceType
+from polybos_engine.extractors.frames import FrameExtractor, get_video_duration
 from polybos_engine.schemas import BoundingBox, OcrDetection, OcrResult, ScenesResult
 
 logger = logging.getLogger(__name__)
@@ -37,8 +33,14 @@ def _get_ocr_reader(languages: list[str] | None = None) -> Any:
         languages = settings.ocr_languages
 
     _ocr_languages = languages
-    logger.info(f"Initializing EasyOCR with languages: {languages}")
-    _ocr_reader = easyocr.Reader(languages, gpu=False)  # CPU for stability
+
+    # Enable GPU if available (CUDA only - EasyOCR doesn't support MPS)
+    device = get_device()
+    use_gpu = device == DeviceType.CUDA
+    device_name = "CUDA GPU" if use_gpu else "CPU"
+
+    logger.info(f"Initializing EasyOCR with languages: {languages} on {device_name}")
+    _ocr_reader = easyocr.Reader(languages, gpu=use_gpu)
 
     return _ocr_reader
 
@@ -62,44 +64,37 @@ def extract_ocr(
     Returns:
         OcrResult with detected text
     """
-    path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Video file not found: {file_path}")
-
     # Get OCR reader
     reader = _get_ocr_reader(languages)
 
-    # Create temp directory for frames
-    temp_dir = tempfile.mkdtemp(prefix="polybos_ocr_")
+    # Determine which frames to sample
+    if scenes and scenes.detections:
+        # Sample at scene changes (start of each scene)
+        logger.info(f"Sampling OCR at {len(scenes.detections)} scene boundaries")
+        timestamps = [scene.start for scene in scenes.detections]
+    else:
+        # Fall back to fixed interval
+        logger.info(f"Sampling OCR at {sample_fps} fps")
+        duration = get_video_duration(file_path)
+        timestamps: list[float] = []
+        t = 0.0
+        while t < duration:
+            timestamps.append(t)
+            t += 1.0 / sample_fps
 
-    try:
-        # Determine which frames to sample
-        if scenes and scenes.detections:
-            # Sample at scene changes (start of each scene)
-            logger.info(f"Sampling OCR at {len(scenes.detections)} scene boundaries")
-            timestamps = [scene.start for scene in scenes.detections]
-        else:
-            # Fall back to fixed interval
-            logger.info(f"Sampling OCR at {sample_fps} fps")
-            duration = _get_video_duration(file_path)
-            timestamps: list[float] = []
-            t = 0.0
-            while t < duration:
-                timestamps.append(t)
-                t += 1.0 / sample_fps
+    detections: list[OcrDetection] = []
+    seen_texts: set[str] = set()  # For deduplication
 
-        detections: list[OcrDetection] = []
-        seen_texts: set[str] = set()  # For deduplication
-
+    # Use OpenCV for fast frame extraction
+    with FrameExtractor(file_path) as extractor:
         for timestamp in timestamps:
-            frame_path = _extract_frame_at(file_path, temp_dir, timestamp)
-
-            if not frame_path:
+            frame = extractor.get_frame_at(timestamp)
+            if frame is None:
                 continue
 
             try:
-                # Run OCR - returns list of (bbox, text, confidence)
-                results = reader.readtext(frame_path)
+                # Run OCR directly on numpy array (no need to save to disk)
+                results = reader.readtext(frame)
 
                 for bbox_points, text, confidence in results:
                     if confidence < min_confidence:
@@ -132,58 +127,6 @@ def extract_ocr(
                 logger.warning(f"Failed to process frame at {timestamp}s: {e}")
                 continue
 
-        logger.info(f"Detected {len(detections)} text regions")
+    logger.info(f"Detected {len(detections)} text regions")
 
-        return OcrResult(detections=detections)
-
-    finally:
-        # Clean up temp directory
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-def _extract_frame_at(video_path: str, output_dir: str, timestamp: float) -> str | None:
-    """Extract a single frame at specified timestamp."""
-    output_path = os.path.join(output_dir, f"frame_{timestamp:.3f}.jpg")
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-ss",
-        str(timestamp),
-        "-i",
-        video_path,
-        "-frames:v",
-        "1",
-        "-q:v",
-        "2",
-        output_path,
-    ]
-
-    try:
-        subprocess.run(cmd, capture_output=True, check=True)
-        if os.path.exists(output_path):
-            return output_path
-    except subprocess.CalledProcessError as e:
-        logger.warning(f"Failed to extract frame at {timestamp}s: {e.stderr}")
-
-    return None
-
-
-def _get_video_duration(video_path: str) -> float:
-    """Get video duration in seconds."""
-    cmd = [
-        "ffprobe",
-        "-v",
-        "quiet",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return float(result.stdout.strip())
-    except (subprocess.CalledProcessError, ValueError):
-        return 0.0
+    return OcrResult(detections=detections)

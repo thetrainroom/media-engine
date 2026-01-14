@@ -1,13 +1,10 @@
 """Object detection using YOLO."""
 
 import logging
-import os
-import shutil
-import subprocess
-import tempfile
-from collections import Counter
 from pathlib import Path
 
+from polybos_engine.config import get_device, DeviceType
+from polybos_engine.extractors.frames import FrameExtractor, get_video_duration
 from polybos_engine.schemas import BoundingBox, ObjectDetection, ObjectsResult, SceneDetection
 
 logger = logging.getLogger(__name__)
@@ -40,47 +37,85 @@ def extract_objects(
     if not path.exists():
         raise FileNotFoundError(f"Video file not found: {file_path}")
 
+    # Determine device for GPU acceleration
+    device = get_device()
+    device_str = "mps" if device == DeviceType.MPS else "cuda" if device == DeviceType.CUDA else "cpu"
+    logger.info(f"Loading object detection model: {model_name} on {device_str}")
+
     # Load model
-    logger.info(f"Loading object detection model: {model_name}")
     model = YOLO(model_name)
 
-    # Create temp directory for frames
-    temp_dir = tempfile.mkdtemp(prefix="polybos_objects_")
+    # Get timestamps to sample
+    if scenes:
+        timestamps = _get_timestamps_from_scenes(scenes, sample_fps)
+        logger.info(f"Sampling {len(timestamps)} frames from {len(scenes)} scenes")
+    else:
+        duration = get_video_duration(file_path)
+        interval = 1.0 / sample_fps
+        timestamps = list(_frange(0, duration, interval))
+        logger.info(f"Sampling {len(timestamps)} frames at {sample_fps} fps")
 
-    try:
-        # Get timestamps to sample
-        if scenes:
-            timestamps = _get_timestamps_from_scenes(scenes, sample_fps)
-            logger.info(f"Sampling {len(timestamps)} frames from {len(scenes)} scenes")
-        else:
-            duration = _get_video_duration(file_path)
-            interval = 1.0 / sample_fps
-            timestamps = [t for t in _frange(0, duration, interval)]
-            logger.info(f"Sampling {len(timestamps)} frames at {sample_fps} fps")
+    # Extract frames using OpenCV (much faster than ffmpeg per-frame)
+    raw_detections: list[ObjectDetection] = []
 
-        # Extract frames
-        frame_paths = _extract_frames_at_timestamps(file_path, temp_dir, timestamps)
+    with FrameExtractor(file_path) as extractor:
+        for timestamp in timestamps:
+            frame = extractor.get_frame_at(timestamp)
+            if frame is None:
+                continue
 
-        # Detect objects in all frames
-        raw_detections = _detect_objects_in_frames(
-            model, frame_paths, timestamps, min_confidence, min_size
-        )
+            # Run YOLO on frame (with GPU if available)
+            try:
+                results = model(frame, verbose=False, device=device_str)
 
-        # Deduplicate - track unique objects
-        unique_detections, summary = _deduplicate_objects(raw_detections)
+                for result in results:
+                    boxes = result.boxes
+                    if boxes is None:
+                        continue
 
-        logger.info(
-            f"Detected {len(raw_detections)} objects, "
-            f"{len(unique_detections)} unique across {len(summary)} types"
-        )
+                    for i in range(len(boxes)):
+                        confidence = float(boxes.conf[i])
+                        if confidence < min_confidence:
+                            continue
 
-        return ObjectsResult(
-            summary=summary,
-            detections=unique_detections,
-        )
+                        # Get bounding box
+                        x1, y1, x2, y2 = boxes.xyxy[i].tolist()
+                        width = int(x2 - x1)
+                        height = int(y2 - y1)
 
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+                        # Filter small detections
+                        if width < min_size or height < min_size:
+                            continue
+
+                        # Get class label
+                        class_id = int(boxes.cls[i])
+                        label = model.names[class_id] if model.names else str(class_id)
+
+                        raw_detections.append(ObjectDetection(
+                            timestamp=round(timestamp, 2),
+                            label=label,
+                            confidence=round(confidence, 3),
+                            bbox=BoundingBox(
+                                x=int(x1), y=int(y1),
+                                width=width, height=height,
+                            ),
+                        ))
+
+            except Exception as e:
+                logger.warning(f"Failed to process frame at {timestamp}s: {e}")
+
+    # Deduplicate - track unique objects
+    unique_detections, summary = _deduplicate_objects(raw_detections)
+
+    logger.info(
+        f"Detected {len(raw_detections)} objects, "
+        f"{len(unique_detections)} unique across {len(summary)} types"
+    )
+
+    return ObjectsResult(
+        summary=summary,
+        detections=unique_detections,
+    )
 
 
 def _frange(start: float, stop: float, step: float):
@@ -88,18 +123,6 @@ def _frange(start: float, stop: float, step: float):
     while start < stop:
         yield start
         start += step
-
-
-def _get_video_duration(video_path: str) -> float:
-    """Get video duration in seconds."""
-    cmd = [
-        "ffprobe", "-v", "quiet",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    return float(result.stdout.strip())
 
 
 def _get_timestamps_from_scenes(
@@ -117,87 +140,6 @@ def _get_timestamps_from_scenes(
             t += interval
 
     return sorted(set(timestamps))
-
-
-def _extract_frames_at_timestamps(
-    video_path: str, output_dir: str, timestamps: list[float]
-) -> list[str]:
-    """Extract frames at specific timestamps."""
-    frame_paths: list[str] = []
-
-    for i, ts in enumerate(timestamps):
-        output_path = os.path.join(output_dir, f"frame_{i:06d}.jpg")
-        cmd = [
-            "ffmpeg", "-y",
-            "-ss", str(ts),
-            "-i", video_path,
-            "-frames:v", "1",
-            "-q:v", "2",
-            output_path,
-        ]
-        try:
-            subprocess.run(cmd, capture_output=True, check=True)
-            frame_paths.append(output_path)
-        except subprocess.CalledProcessError:
-            frame_paths.append("")
-
-    return frame_paths
-
-
-def _detect_objects_in_frames(
-    model,
-    frame_paths: list[str],
-    timestamps: list[float],
-    min_confidence: float,
-    min_size: int,
-) -> list[ObjectDetection]:
-    """Run YOLO detection on all frames."""
-    detections: list[ObjectDetection] = []
-
-    for frame_path, timestamp in zip(frame_paths, timestamps):
-        if not frame_path or not os.path.exists(frame_path):
-            continue
-
-        try:
-            results = model(frame_path, verbose=False)
-
-            for result in results:
-                boxes = result.boxes
-                if boxes is None:
-                    continue
-
-                for i in range(len(boxes)):
-                    confidence = float(boxes.conf[i])
-                    if confidence < min_confidence:
-                        continue
-
-                    # Get bounding box
-                    x1, y1, x2, y2 = boxes.xyxy[i].tolist()
-                    width = int(x2 - x1)
-                    height = int(y2 - y1)
-
-                    # Filter small detections
-                    if width < min_size or height < min_size:
-                        continue
-
-                    # Get class label
-                    class_id = int(boxes.cls[i])
-                    label = model.names[class_id] if model.names else str(class_id)
-
-                    detections.append(ObjectDetection(
-                        timestamp=round(timestamp, 2),
-                        label=label,
-                        confidence=round(confidence, 3),
-                        bbox=BoundingBox(
-                            x=int(x1), y=int(y1),
-                            width=width, height=height,
-                        ),
-                    ))
-
-        except Exception as e:
-            logger.warning(f"Failed to process frame {frame_path}: {e}")
-
-    return detections
 
 
 def _bbox_iou(box1: BoundingBox, box2: BoundingBox) -> float:

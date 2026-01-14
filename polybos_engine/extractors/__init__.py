@@ -2,6 +2,7 @@
 
 from .clip import extract_clip
 from .faces import extract_faces
+from .frames import FrameExtractor, extract_frames_batch, get_video_duration
 from .metadata import (
     FFPROBE_WORKERS,
     extract_metadata,
@@ -41,4 +42,8 @@ __all__ = [
     "detect_voice_activity",
     "AudioContent",
     "unload_vad_model",
+    # Frame extraction utilities
+    "FrameExtractor",
+    "extract_frames_batch",
+    "get_video_duration",
 ]

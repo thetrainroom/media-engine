@@ -606,6 +606,18 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         faces_data = {
                             "count": faces.count,
                             "unique_estimate": faces.unique_estimate,
+                            "detections": [
+                                {
+                                    "timestamp": d.timestamp,
+                                    "bbox": d.bbox.model_dump(),
+                                    "confidence": d.confidence,
+                                    "embedding": d.embedding,  # Include for face matching
+                                    "image_base64": d.image_base64,
+                                    "needs_review": d.needs_review,
+                                    "review_reason": d.review_reason,
+                                }
+                                for d in faces.detections
+                            ],
                         }
                         update_file_status(i, "running", "faces", faces_data)
                 except Exception as e:
