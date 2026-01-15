@@ -111,6 +111,11 @@ def _get_qwen_model(
     if progress_callback:
         progress_callback("Loading Qwen model...", None, None)
 
+    # Disable tqdm progress bars to avoid BrokenPipeError when running as daemon
+    import transformers
+    transformers.logging.disable_progress_bar()
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+
     # Load model and processor with detailed error handling
     try:
         logger.info("Loading Qwen2VLForConditionalGeneration...")
@@ -161,6 +166,7 @@ For description:
     labels = {
         "person": "Person identified",
         "location": "Location",
+        "nearby_landmarks": "Nearby landmarks/POIs",
         "activity": "Activity",
         "language": "Language spoken",
         "device": "Filmed with",
@@ -186,9 +192,20 @@ IMPORTANT: The person in this video is "{person_name}".
 - In description: refer to them as "{person_name}", not "a person" or "someone"
 """
 
+    # Get nearby landmarks for naming instruction
+    nearby_landmarks = context.get("nearby_landmarks", "")
+    landmark_instruction = ""
+    if nearby_landmarks:
+        landmark_instruction = f"""
+IMPORTANT: This location has these nearby landmarks: {nearby_landmarks}
+- If you see any of these landmarks, use their PROPER NAME in the description
+- Example: say "Alnes fyr lighthouse" not just "a lighthouse"
+- Example: say "Eiffel Tower" not just "a tower"
+"""
+
     # Enhanced prompt with context
     return f"""{context_section}
-{person_instruction}
+{person_instruction}{landmark_instruction}
 Analyze this image and return JSON with two fields:
 {{
   "objects": ["object1", "object2", ...],
@@ -198,10 +215,12 @@ Analyze this image and return JSON with two fields:
 For objects:
 - Be specific (e.g., "scissors" not "tool", "remote control" not "device")
 - IMPORTANT: If a person is visible and identified above, use their name (e.g., "{person_name}" not "person")
+- IMPORTANT: If a known landmark is visible, use its proper name from the context
 - Only list clearly visible objects
 
 For description:
 - Use the person's name "{person_name}" if they are visible
+- Use proper landmark names if any are visible (from nearby landmarks list)
 - Reference the known location/activity if relevant
 - Describe what's happening in the scene"""
 

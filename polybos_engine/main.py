@@ -980,6 +980,33 @@ async def hardware():
     return get_vram_summary()
 
 
+@app.get("/geocode")
+async def geocode(
+    lat: float | None = None,
+    lon: float | None = None,
+    location: str | None = None,
+):
+    """Get location context with nearby POIs for AI enrichment.
+
+    Uses OpenStreetMap Nominatim to find nearby landmarks and POIs.
+
+    Args:
+        lat: GPS latitude
+        lon: GPS longitude
+        location: User-provided location string (optional)
+
+    Returns:
+        Dict with location context including nearby_landmarks
+    """
+    from polybos_engine.extractors.geocoding import get_location_context
+
+    if lat is None or lon is None:
+        return {"location": location or "", "nearby_landmarks": ""}
+
+    context = get_location_context(lat, lon, location)
+    return context
+
+
 @app.post("/extract", response_model=ExtractResponse)
 async def extract(request: ExtractRequest):
     """Extract metadata and features from video file.
