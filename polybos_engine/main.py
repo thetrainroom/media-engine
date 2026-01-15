@@ -756,6 +756,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         person_timestamps: dict[int, list[float]] = {}  # file_idx -> timestamps where persons detected
 
         if request.enable_objects:
+            logger.info(f"Objects enabled. Detector type: {type(detector)}, value: {detector}, is QWEN: {detector == ObjectDetector.QWEN}")
             if detector == ObjectDetector.QWEN:
                 # Clear memory before loading heavy model
                 logger.info("Clearing memory before Qwen...")
@@ -783,12 +784,14 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         objects_data: dict[str, Any] = {"summary": objects.summary}
                         if objects.descriptions:
                             objects_data["descriptions"] = objects.descriptions
+                        logger.info(f"Qwen result for file {i}: summary={objects.summary}, descriptions={objects.descriptions}")
                         update_file_status(i, "running", "objects", objects_data)
+                        logger.info(f"Stored objects_data for file {i}: {objects_data}")
 
                         # Qwen doesn't return per-detection timestamps, so no person_timestamps
                         person_timestamps[i] = []
                     except Exception as e:
-                        logger.warning(f"Objects failed for {file_path}: {e}")
+                        logger.warning(f"Objects failed for {file_path}: {e}", exc_info=True)
                         person_timestamps[i] = []
                 # Unload Qwen to free memory
                 update_batch_progress("objects", "Unloading Qwen model...", None, None)
@@ -897,6 +900,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         # Mark all files as completed
         with batch_jobs_lock:
             for i in range(len(files)):
+                # Log results before marking complete
+                result_keys = list(batch_jobs[batch_id].files[i].results.keys())
+                logger.info(f"Batch {batch_id} file {i} results before completion: keys={result_keys}")
                 batch_jobs[batch_id].files[i].status = "completed"
             batch_jobs[batch_id].status = "completed"
             batch_jobs[batch_id].current_extractor = None

@@ -79,7 +79,20 @@ def _get_qwen_model(
         logger.info(f"Reusing cached Qwen model: {model_name}")
         return _qwen_model, _qwen_processor, _qwen_device  # type: ignore
 
-    # Need to load new model
+    # Need to load new model - first clear any existing GPU memory
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+    if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+        try:
+            torch.mps.synchronize()
+            torch.mps.empty_cache()
+        except Exception as e:
+            logger.warning(f"Failed to clear MPS cache: {e}")
+    gc.collect()
+
     from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
 
     # Determine device
@@ -98,13 +111,21 @@ def _get_qwen_model(
     if progress_callback:
         progress_callback("Loading Qwen model...", None, None)
 
-    # Load model and processor
-    _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
-        model_name,
-        torch_dtype=torch_dtype,
-        device_map=torch_device,
-    )
-    _qwen_processor = AutoProcessor.from_pretrained(model_name)
+    # Load model and processor with detailed error handling
+    try:
+        logger.info("Loading Qwen2VLForConditionalGeneration...")
+        _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+            model_name,
+            torch_dtype=torch_dtype,
+            device_map=torch_device,
+        )
+        logger.info("Qwen model loaded, loading processor...")
+        _qwen_processor = AutoProcessor.from_pretrained(model_name)
+        logger.info("Qwen processor loaded successfully")
+    except Exception as e:
+        logger.error(f"Failed to load Qwen model: {e}", exc_info=True)
+        raise
+
     _qwen_model_name = model_name
     _qwen_device = torch_device
 
@@ -214,9 +235,12 @@ def extract_objects_qwen(
     """
     from qwen_vl_utils import process_vision_info
 
+    logger.info(f"extract_objects_qwen called: file={file_path}, timestamps={timestamps}, context={context}")
+
     settings = get_settings()
     # Resolve model name (handles "auto")
     model_name = model_name or settings.get_qwen_model()
+    logger.info(f"Using Qwen model: {model_name}")
 
     path = Path(file_path)
     if not path.exists():
@@ -242,6 +266,10 @@ def extract_objects_qwen(
             progress_callback("Extracting frames...", None, None)
         frame_paths = _extract_frames_at_timestamps(file_path, temp_dir, timestamps)
         total_frames = len([p for p in frame_paths if p])
+
+        if total_frames == 0:
+            logger.warning(f"No frames could be extracted from {file_path} at timestamps {timestamps}")
+            return ObjectsResult(summary={}, detections=[], descriptions=None)
 
         all_objects: dict[str, int] = {}
         detections: list[ObjectDetection] = []
@@ -364,6 +392,8 @@ def _extract_frames_at_timestamps(
     """Extract frames at specific timestamps, resized for VLM inference."""
     frame_paths: list[str] = []
 
+    logger.info(f"Extracting {len(timestamps)} frames from {video_path} at timestamps {timestamps}")
+
     for i, ts in enumerate(timestamps):
         output_path = os.path.join(output_dir, f"frame_{i:04d}.jpg")
         # Scale to max width while preserving aspect ratio, reduce quality for memory
@@ -379,9 +409,13 @@ def _extract_frames_at_timestamps(
         try:
             subprocess.run(cmd, capture_output=True, check=True)
             frame_paths.append(output_path)
-        except subprocess.CalledProcessError:
+            logger.info(f"Extracted frame {i} at {ts:.2f}s: {output_path}")
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Failed to extract frame at {ts:.2f}s: {e.stderr.decode() if e.stderr else 'no stderr'}")
             frame_paths.append("")
 
+    successful = sum(1 for p in frame_paths if p)
+    logger.info(f"Frame extraction complete: {successful}/{len(timestamps)} frames extracted")
     return frame_paths
 
 
