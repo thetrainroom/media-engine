@@ -33,6 +33,13 @@ def unload_qwen_model() -> None:
 
     if _qwen_model is not None:
         logger.info("Unloading Qwen model from memory")
+
+        # Move model to CPU first to release MPS memory
+        try:
+            _qwen_model.to("cpu")
+        except Exception:
+            pass
+
         del _qwen_model
         del _qwen_processor
         _qwen_model = None
@@ -40,13 +47,19 @@ def unload_qwen_model() -> None:
         _qwen_model_name = None
         _qwen_device = None
 
-        # Free GPU memory
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
-            torch.mps.empty_cache()
-
         import gc
+        gc.collect()
+
+        # Free GPU memory with sync
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        if hasattr(torch, "mps"):
+            if hasattr(torch.mps, "synchronize"):
+                torch.mps.synchronize()
+            if hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
+
         gc.collect()
 
 
@@ -300,8 +313,9 @@ def extract_objects_qwen(
 
                 if description:
                     descriptions.append(description)
+                    logger.info(f"Frame {timestamp:.1f}s description: {description}")
 
-                logger.debug(f"Frame {timestamp:.1f}s: {objects}")
+                logger.info(f"Frame {timestamp:.1f}s objects: {objects}")
 
                 # Clear memory after each frame
                 del inputs, generated_ids

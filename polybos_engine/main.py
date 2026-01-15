@@ -1,6 +1,7 @@
 """FastAPI application for Polybos Media Engine."""
 
 import atexit
+import gc
 import logging
 import threading
 import time
@@ -60,6 +61,34 @@ from polybos_engine.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _clear_memory() -> None:
+    """Force garbage collection and clear GPU/MPS caches.
+
+    Call before loading heavy AI models to free up memory.
+    """
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        if hasattr(torch, "mps"):
+            if hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
+            if hasattr(torch.mps, "synchronize"):
+                torch.mps.synchronize()
+    except ImportError:
+        pass
+    # Also try mlx cleanup
+    try:
+        import mlx.core as mx
+        mx.metal.clear_cache()
+    except (ImportError, AttributeError):
+        pass
+    gc.collect()
+
 
 # Create FastAPI app
 app = FastAPI(
@@ -648,6 +677,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
         # Stage 4: Transcript (Whisper - heavy model)
         if request.enable_transcript:
+            # Clear memory before loading heavy model
+            logger.info("Clearing memory before Whisper...")
+            _clear_memory()
             update_batch_progress("transcript", "Loading Whisper model...", 0, total_files)
             for i, file_path in enumerate(files):
                 update_batch_progress("transcript", f"Transcribing {Path(file_path).name}", i + 1, total_files)
@@ -670,7 +702,16 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         motion_data: dict[int, Any] = {}  # file_idx -> MotionAnalysis
         adaptive_timestamps: dict[int, list[float]] = {}  # file_idx -> timestamps
 
-        needs_motion = request.enable_motion or request.enable_objects or request.enable_faces or request.enable_clip or request.enable_ocr
+        # Skip motion analysis if timestamps are already provided (e.g., Pass 2 reusing Pass 1 data)
+        has_precomputed_timestamps = bool(request.qwen_timestamps)
+        needs_motion = request.enable_motion or (
+            (request.enable_objects or request.enable_faces or request.enable_clip or request.enable_ocr)
+            and not has_precomputed_timestamps
+        )
+
+        if has_precomputed_timestamps and request.qwen_timestamps:
+            logger.info(f"Using {len(request.qwen_timestamps)} pre-computed timestamps, skipping motion analysis")
+
         if needs_motion:
             update_batch_progress("motion", "Analyzing camera motion...", 0, total_files)
             for i, file_path in enumerate(files):
@@ -716,6 +757,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
         if request.enable_objects:
             if detector == ObjectDetector.QWEN:
+                # Clear memory before loading heavy model
+                logger.info("Clearing memory before Qwen...")
+                _clear_memory()
                 update_batch_progress("objects", "Loading Qwen model...", 0, total_files)
                 # Log context for debugging
                 logger.info(f"Qwen batch context: {request.context}")
@@ -1383,6 +1427,8 @@ async def process_pass2(request: Pass2Request):
     if request.enable_whisper:
         try:
             logger.info("Running Whisper transcription...")
+            # Clear memory before loading Whisper model
+            _clear_memory()
             transcript_result = extract_transcript(
                 request.file,
                 model=request.whisper_model,
@@ -1390,6 +1436,10 @@ async def process_pass2(request: Pass2Request):
             if transcript_result:
                 transcript = transcript_result
                 logger.info(f"Transcription complete: {len(transcript.segments)} segments")
+            # Unload Whisper to free memory for Qwen
+            from .extractors.transcribe import unload_whisper_model
+            unload_whisper_model()
+            _clear_memory()
         except Exception as e:
             logger.warning(f"Whisper failed: {e}")
 
@@ -1397,6 +1447,8 @@ async def process_pass2(request: Pass2Request):
     if request.enable_qwen:
         try:
             logger.info("Running Qwen scene descriptions...")
+            # Clear memory before loading Qwen model
+            _clear_memory()
 
             # Use provided timestamps or select from motion data
             timestamps = request.qwen_timestamps
@@ -1427,6 +1479,11 @@ async def process_pass2(request: Pass2Request):
             if objects_result and objects_result.descriptions:
                 qwen_descriptions = objects_result.descriptions
                 logger.info(f"Qwen complete: {len(qwen_descriptions)} descriptions")
+
+            # Unload Qwen to free memory
+            from .extractors.objects_qwen import unload_qwen_model
+            unload_qwen_model()
+            _clear_memory()
         except Exception as e:
             logger.warning(f"Qwen failed: {e}")
 

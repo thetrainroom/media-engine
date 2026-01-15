@@ -262,17 +262,23 @@ def unload_whisper_model() -> None:
             _backend._model = None
         _backend = None
 
-        # Free GPU memory
+        import gc
+        gc.collect()
+
+        # Free GPU memory with sync
         try:
             import torch
             if torch.cuda.is_available():
+                torch.cuda.synchronize()
                 torch.cuda.empty_cache()
-            if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
-                torch.mps.empty_cache()
+            if hasattr(torch, "mps"):
+                if hasattr(torch.mps, "synchronize"):
+                    torch.mps.synchronize()
+                if hasattr(torch.mps, "empty_cache"):
+                    torch.mps.empty_cache()
         except ImportError:
             pass
 
-        import gc
         gc.collect()
 
 
