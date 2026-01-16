@@ -1,5 +1,6 @@
 """CLIP embedding extraction with platform-specific backends."""
 
+import gc
 import logging
 import os
 import shutil
@@ -136,25 +137,90 @@ class MLXCLIPBackend(CLIPBackend):
 
 # Singleton backend instance
 _backend: CLIPBackend | None = None
+_backend_model_name: str | None = None
 
 
-def get_clip_backend() -> CLIPBackend:
-    """Get the appropriate CLIP backend for the current platform."""
-    global _backend
+def unload_clip_model() -> None:
+    """Unload the CLIP model to free memory."""
+    global _backend, _backend_model_name
+
+    if _backend is None:
+        return
+
+    logger.info("Unloading CLIP model to free memory")
+
+    try:
+        import torch
+
+        # Clear internal model references
+        if isinstance(_backend, MLXCLIPBackend):
+            if _backend._model is not None:
+                del _backend._model
+                _backend._model = None
+            if _backend._processor is not None:
+                del _backend._processor
+                _backend._processor = None
+        elif isinstance(_backend, OpenCLIPBackend):
+            if hasattr(_backend, "model"):
+                del _backend.model
+
+        del _backend
+        _backend = None
+        _backend_model_name = None
+
+        gc.collect()
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            if hasattr(torch.mps, "synchronize"):
+                torch.mps.synchronize()
+            if hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
+
+        gc.collect()
+        logger.info("CLIP model unloaded")
+    except Exception as e:
+        logger.warning(f"Error unloading CLIP model: {e}")
+        _backend = None
+        _backend_model_name = None
+
+
+def get_clip_backend(model_name: str | None = None) -> CLIPBackend:
+    """Get the appropriate CLIP backend for the current platform.
+
+    Args:
+        model_name: CLIP model name. For OpenCLIP: "ViT-B-16", "ViT-B-32", "ViT-L-14".
+                   For MLX-CLIP: "openai/clip-vit-base-patch32", etc.
+                   If None, uses defaults.
+    """
+    global _backend, _backend_model_name
+
+    # If model name changed, unload the old model
+    if _backend is not None and model_name is not None and _backend_model_name != model_name:
+        logger.info(f"Switching CLIP model from {_backend_model_name} to {model_name}")
+        unload_clip_model()
 
     if _backend is not None:
         return _backend
 
     if is_apple_silicon():
         try:
-            _backend = MLXCLIPBackend()
-            logger.info("Using MLX-CLIP backend (Apple Silicon)")
+            # MLX-CLIP uses HuggingFace model names
+            mlx_model = model_name or "openai/clip-vit-base-patch32"
+            _backend = MLXCLIPBackend(model_name=mlx_model)
+            _backend_model_name = mlx_model
+            logger.info(f"Using MLX-CLIP backend (Apple Silicon): {mlx_model}")
             return _backend
         except Exception as e:
             logger.warning(f"MLX-CLIP not available: {e}, falling back to OpenCLIP")
 
-    _backend = OpenCLIPBackend()
-    logger.info("Using OpenCLIP backend")
+    # OpenCLIP uses short model names like "ViT-B-32"
+    openclip_model = model_name or "ViT-B-32"
+    _backend = OpenCLIPBackend(model_name=openclip_model)
+    _backend_model_name = openclip_model
+    logger.info(f"Using OpenCLIP backend: {openclip_model}")
     return _backend
 
 
@@ -163,6 +229,7 @@ def extract_clip(
     scenes: ScenesResult | None = None,
     fallback_interval: float = 10.0,
     timestamps: list[float] | None = None,  # Direct timestamp list (e.g., from motion analysis)
+    model_name: str | None = None,  # CLIP model name (e.g., "ViT-B-32", "ViT-L-14")
 ) -> ClipResult:
     """Extract CLIP embeddings from video.
 
@@ -176,6 +243,7 @@ def extract_clip(
         scenes: Optional scene detection results (one embedding per scene)
         fallback_interval: Interval in seconds if no scenes provided
         timestamps: Optional list of specific timestamps to sample (overrides scenes/interval)
+        model_name: CLIP model name (e.g., "ViT-B-32", "ViT-L-14"). If None, uses default.
 
     Returns:
         ClipResult with embeddings per segment
@@ -184,7 +252,7 @@ def extract_clip(
     if not path.exists():
         raise FileNotFoundError(f"Video file not found: {file_path}")
 
-    backend = get_clip_backend()
+    backend = get_clip_backend(model_name)
 
     # Create temp directory for frames
     temp_dir = tempfile.mkdtemp(prefix="polybos_clip_")

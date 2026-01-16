@@ -44,9 +44,13 @@ from polybos_engine.extractors import (
     get_adaptive_timestamps,
     get_sample_timestamps,
     run_ffprobe_batch,
+    unload_clip_model,
+    unload_face_model,
+    unload_ocr_model,
     unload_qwen_model,
     unload_vad_model,
     unload_whisper_model,
+    unload_yolo_model,
 )
 from polybos_engine.extractors.shot_type import detect_shot_type
 from polybos_engine.schemas import (
@@ -122,13 +126,21 @@ def _cleanup_resources():
     try:
         from polybos_engine.extractors import (
             shutdown_ffprobe_pool,
-            unload_whisper_model,
+            unload_clip_model,
+            unload_face_model,
+            unload_ocr_model,
             unload_qwen_model,
             unload_vad_model,
+            unload_whisper_model,
+            unload_yolo_model,
         )
         shutdown_ffprobe_pool()
         unload_whisper_model()
         unload_qwen_model()
+        unload_yolo_model()
+        unload_clip_model()
+        unload_ocr_model()
+        unload_face_model()
         unload_vad_model()
         logger.info("All resources cleaned up")
     except Exception as e:
@@ -190,6 +202,35 @@ class JobStatus(BaseModel):
 jobs: dict[str, JobStatus] = {}
 jobs_lock = threading.Lock()
 
+# Job TTL for automatic cleanup (1 hour)
+JOB_TTL_SECONDS = 3600
+
+
+def _cleanup_expired_jobs() -> int:
+    """Remove completed/failed jobs older than TTL.
+
+    Returns:
+        Number of jobs removed
+    """
+    now = datetime.now(timezone.utc)
+    removed = 0
+
+    with jobs_lock:
+        expired = [
+            jid for jid, job in jobs.items()
+            if job.status in ("completed", "failed")
+            and job.completed_at is not None
+            and (now - job.completed_at).total_seconds() > JOB_TTL_SECONDS
+        ]
+        for jid in expired:
+            del jobs[jid]
+            removed += 1
+
+    if removed > 0:
+        logger.info(f"Cleaned up {removed} expired jobs")
+
+    return removed
+
 
 def _build_qwen_context(results: dict[str, Any]) -> dict[str, str] | None:
     """Build context for Qwen from earlier extraction results.
@@ -216,7 +257,7 @@ def _build_qwen_context(results: dict[str, Any]) -> dict[str, str] | None:
         if shot_type and shot_type.get("primary"):
             context["shot_type"] = shot_type["primary"]
 
-        # GPS location (could be reverse geocoded in future)
+        # GPS location
         gps = metadata.get("gps")
         if gps and gps.get("latitude"):
             context["coordinates"] = f"{gps['latitude']:.4f}, {gps['longitude']:.4f}"
@@ -500,6 +541,9 @@ def run_extraction_job(
 @app.post("/jobs")
 async def create_job(request: ExtractRequest) -> dict[str, str]:
     """Create a new extraction job."""
+    # Cleanup expired jobs on new job creation (lazy cleanup)
+    _cleanup_expired_jobs()
+
     file_path = Path(request.file)
     if not file_path.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {request.file}")
@@ -535,12 +579,33 @@ async def get_job(job_id: str) -> JobStatus:
         return jobs[job_id]
 
 
+@app.delete("/jobs/{job_id}")
+async def delete_job(job_id: str) -> dict[str, str]:
+    """Delete a job and free its memory.
+
+    Jobs can be deleted at any time, but deleting a running job
+    will not stop its processing - it will just remove the status.
+    """
+    with jobs_lock:
+        if job_id not in jobs:
+            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+        del jobs[job_id]
+
+    logger.info(f"Deleted job {job_id}")
+    return {"status": "deleted", "job_id": job_id}
+
+
 # ============================================================================
 # Batch Job System (extractor-first processing for memory efficiency)
 # ============================================================================
 
 class BatchRequest(BaseModel):
-    """Request for batch extraction."""
+    """Request for batch extraction.
+
+    Model fields support:
+    - "auto" - auto-select based on VRAM
+    - Specific model name (e.g., "yolov8m.pt", "ViT-L-14")
+    """
     files: list[str]
     enable_metadata: bool = True
     enable_vad: bool = False  # Voice Activity Detection
@@ -551,8 +616,16 @@ class BatchRequest(BaseModel):
     enable_clip: bool = False
     enable_ocr: bool = False
     enable_motion: bool = False
+
+    # Object detection settings
     object_detector: ObjectDetector | None = None
-    whisper_model: str = "large-v3"
+
+    # Model selection (per-request overrides, "auto" = VRAM-based selection)
+    whisper_model: str = "auto"
+    qwen_model: str = "auto"
+    yolo_model: str = "auto"
+    clip_model: str = "auto"
+
     # Context for Whisper
     language_hints: list[str] | None = None
     context_hint: str | None = None
@@ -586,16 +659,72 @@ batch_jobs: dict[str, BatchJobStatus] = {}
 batch_jobs_lock = threading.Lock()
 
 
+def _cleanup_expired_batch_jobs() -> int:
+    """Remove completed/failed batch jobs older than TTL.
+
+    Returns:
+        Number of batch jobs removed
+    """
+    now = datetime.now(timezone.utc)
+    removed = 0
+
+    with batch_jobs_lock:
+        expired = [
+            bid for bid, batch in batch_jobs.items()
+            if batch.status in ("completed", "failed")
+            and batch.completed_at is not None
+            and (now - batch.completed_at).total_seconds() > JOB_TTL_SECONDS
+        ]
+        for bid in expired:
+            del batch_jobs[bid]
+            removed += 1
+
+    if removed > 0:
+        logger.info(f"Cleaned up {removed} expired batch jobs")
+
+    return removed
+
+
 def run_batch_job(batch_id: str, request: BatchRequest) -> None:
     """Run batch extraction - processes all files per extractor stage.
 
     This is more memory efficient as each model is loaded once,
     processes all files, then is unloaded before the next model.
     """
+    from polybos_engine.config import (
+        get_auto_clip_model,
+        get_auto_qwen_model,
+        get_auto_whisper_model,
+        get_auto_yolo_model,
+    )
+
     settings = get_settings()
+
     # Resolve object detector (handles "auto")
     detector = request.object_detector or settings.get_object_detector()
-    logger.info(f"Batch request: enable_objects={request.enable_objects}, object_detector={request.object_detector}, resolved detector={detector}")
+
+    # Resolve model names (handles "auto" -> actual model name)
+    whisper_model = (
+        get_auto_whisper_model() if request.whisper_model == "auto"
+        else request.whisper_model
+    )
+    qwen_model = (
+        get_auto_qwen_model() if request.qwen_model == "auto"
+        else request.qwen_model
+    )
+    yolo_model = (
+        get_auto_yolo_model() if request.yolo_model == "auto"
+        else request.yolo_model
+    )
+    clip_model = (
+        get_auto_clip_model() if request.clip_model == "auto"
+        else request.clip_model
+    )
+
+    logger.info(
+        f"Batch {batch_id} models: whisper={whisper_model}, qwen={qwen_model}, "
+        f"yolo={yolo_model}, clip={clip_model}, detector={detector}"
+    )
 
     def update_batch_progress(extractor: str, message: str, current: int | None = None, total: int | None = None) -> None:
         with batch_jobs_lock:
@@ -686,7 +815,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 try:
                     transcript = extract_transcript(
                         file_path,
-                        model=request.whisper_model,
+                        model=whisper_model,
                         language_hints=request.language_hints,
                         context_hint=request.context_hint,
                     )
@@ -779,6 +908,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         objects = extract_objects_qwen(
                             file_path,
                             timestamps=timestamps,
+                            model_name=qwen_model,
                             context=request.context,
                         )
                         objects_data: dict[str, Any] = {"summary": objects.summary}
@@ -804,7 +934,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     try:
                         # Use motion-adaptive timestamps if available
                         timestamps = adaptive_timestamps.get(i) if adaptive_timestamps.get(i) else None
-                        objects = extract_objects(file_path, timestamps=timestamps)
+                        objects = extract_objects(file_path, timestamps=timestamps, model_name=yolo_model)
 
                         if objects:
                             update_file_status(i, "running", "objects", {"summary": objects.summary})
@@ -821,6 +951,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     except Exception as e:
                         logger.warning(f"Objects failed for {file_path}: {e}")
                         person_timestamps[i] = []
+                # Unload YOLO to free memory
+                update_batch_progress("objects", "Unloading YOLO model...", None, None)
+                unload_yolo_model()
 
         # Stage 7: Faces (YOLO-triggered - only where persons detected)
         if request.enable_faces:
@@ -867,6 +1000,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         update_file_status(i, "running", "faces", {"count": 0, "unique_estimate": 0, "detections": []})
                 except Exception as e:
                     logger.warning(f"Faces failed for {file_path}: {e}")
+            # Unload face detection models to free memory
+            update_batch_progress("faces", "Unloading face models...", None, None)
+            unload_face_model()
 
         # Stage 8: OCR (EasyOCR - moderate model) with motion-adaptive timestamps
         if request.enable_ocr:
@@ -880,6 +1016,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     update_file_status(i, "running", "ocr", ocr.model_dump() if ocr else None)
                 except Exception as e:
                     logger.warning(f"OCR failed for {file_path}: {e}")
+            # Unload OCR model to free memory
+            update_batch_progress("ocr", "Unloading OCR model...", None, None)
+            unload_ocr_model()
 
         # Stage 9: CLIP embeddings with motion-adaptive timestamps
         if request.enable_clip:
@@ -889,13 +1028,16 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 try:
                     # Use motion-adaptive timestamps if available
                     timestamps = adaptive_timestamps.get(i) if adaptive_timestamps.get(i) else None
-                    clip = extract_clip(file_path, timestamps=timestamps)
+                    clip = extract_clip(file_path, timestamps=timestamps, model_name=clip_model)
                     if clip:
                         update_file_status(i, "running", "clip", {"model": clip.model, "count": len(clip.segments)})
                     else:
                         update_file_status(i, "running", "clip", None)
                 except Exception as e:
                     logger.warning(f"CLIP failed for {file_path}: {e}")
+            # Unload CLIP model to free memory
+            update_batch_progress("clip", "Unloading CLIP model...", None, None)
+            unload_clip_model()
 
         # Mark all files as completed
         with batch_jobs_lock:
@@ -920,6 +1062,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 @app.post("/batch")
 async def create_batch(request: BatchRequest) -> dict[str, str]:
     """Create a new batch extraction job (memory-efficient extractor-first processing)."""
+    # Cleanup expired batch jobs on new batch creation (lazy cleanup)
+    _cleanup_expired_batch_jobs()
+
     # Validate all files exist
     for file_path in request.files:
         if not Path(file_path).exists():
@@ -958,6 +1103,22 @@ async def get_batch(batch_id: str) -> BatchJobStatus:
         return batch_jobs[batch_id]
 
 
+@app.delete("/batch/{batch_id}")
+async def delete_batch(batch_id: str) -> dict[str, str]:
+    """Delete a batch job and free its memory.
+
+    Jobs can be deleted at any time, but deleting a running batch
+    will not stop its processing - it will just remove the status.
+    """
+    with batch_jobs_lock:
+        if batch_id not in batch_jobs:
+            raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
+        del batch_jobs[batch_id]
+
+    logger.info(f"Deleted batch job {batch_id}")
+    return {"status": "deleted", "batch_id": batch_id}
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health():
     """Health check endpoint."""
@@ -978,33 +1139,6 @@ async def hardware():
     """
     from polybos_engine.config import get_vram_summary
     return get_vram_summary()
-
-
-@app.get("/geocode")
-async def geocode(
-    lat: float | None = None,
-    lon: float | None = None,
-    location: str | None = None,
-):
-    """Get location context with nearby POIs for AI enrichment.
-
-    Uses OpenStreetMap Nominatim to find nearby landmarks and POIs.
-
-    Args:
-        lat: GPS latitude
-        lon: GPS longitude
-        location: User-provided location string (optional)
-
-    Returns:
-        Dict with location context including nearby_landmarks
-    """
-    from polybos_engine.extractors.geocoding import get_location_context
-
-    if lat is None or lon is None:
-        return {"location": location or "", "nearby_landmarks": ""}
-
-    context = get_location_context(lat, lon, location)
-    return context
 
 
 @app.post("/extract", response_model=ExtractResponse)

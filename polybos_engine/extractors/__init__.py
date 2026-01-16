@@ -1,7 +1,7 @@
 """Video feature extractors."""
 
-from .clip import extract_clip
-from .faces import extract_faces
+from .clip import extract_clip, unload_clip_model
+from .faces import extract_faces, unload_face_model
 from .frames import FrameExtractor, extract_frames_batch, get_video_duration
 from .metadata import (
     FFPROBE_WORKERS,
@@ -10,10 +10,16 @@ from .metadata import (
     run_ffprobe_batch,
     shutdown_ffprobe_pool,
 )
-from .motion import MotionAnalysis, MotionType, analyze_motion, get_sample_timestamps, get_adaptive_timestamps
-from .objects import extract_objects
+from .motion import (
+    MotionAnalysis,
+    MotionType,
+    analyze_motion,
+    get_adaptive_timestamps,
+    get_sample_timestamps,
+)
+from .objects import extract_objects, unload_yolo_model
 from .objects_qwen import extract_objects_qwen, unload_qwen_model
-from .ocr import extract_ocr
+from .ocr import extract_ocr, unload_ocr_model
 from .scenes import extract_scenes
 from .telemetry import extract_telemetry
 from .transcribe import extract_transcript, unload_whisper_model
@@ -38,11 +44,17 @@ __all__ = [
     "get_adaptive_timestamps",
     "MotionAnalysis",
     "MotionType",
+    # Model unload functions
     "unload_qwen_model",
     "unload_whisper_model",
+    "unload_yolo_model",
+    "unload_clip_model",
+    "unload_ocr_model",
+    "unload_face_model",
+    "unload_vad_model",
+    # Voice activity detection
     "detect_voice_activity",
     "AudioContent",
-    "unload_vad_model",
     # Frame extraction utilities
     "FrameExtractor",
     "extract_frames_batch",

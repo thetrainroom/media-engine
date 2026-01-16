@@ -1,13 +1,74 @@
 """Object detection using YOLO."""
 
+import gc
 import logging
 from pathlib import Path
+from typing import Any
 
-from polybos_engine.config import get_device, DeviceType
+from polybos_engine.config import DeviceType, get_device
 from polybos_engine.extractors.frames import FrameExtractor, get_video_duration
 from polybos_engine.schemas import BoundingBox, ObjectDetection, ObjectsResult, SceneDetection
 
 logger = logging.getLogger(__name__)
+
+# Singleton YOLO model (lazy loaded)
+_yolo_model: Any = None
+_yolo_model_name: str | None = None
+
+
+def unload_yolo_model() -> None:
+    """Unload the YOLO model to free memory."""
+    global _yolo_model, _yolo_model_name
+
+    if _yolo_model is None:
+        return
+
+    logger.info("Unloading YOLO model to free memory")
+
+    try:
+        # Clear CUDA/MPS cache
+        import torch
+
+        del _yolo_model
+        _yolo_model = None
+        _yolo_model_name = None
+
+        gc.collect()
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            if hasattr(torch.mps, "synchronize"):
+                torch.mps.synchronize()
+            if hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
+
+        gc.collect()
+        logger.info("YOLO model unloaded")
+    except Exception as e:
+        logger.warning(f"Error unloading YOLO model: {e}")
+        _yolo_model = None
+        _yolo_model_name = None
+
+
+def _get_yolo_model(model_name: str) -> Any:
+    """Get or create the YOLO model (singleton with model switching)."""
+    global _yolo_model, _yolo_model_name
+
+    # If model name changed, unload old model
+    if _yolo_model is not None and _yolo_model_name != model_name:
+        logger.info(f"Switching YOLO model from {_yolo_model_name} to {model_name}")
+        unload_yolo_model()
+
+    if _yolo_model is None:
+        from ultralytics import YOLO
+
+        logger.info(f"Loading YOLO model: {model_name}")
+        _yolo_model = YOLO(model_name)
+        _yolo_model_name = model_name
+
+    return _yolo_model
 
 
 def extract_objects(
@@ -38,8 +99,6 @@ def extract_objects(
     Returns:
         ObjectsResult with unique objects and summary
     """
-    from ultralytics import YOLO
-
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"Video file not found: {file_path}")
@@ -47,10 +106,9 @@ def extract_objects(
     # Determine device for GPU acceleration
     device = get_device()
     device_str = "mps" if device == DeviceType.MPS else "cuda" if device == DeviceType.CUDA else "cpu"
-    logger.info(f"Loading object detection model: {model_name} on {device_str}")
 
-    # Load model
-    model = YOLO(model_name)
+    # Load model (singleton)
+    model = _get_yolo_model(model_name)
 
     # Determine timestamps to sample (priority: explicit > scenes > fixed fps)
     if timestamps is not None:

@@ -1,6 +1,7 @@
 """Face detection using DeepFace with Facenet."""
 
 import base64
+import gc
 import io
 import logging
 import os
@@ -11,7 +12,6 @@ from pathlib import Path
 from typing import TypeAlias
 
 import numpy as np
-from numpy.typing import NDArray
 from PIL import Image
 
 from polybos_engine.schemas import BoundingBox, FaceDetection, FacesResult, SceneDetection
@@ -19,6 +19,52 @@ from polybos_engine.schemas import BoundingBox, FaceDetection, FacesResult, Scen
 Embedding: TypeAlias = list[float]
 
 logger = logging.getLogger(__name__)
+
+
+def unload_face_model() -> None:
+    """Unload DeepFace models to free memory.
+
+    DeepFace caches models internally. This function clears those caches.
+    """
+    logger.info("Unloading face detection models to free memory")
+
+    try:
+        import torch
+
+        # DeepFace caches models in deepface.modules.modeling
+        try:
+            from deepface.modules import modeling
+
+            # Clear the model store if it exists
+            if hasattr(modeling, "model_obj"):
+                modeling.model_obj = {}
+        except (ImportError, AttributeError):
+            pass
+
+        # Also try the older DeepFace.commons.functions cache
+        try:
+            from deepface.commons import functions
+
+            if hasattr(functions, "model_obj"):
+                functions.model_obj = {}
+        except (ImportError, AttributeError):
+            pass
+
+        gc.collect()
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            if hasattr(torch.mps, "synchronize"):
+                torch.mps.synchronize()
+            if hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
+
+        gc.collect()
+        logger.info("Face detection models unloaded")
+    except Exception as e:
+        logger.warning(f"Error unloading face models: {e}")
 
 
 def extract_faces(

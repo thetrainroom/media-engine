@@ -1,9 +1,10 @@
 """OCR extraction using EasyOCR."""
 
+import gc
 import logging
 from typing import Any
 
-from polybos_engine.config import get_device, get_settings, DeviceType
+from polybos_engine.config import DeviceType, get_device, get_settings
 from polybos_engine.extractors.frames import FrameExtractor, get_video_duration
 from polybos_engine.schemas import BoundingBox, OcrDetection, OcrResult, ScenesResult
 
@@ -12,6 +13,36 @@ logger = logging.getLogger(__name__)
 # Singleton reader instance (lazy loaded)
 _ocr_reader: Any = None
 _ocr_languages: list[str] | None = None
+
+
+def unload_ocr_model() -> None:
+    """Unload the EasyOCR model to free memory."""
+    global _ocr_reader, _ocr_languages
+
+    if _ocr_reader is None:
+        return
+
+    logger.info("Unloading EasyOCR model to free memory")
+
+    try:
+        import torch
+
+        del _ocr_reader
+        _ocr_reader = None
+        _ocr_languages = None
+
+        gc.collect()
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+        gc.collect()
+        logger.info("EasyOCR model unloaded")
+    except Exception as e:
+        logger.warning(f"Error unloading EasyOCR model: {e}")
+        _ocr_reader = None
+        _ocr_languages = None
 
 
 def _get_ocr_reader(languages: list[str] | None = None) -> Any:

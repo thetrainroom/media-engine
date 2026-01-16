@@ -94,6 +94,8 @@ class Settings(BaseModel):
     Model settings support "auto" to automatically select based on VRAM:
     - whisper_model: "auto" | "tiny" | "small" | "medium" | "large-v3"
     - qwen_model: "auto" | "Qwen/Qwen2-VL-2B-Instruct" | "Qwen/Qwen2-VL-7B-Instruct"
+    - yolo_model: "auto" | "yolov8n.pt" | "yolov8s.pt" | "yolov8m.pt" | "yolov8l.pt" | "yolov8x.pt"
+    - clip_model: "auto" | "ViT-B-16" | "ViT-B-32" | "ViT-L-14"
     - object_detector: "auto" | "yolo" | "qwen"
     """
 
@@ -119,6 +121,12 @@ class Settings(BaseModel):
     qwen_model: str = DEFAULT_QWEN_MODEL
     qwen_frames_per_scene: int = DEFAULT_QWEN_FRAMES_PER_SCENE
 
+    # YOLO model ("auto" = select based on VRAM)
+    yolo_model: str = "auto"
+
+    # CLIP model ("auto" = select based on VRAM)
+    clip_model: str = "auto"
+
     # OCR settings
     ocr_languages: list[str] = DEFAULT_OCR_LANGUAGES.copy()
 
@@ -136,6 +144,18 @@ class Settings(BaseModel):
         if self.qwen_model == "auto":
             return get_auto_qwen_model()
         return self.qwen_model
+
+    def get_yolo_model(self) -> str:
+        """Get resolved YOLO model (handles 'auto')."""
+        if self.yolo_model == "auto":
+            return get_auto_yolo_model()
+        return self.yolo_model
+
+    def get_clip_model(self) -> str:
+        """Get resolved CLIP model (handles 'auto')."""
+        if self.clip_model == "auto":
+            return get_auto_clip_model()
+        return self.clip_model
 
     def get_object_detector(self) -> ObjectDetector:
         """Get resolved object detector (handles 'auto')."""
@@ -352,6 +372,59 @@ def get_auto_object_detector() -> ObjectDetector:
     return detector
 
 
+def get_auto_yolo_model() -> str:
+    """Select YOLO model based on available VRAM.
+
+    | VRAM     | Model     | Size   | Speed   |
+    |----------|-----------|--------|---------|
+    | <2GB     | yolov8n   | 6MB    | Fastest |
+    | 2-4GB    | yolov8s   | 22MB   | Fast    |
+    | 4-8GB    | yolov8m   | 52MB   | Medium  |
+    | 8-16GB   | yolov8l   | 87MB   | Slow    |
+    | 16GB+    | yolov8x   | 136MB  | Slowest |
+    """
+    vram = get_available_vram_gb()
+
+    if vram >= 16:
+        model = "yolov8x.pt"
+    elif vram >= 8:
+        model = "yolov8l.pt"
+    elif vram >= 4:
+        model = "yolov8m.pt"
+    elif vram >= 2:
+        model = "yolov8s.pt"
+    else:
+        model = "yolov8n.pt"
+
+    logger.info(f"Auto-selected YOLO model: {model} (VRAM: {vram:.1f}GB)")
+    return model
+
+
+def get_auto_clip_model() -> str:
+    """Select CLIP model based on available VRAM.
+
+    | VRAM     | Model     | Size    | Quality |
+    |----------|-----------|---------|---------|
+    | <2GB     | ViT-B-16  | 335MB   | Good    |
+    | 2-4GB    | ViT-B-32  | 338MB   | Good    |
+    | 4GB+     | ViT-L-14  | 933MB   | Best    |
+
+    Note: ViT-B-16 and ViT-B-32 are similar size but different patch sizes.
+    ViT-B-32 is slightly faster, ViT-B-16 has better detail recognition.
+    """
+    vram = get_available_vram_gb()
+
+    if vram >= 4:
+        model = "ViT-L-14"
+    elif vram >= 2:
+        model = "ViT-B-32"
+    else:
+        model = "ViT-B-16"
+
+    logger.info(f"Auto-selected CLIP model: {model} (VRAM: {vram:.1f}GB)")
+    return model
+
+
 def get_vram_summary() -> dict:
     """Get a summary of VRAM and auto-selected models.
 
@@ -365,10 +438,121 @@ def get_vram_summary() -> dict:
         "vram_gb": round(vram, 1),
         "auto_whisper_model": get_auto_whisper_model(),
         "auto_qwen_model": get_auto_qwen_model() if vram >= 8 else None,
+        "auto_yolo_model": get_auto_yolo_model(),
+        "auto_clip_model": get_auto_clip_model(),
         "auto_object_detector": str(get_auto_object_detector()),
         "recommendations": {
             "can_use_large_whisper": vram >= 10,
             "can_use_qwen": vram >= 8,
             "can_use_qwen_7b": vram >= 16,
+            "can_use_clip_l14": vram >= 4,
+            "can_use_yolo_xlarge": vram >= 16,
         },
     }
+
+
+# =============================================================================
+# Memory Monitoring
+# =============================================================================
+
+# Approximate memory requirements for models (in GB)
+MODEL_MEMORY_REQUIREMENTS: dict[str, float] = {
+    # Whisper models
+    "tiny": 1.0,
+    "small": 2.0,
+    "medium": 4.0,
+    "large-v3": 6.0,
+    # YOLO models
+    "yolov8n.pt": 0.2,
+    "yolov8s.pt": 0.3,
+    "yolov8m.pt": 0.5,
+    "yolov8l.pt": 0.8,
+    "yolov8x.pt": 1.2,
+    # Qwen VLM
+    "Qwen/Qwen2-VL-2B-Instruct": 6.0,
+    "Qwen/Qwen2-VL-7B-Instruct": 16.0,
+    # CLIP
+    "ViT-B-16": 0.4,
+    "ViT-B-32": 0.4,
+    "ViT-L-14": 1.0,
+    # OCR
+    "easyocr": 3.0,
+    # Face detection
+    "deepface": 0.5,
+}
+
+
+def get_available_memory_gb() -> tuple[float, float]:
+    """Get available system RAM and GPU memory in GB.
+
+    Returns:
+        (available_ram_gb, available_vram_gb)
+    """
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        available_ram = mem.available / (1024 ** 3)
+    except ImportError:
+        logger.warning("psutil not installed, cannot monitor RAM")
+        available_ram = 8.0  # Conservative default
+
+    # GPU memory
+    available_vram = 0.0
+    if has_cuda():
+        try:
+            import torch
+            total = torch.cuda.get_device_properties(0).total_memory
+            allocated = torch.cuda.memory_allocated(0)
+            available_vram = (total - allocated) / (1024 ** 3)
+        except Exception:
+            available_vram = get_available_vram_gb()
+    elif is_apple_silicon():
+        # Unified memory - estimate from system available
+        available_vram = available_ram * 0.75
+
+    return available_ram, available_vram
+
+
+def check_memory_before_load(model_name: str, clear_memory_func: Any | None = None) -> bool:
+    """Check if enough memory is available before loading a model.
+
+    If memory is low, attempts to free memory by calling the clear function.
+
+    Args:
+        model_name: Name of the model to load (must be in MODEL_MEMORY_REQUIREMENTS)
+        clear_memory_func: Optional function to call to free memory (e.g., gc.collect)
+
+    Returns:
+        True if enough memory is available, False otherwise
+    """
+    required_gb = MODEL_MEMORY_REQUIREMENTS.get(model_name, 2.0)  # Default 2GB
+    ram, vram = get_available_memory_gb()
+
+    # Use VRAM for GPU models, RAM for CPU
+    device = get_device()
+    available = vram if device != DeviceType.CPU else ram
+
+    if available < required_gb:
+        logger.warning(
+            f"Low memory ({available:.1f}GB available) for {model_name} "
+            f"({required_gb:.1f}GB required)"
+        )
+
+        # Try to free memory
+        if clear_memory_func is not None:
+            logger.info("Attempting to free memory...")
+            clear_memory_func()
+
+            # Re-check
+            ram, vram = get_available_memory_gb()
+            available = vram if device != DeviceType.CPU else ram
+
+            if available < required_gb:
+                logger.error(
+                    f"Still insufficient memory ({available:.1f}GB) for {model_name}"
+                )
+                return False
+            else:
+                logger.info(f"Memory freed, now {available:.1f}GB available")
+
+    return True
