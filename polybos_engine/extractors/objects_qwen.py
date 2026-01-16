@@ -111,10 +111,12 @@ def _get_qwen_model(
     if progress_callback:
         progress_callback("Loading Qwen model...", None, None)
 
-    # Disable tqdm progress bars to avoid BrokenPipeError when running as daemon
+    # Disable tqdm progress bars and warnings to avoid BrokenPipeError when running as daemon
     import transformers
     transformers.logging.disable_progress_bar()
+    transformers.logging.set_verbosity_error()  # Suppress info/warning output
     os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 
     # Load model and processor with detailed error handling
     try:
@@ -290,6 +292,8 @@ def extract_objects_qwen(
             logger.warning(f"No frames could be extracted from {file_path} at timestamps {timestamps}")
             return ObjectsResult(summary={}, detections=[], descriptions=None)
 
+        logger.info(f"Processing {total_frames} frames for Qwen analysis")
+
         all_objects: dict[str, int] = {}
         detections: list[ObjectDetection] = []
         descriptions: list[str] = []
@@ -297,6 +301,7 @@ def extract_objects_qwen(
 
         for frame_path, timestamp in zip(frame_paths, timestamps):
             if not frame_path or not os.path.exists(frame_path):
+                logger.warning(f"Skipping missing frame at {timestamp}s: {frame_path}")
                 continue
 
             frame_count += 1
@@ -332,9 +337,15 @@ def extract_objects_qwen(
                 )
                 inputs = inputs.to(torch_device)
 
-                # Generate response
+                # Generate response with repetition penalty to prevent loops
                 with torch.no_grad():
-                    generated_ids = model.generate(**inputs, max_new_tokens=512)
+                    generated_ids = model.generate(
+                        **inputs,
+                        max_new_tokens=512,
+                        do_sample=False,  # Greedy decoding for consistent JSON
+                        repetition_penalty=1.2,  # Penalize repetition
+                        no_repeat_ngram_size=3,  # Prevent 3-gram repetition
+                    )
                 generated_ids_trimmed = [
                     out_ids[len(in_ids):]
                     for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
@@ -346,7 +357,10 @@ def extract_objects_qwen(
                 )[0]
 
                 # Parse response
+                logger.info(f"Qwen raw output for {timestamp:.1f}s: {output_text[:500]}")
                 objects, description = _parse_objects_and_description(output_text)
+                if not description:
+                    logger.warning(f"No description parsed from Qwen output at {timestamp:.1f}s")
                 for obj in objects:
                     obj_lower = obj.lower().strip()
                     all_objects[obj_lower] = all_objects.get(obj_lower, 0) + 1
@@ -372,7 +386,7 @@ def extract_objects_qwen(
                     torch.cuda.empty_cache()
 
             except Exception as e:
-                logger.warning(f"Failed to process frame {frame_path}: {e}")
+                logger.error(f"Failed to process frame {frame_path}: {e}", exc_info=True)
                 # Try to recover memory
                 if torch_device == "mps":
                     torch.mps.empty_cache()
@@ -421,6 +435,7 @@ def _extract_frames_at_timestamps(
             "-ss", str(ts),
             "-i", video_path,
             "-frames:v", "1",
+            "-update", "1",  # Required for ffmpeg 8.x single-image output
             "-vf", f"scale='min({max_width},iw)':-2",
             "-q:v", "3",
             output_path,
@@ -448,25 +463,53 @@ def _parse_objects_and_description(response: str) -> tuple[list[str], str | None
         # Remove markdown code block markers
         clean_response = response.replace("```json", "").replace("```", "").strip()
 
-        if "{" in clean_response:
-            json_str = clean_response[clean_response.index("{"):clean_response.rindex("}") + 1]
-            data = json.loads(json_str)
+        # Try to parse as JSON (could be object or array)
+        if "[" in clean_response or "{" in clean_response:
+            # Find the JSON portion
+            start_bracket = clean_response.find("[")
+            start_brace = clean_response.find("{")
 
-            # Extract objects
-            raw_objects = data.get("objects", [])
-            objects = [
-                obj for obj in raw_objects
-                if isinstance(obj, str) and len(obj) < 100 and not obj.startswith('"')
-            ]
+            if start_bracket >= 0 and (start_brace < 0 or start_bracket < start_brace):
+                # Array format - find matching ]
+                json_str = clean_response[start_bracket:clean_response.rindex("]") + 1]
+                data = json.loads(json_str)
 
-            # Extract description
-            desc = data.get("description", "")
-            if isinstance(desc, str) and len(desc) > 10:
-                description = desc.strip()
+                # Array of objects - take the first non-empty one
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict):
+                            raw_objects = item.get("objects", [])
+                            if raw_objects:
+                                objects = [
+                                    obj for obj in raw_objects
+                                    if isinstance(obj, str) and len(obj) < 100 and not obj.startswith('"')
+                                ]
+                            desc = item.get("description", "")
+                            if isinstance(desc, str) and len(desc) > 10 and not description:
+                                description = desc.strip()
+                    return objects, description
 
-            return objects, description
-    except (json.JSONDecodeError, ValueError):
-        pass
+            # Single object format
+            if start_brace >= 0:
+                json_str = clean_response[start_brace:clean_response.rindex("}") + 1]
+                data = json.loads(json_str)
+
+                # Extract objects
+                raw_objects = data.get("objects", [])
+                objects = [
+                    obj for obj in raw_objects
+                    if isinstance(obj, str) and len(obj) < 100 and not obj.startswith('"')
+                ]
+
+                # Extract description
+                desc = data.get("description", "")
+                if isinstance(desc, str) and len(desc) > 10:
+                    description = desc.strip()
+
+                return objects, description
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"Failed to parse JSON from Qwen response: {e}")
+        logger.debug(f"Response was: {response[:500]}")
 
     # Fallback: try to extract objects from plain text
     for line in response.split("\n"):

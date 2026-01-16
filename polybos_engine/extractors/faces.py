@@ -240,6 +240,7 @@ def _extract_frames_at_timestamps(
             "-ss", str(ts),
             "-i", video_path,
             "-frames:v", "1",
+            "-update", "1",  # Required for ffmpeg 8.x single-image output
             "-q:v", "2",
             output_path,
         ]

@@ -289,6 +289,7 @@ def _extract_frame_at(video_path: str, output_dir: str, timestamp: float) -> str
         video_path,
         "-vframes",
         "1",
+        "-update", "1",  # Required for ffmpeg 8.x single-image output
         "-q:v",
         "2",
         output_path,

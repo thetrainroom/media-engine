@@ -176,6 +176,7 @@ class FrameExtractor:
                 "-ss", str(timestamp),
                 "-i", self.video_path,
                 "-frames:v", "1",
+                "-update", "1",  # Required for ffmpeg 8.x single-image output
                 "-q:v", "2",
                 tmp_path,
             ]
