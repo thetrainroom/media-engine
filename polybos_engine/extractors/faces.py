@@ -31,6 +31,12 @@ def unload_face_model() -> None:
 
     DeepFace caches models internally. This function clears those caches.
     """
+    import sys
+
+    # Only unload if deepface was actually imported (avoid importing during shutdown)
+    if "deepface" not in sys.modules:
+        return
+
     logger.info("Unloading face detection models to free memory")
 
     try:

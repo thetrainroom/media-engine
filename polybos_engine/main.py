@@ -133,8 +133,16 @@ app.add_middleware(
 
 
 def _cleanup_resources():
-    """Clean up all resources."""
-    logger.info("Cleaning up resources...")
+    """Clean up all resources.
+
+    Note: This runs during Python shutdown via atexit, so we must be careful
+    not to import new modules or use logging that may fail.
+    """
+    try:
+        logger.info("Cleaning up resources...")
+    except Exception:
+        pass  # Logging may fail during shutdown
+
     try:
         shutdown_ffprobe_pool()
         unload_whisper_model()
@@ -144,9 +152,8 @@ def _cleanup_resources():
         unload_ocr_model()
         unload_face_model()
         unload_vad_model()
-        logger.info("All resources cleaned up")
-    except Exception as e:
-        logger.warning(f"Error cleaning up resources: {e}")
+    except Exception:
+        pass  # Suppress errors during shutdown
 
 
 atexit.register(_cleanup_resources)
