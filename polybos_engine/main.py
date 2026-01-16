@@ -210,7 +210,8 @@ class BatchRequest(BaseModel):
     enable_motion: bool = False
 
     # Context for Whisper
-    language_hints: list[str] | None = None
+    language: str | None = None  # Force specific language (ISO 639-1 code, e.g., "en", "no")
+    language_hints: list[str] | None = None  # Hints (currently unused by Whisper)
     context_hint: str | None = None
     # Context for Qwen VLM - per-file context mapping (file path -> context dict)
     # Example: {"/path/video1.mp4": {"location": "Oslo"}, "/path/video2.mp4": {"location": "Bergen"}}
@@ -503,6 +504,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     transcript = extract_transcript(
                         file_path,
                         model=whisper_model,
+                        language=request.language,
+                        fallback_language=settings.fallback_language,
                         language_hints=request.language_hints,
                         context_hint=request.context_hint,
                     )

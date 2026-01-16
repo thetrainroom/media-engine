@@ -52,8 +52,9 @@ Create a new batch extraction job.
 | `enable_ocr` | bool | false | Text extraction from frames |
 | `enable_motion` | bool | false | Camera motion analysis |
 | `contexts` | object | null | Per-file context for Qwen (file path -> context dict) |
-| `language_hints` | string[] | null | Hint languages for transcription |
-| `context_hint` | string | null | Context hint for Whisper |
+| `language` | string | null | Force language for Whisper (ISO 639-1 code, e.g., "en", "no") |
+| `language_hints` | string[] | null | Language hints (currently unused) |
+| `context_hint` | string | null | Context hint for Whisper initial prompt |
 | `qwen_timestamps` | float[] | null | Specific timestamps for Qwen analysis |
 
 **Note:** Model selection (whisper_model, yolo_model, qwen_model, clip_model) is configured via `PUT /settings`. This keeps hardware-dependent configuration in one place.
