@@ -81,7 +81,7 @@ def run_ffprobe(file_path: str) -> dict[str, Any]:
     cmd = [
         "ffprobe",
         "-v",
-        "quiet",
+        "error",  # Show errors (quiet suppresses them, hiding why probes fail)
         "-print_format",
         "json",
         "-show_format",

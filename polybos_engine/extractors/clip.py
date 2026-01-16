@@ -386,11 +386,15 @@ def _extract_frame_at(video_path: str, output_dir: str, timestamp: float) -> str
     ]
 
     try:
-        subprocess.run(cmd, capture_output=True, check=True)
-        if os.path.exists(output_path):
+        subprocess.run(cmd, capture_output=True, check=True, timeout=30)
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             return output_path
+        else:
+            logger.warning(f"Frame at {timestamp}s: ffmpeg ran but output is empty/missing")
+    except subprocess.TimeoutExpired:
+        logger.warning(f"Frame at {timestamp}s: ffmpeg timed out after 30s")
     except subprocess.CalledProcessError as e:
-        logger.warning(f"Failed to extract frame at {timestamp}s: {e.stderr}")
+        logger.warning(f"Failed to extract frame at {timestamp}s: returncode={e.returncode}, stderr={e.stderr}")
 
     return None
 
@@ -400,7 +404,7 @@ def _get_video_duration(video_path: str) -> float:
     cmd = [
         "ffprobe",
         "-v",
-        "quiet",
+        "error",  # Show errors (quiet hides them)
         "-show_entries",
         "format=duration",
         "-of",

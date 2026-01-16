@@ -321,10 +321,17 @@ def _extract_frames_at_timestamps(
         ]
 
         try:
-            subprocess.run(cmd, capture_output=True, check=True)
-            frame_paths.append(output_path)
+            result = subprocess.run(cmd, capture_output=True, check=True, timeout=30)
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                frame_paths.append(output_path)
+            else:
+                logger.warning(f"Frame at {ts}s: ffmpeg ran but output is empty/missing")
+                frame_paths.append("")
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Frame at {ts}s: ffmpeg timed out after 30s")
+            frame_paths.append("")
         except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to extract frame at {ts}s: {e.stderr}")
+            logger.warning(f"Failed to extract frame at {ts}s: returncode={e.returncode}, stderr={e.stderr}")
             frame_paths.append("")  # Placeholder to maintain index alignment
 
     return frame_paths

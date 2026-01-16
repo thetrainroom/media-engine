@@ -387,6 +387,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         files = request.files
         total_files = len(files)
 
+        # Track files that failed metadata extraction - skip them in all subsequent stages
+        # If we can't read the file with ffprobe, there's no point trying other extractors
+        failed_files: set[int] = set()
+
         # Stage 1: Metadata (parallel ffprobe for speed)
         if request.enable_metadata:
             start_extractor_timing("metadata")
@@ -410,8 +414,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
                 if isinstance(probe_data, Exception):
                     logger.warning(f"Metadata failed for {file_path}: {probe_data}")
-                    update_file_status(i, "running", "metadata", None, str(probe_data))
+                    logger.warning(f"Skipping all extractors for {file_path} - file unreadable")
+                    update_file_status(i, "failed", "metadata", None, str(probe_data))
                     update_file_timing(i, "metadata", time.time() - file_start)
+                    failed_files.add(i)
                     continue
 
                 try:
@@ -419,7 +425,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     update_file_status(i, "running", "metadata", metadata.model_dump())
                 except Exception as e:
                     logger.warning(f"Metadata failed for {file_path}: {e}")
-                    update_file_status(i, "running", "metadata", None, str(e))
+                    logger.warning(f"Skipping all extractors for {file_path} - file unreadable")
+                    update_file_status(i, "failed", "metadata", None, str(e))
+                    failed_files.add(i)
                 update_file_timing(i, "metadata", time.time() - file_start)
             end_extractor_timing("metadata", total_files)
 
@@ -449,6 +457,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             start_extractor_timing("vad")
             update_batch_progress("vad", "Loading VAD model...", 0, total_files)
             for i, file_path in enumerate(files):
+                if i in failed_files:
+                    continue
                 file_start = time.time()
                 update_batch_progress(
                     "vad", f"Analyzing {Path(file_path).name}", i + 1, total_files
@@ -469,6 +479,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             start_extractor_timing("scenes")
             update_batch_progress("scenes", "Detecting scenes...", 0, total_files)
             for i, file_path in enumerate(files):
+                if i in failed_files:
+                    continue
                 file_start = time.time()
                 update_batch_progress(
                     "scenes", f"Processing {Path(file_path).name}", i + 1, total_files
@@ -493,6 +505,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 "transcript", "Loading Whisper model...", 0, total_files
             )
             for i, file_path in enumerate(files):
+                if i in failed_files:
+                    continue
                 file_start = time.time()
                 update_batch_progress(
                     "transcript",
@@ -554,6 +568,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 "motion", "Analyzing camera motion...", 0, total_files
             )
             for i, file_path in enumerate(files):
+                if i in failed_files:
+                    continue
                 file_start = time.time()
                 update_batch_progress(
                     "motion", f"Analyzing {Path(file_path).name}", i + 1, total_files
@@ -608,6 +624,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 "objects", "Detecting objects with YOLO...", 0, total_files
             )
             for i, file_path in enumerate(files):
+                if i in failed_files:
+                    continue
                 file_start = time.time()
                 update_batch_progress(
                     "objects",
@@ -669,6 +687,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             logger.info(f"Qwen batch contexts: {request.contexts}")
 
             for i, file_path in enumerate(files):
+                if i in failed_files:
+                    continue
                 file_start = time.time()
                 fname = Path(file_path).name
                 update_batch_progress(
@@ -721,6 +741,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             start_extractor_timing("faces")
             update_batch_progress("faces", "Detecting faces...", 0, total_files)
             for i, file_path in enumerate(files):
+                if i in failed_files:
+                    continue
                 file_start = time.time()
                 update_batch_progress(
                     "faces", f"Processing {Path(file_path).name}", i + 1, total_files
@@ -789,6 +811,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             start_extractor_timing("ocr")
             update_batch_progress("ocr", "Extracting text...", 0, total_files)
             for i, file_path in enumerate(files):
+                if i in failed_files:
+                    continue
                 file_start = time.time()
                 update_batch_progress(
                     "ocr", f"Processing {Path(file_path).name}", i + 1, total_files
@@ -819,6 +843,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 "clip", "Extracting CLIP embeddings...", 0, total_files
             )
             for i, file_path in enumerate(files):
+                if i in failed_files:
+                    continue
                 file_start = time.time()
                 update_batch_progress(
                     "clip", f"Processing {Path(file_path).name}", i + 1, total_files
@@ -850,9 +876,13 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             unload_clip_model()
             end_extractor_timing("clip", total_files)
 
-        # Mark all files as completed
+        # Mark files as completed (skip failed files - they stay "failed")
         with batch_jobs_lock:
             for i in range(len(files)):
+                if i in failed_files:
+                    # File already marked as failed - don't overwrite
+                    logger.info(f"Batch {batch_id} file {i} skipped (failed metadata)")
+                    continue
                 # Log results before marking complete
                 result_keys = list(batch_jobs[batch_id].files[i].results.keys())
                 logger.info(
