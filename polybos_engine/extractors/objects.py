@@ -67,7 +67,7 @@ def _get_yolo_model(model_name: str) -> Any:
         unload_yolo_model()
 
     if _yolo_model is None:
-        from ultralytics import YOLO
+        from ultralytics import YOLO  # type: ignore[import-not-found]
 
         logger.info(f"Loading YOLO model: {model_name}")
         _yolo_model = YOLO(model_name)

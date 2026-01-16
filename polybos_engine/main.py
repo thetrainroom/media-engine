@@ -102,7 +102,7 @@ def _clear_memory() -> None:
 def _get_memory_mb() -> int:
     """Get current process memory usage in MB."""
     try:
-        import psutil
+        import psutil  # type: ignore[import-not-found]
 
         process = psutil.Process()
         return process.memory_info().rss // (1024 * 1024)

@@ -38,7 +38,7 @@ def unload_face_model() -> None:
 
         # DeepFace caches models in deepface.modules.modeling
         try:
-            from deepface.modules import modeling
+            from deepface.modules import modeling  # type: ignore[import-not-found]
 
             # Clear the model store if it exists
             if hasattr(modeling, "model_obj"):
@@ -48,7 +48,7 @@ def unload_face_model() -> None:
 
         # Also try the older DeepFace.commons.functions cache
         try:
-            from deepface.commons import functions
+            from deepface.commons import functions  # type: ignore[import-not-found]
 
             if hasattr(functions, "model_obj"):
                 functions.model_obj = {}
@@ -104,7 +104,7 @@ def extract_faces(
     Returns:
         FacesResult with detected faces, embeddings, and optional images
     """
-    from deepface import DeepFace
+    from deepface import DeepFace  # type: ignore[import-not-found]
 
     path = Path(file_path)
     if not path.exists():

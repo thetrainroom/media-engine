@@ -493,7 +493,7 @@ def get_available_memory_gb() -> tuple[float, float]:
         (available_ram_gb, available_vram_gb)
     """
     try:
-        import psutil
+        import psutil  # type: ignore[import-not-found]
 
         mem = psutil.virtual_memory()
         available_ram = mem.available / (1024**3)

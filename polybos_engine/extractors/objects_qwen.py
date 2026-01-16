@@ -95,7 +95,7 @@ def _get_qwen_model(
             logger.warning(f"Failed to clear MPS cache: {e}")
     gc.collect()
 
-    from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+    from transformers import AutoProcessor, Qwen2VLForConditionalGeneration  # type: ignore[import-not-found]
 
     # Determine device
     device = get_device()
@@ -114,7 +114,7 @@ def _get_qwen_model(
         progress_callback("Loading Qwen model...", None, None)
 
     # Disable tqdm progress bars and warnings to avoid BrokenPipeError when running as daemon
-    import transformers
+    import transformers  # type: ignore[import-not-found]
 
     transformers.logging.disable_progress_bar()
     transformers.logging.set_verbosity_error()  # Suppress info/warning output
@@ -257,7 +257,7 @@ def extract_objects_qwen(
     Returns:
         ObjectsResult with detected objects and contextual descriptions
     """
-    from qwen_vl_utils import process_vision_info
+    from qwen_vl_utils import process_vision_info  # type: ignore[import-not-found]
 
     logger.info(
         f"extract_objects_qwen called: file={file_path}, timestamps={timestamps}, context={context}"

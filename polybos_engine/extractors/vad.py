@@ -11,7 +11,7 @@ import wave
 from enum import StrEnum
 from pathlib import Path
 
-import webrtcvad
+import webrtcvad  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
 

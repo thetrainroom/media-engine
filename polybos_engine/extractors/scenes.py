@@ -18,7 +18,7 @@ def extract_scenes(file_path: str, threshold: float = 27.0) -> ScenesResult:
     Returns:
         ScenesResult with detected scene boundaries
     """
-    from scenedetect import ContentDetector, detect
+    from scenedetect import ContentDetector, detect  # type: ignore[import-not-found]
 
     path = Path(file_path)
     if not path.exists():
