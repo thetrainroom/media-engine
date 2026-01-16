@@ -224,6 +224,79 @@ Get hardware capabilities and auto-selected models.
 
 ---
 
+### GET /settings
+
+Get current settings. Sensitive values (like HuggingFace token) are masked.
+
+**Response:**
+```json
+{
+  "api_version": "1.0",
+  "log_level": "INFO",
+  "whisper_model": "auto",
+  "fallback_language": "en",
+  "hf_token_set": false,
+  "diarization_model": "pyannote/speaker-diarization-3.1",
+  "face_sample_fps": 1.0,
+  "object_sample_fps": 2.0,
+  "min_face_size": 80,
+  "object_detector": "auto",
+  "qwen_model": "auto",
+  "qwen_frames_per_scene": 3,
+  "yolo_model": "auto",
+  "clip_model": "auto",
+  "ocr_languages": ["en", "no", "de", "fr", "es", "it", "pt", "nl", "sv", "da", "fi", "pl"],
+  "temp_dir": "/tmp/polybos"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `hf_token_set` | bool | Whether HuggingFace token is configured (actual value is never exposed) |
+| `whisper_model` | string | "auto" or specific model name |
+| `object_detector` | string | "auto", "yolo", or "qwen" |
+| Other fields | various | See Settings below |
+
+---
+
+### PUT /settings
+
+Update settings. Only provided fields are updated. Changes persist to `~/.config/polybos/config.json`.
+
+**Request Body:**
+```json
+{
+  "hf_token": "hf_xxxxxxxxxxxx",
+  "whisper_model": "large-v3",
+  "face_sample_fps": 2.0
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `hf_token` | string | HuggingFace token for speaker diarization. Set to empty string `""` to clear. |
+| `whisper_model` | string | "auto", "tiny", "small", "medium", or "large-v3" |
+| `fallback_language` | string | Fallback language code for short clips |
+| `diarization_model` | string | Pyannote model for speaker diarization |
+| `face_sample_fps` | float | Face detection sampling rate |
+| `object_sample_fps` | float | Object detection sampling rate |
+| `min_face_size` | int | Minimum face size in pixels |
+| `object_detector` | string | "auto", "yolo", or "qwen" |
+| `qwen_model` | string | Qwen model name or "auto" |
+| `qwen_frames_per_scene` | int | Frames per scene for Qwen |
+| `yolo_model` | string | YOLO model name or "auto" |
+| `clip_model` | string | CLIP model name or "auto" |
+| `ocr_languages` | string[] | OCR language codes |
+| `temp_dir` | string | Temporary directory for processing |
+
+**Response:** Same as GET /settings (returns updated settings)
+
+**Notes:**
+- To enable speaker diarization, you need a HuggingFace token and must accept the [pyannote model license](https://huggingface.co/pyannote/speaker-diarization-3.1)
+- Get a token at https://huggingface.co/settings/tokens
+
+---
+
 ### GET /extractors
 
 List available extractors.

@@ -412,3 +412,80 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     api_version: str
+
+
+class SettingsResponse(BaseModel):
+    """Response from GET /settings endpoint.
+
+    All settings are returned, with sensitive values (hf_token) masked.
+    """
+
+    # API settings
+    api_version: str
+    log_level: str
+
+    # Whisper settings
+    whisper_model: str
+    fallback_language: str
+
+    # Speaker diarization
+    hf_token_set: bool  # True if token is configured (actual value is masked)
+    diarization_model: str
+
+    # Processing settings
+    face_sample_fps: float
+    object_sample_fps: float
+    min_face_size: int
+
+    # Object detection
+    object_detector: str
+    qwen_model: str
+    qwen_frames_per_scene: int
+    yolo_model: str
+
+    # CLIP
+    clip_model: str
+
+    # OCR
+    ocr_languages: list[str]
+
+    # Temp directory
+    temp_dir: str
+
+
+class SettingsUpdate(BaseModel):
+    """Request body for PUT /settings endpoint.
+
+    All fields are optional - only provided fields are updated.
+    """
+
+    # API settings
+    log_level: str | None = None
+
+    # Whisper settings
+    whisper_model: str | None = None
+    fallback_language: str | None = None
+
+    # Speaker diarization
+    hf_token: str | None = None  # Set to empty string to clear
+    diarization_model: str | None = None
+
+    # Processing settings
+    face_sample_fps: float | None = None
+    object_sample_fps: float | None = None
+    min_face_size: int | None = None
+
+    # Object detection
+    object_detector: str | None = None
+    qwen_model: str | None = None
+    qwen_frames_per_scene: int | None = None
+    yolo_model: str | None = None
+
+    # CLIP
+    clip_model: str | None = None
+
+    # OCR
+    ocr_languages: list[str] | None = None
+
+    # Temp directory
+    temp_dir: str | None = None
