@@ -263,8 +263,8 @@ def unload_whisper_model() -> None:
         logger.info("Unloading Whisper model from memory")
         # Clear internal model references
         if hasattr(_backend, "_model"):
-            del _backend._model
-            _backend._model = None
+            del _backend._model  # type: ignore[attr-defined]
+            _backend._model = None  # type: ignore[attr-defined]
         _backend = None
 
         import gc

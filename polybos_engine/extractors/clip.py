@@ -29,12 +29,12 @@ OPENCLIP_TO_HF_MODEL_MAP: dict[str, str] = {
 }
 
 
-def _load_image_rgb(image_path: str) -> NDArray[np.uint8]:  # type: ignore[type-var]
+def _load_image_rgb(image_path: str) -> NDArray[np.uint8]:
     """Load image using OpenCV and convert to RGB."""
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError(f"Failed to load image: {image_path}")
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)  # type: ignore[return-value]
 
 
 class CLIPBackend(ABC):

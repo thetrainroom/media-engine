@@ -111,7 +111,7 @@ def analyze_motion(
             flow = cv2.calcOpticalFlowFarneback(
                 prev_gray,
                 gray,
-                None,
+                None,  # type: ignore[arg-type]  # OpenCV accepts None for output param
                 pyr_scale=0.5,
                 levels=3,
                 winsize=15,
@@ -163,8 +163,8 @@ def analyze_motion(
         fps=fps,
         primary_motion=primary_motion,
         segments=segments,
-        avg_intensity=avg_intensity,
-        is_stable=is_stable,
+        avg_intensity=float(avg_intensity),
+        is_stable=bool(is_stable),
     )
 
 
@@ -188,7 +188,7 @@ def _classify_flow(flow: np.ndarray) -> tuple[MotionType, float]:
 
     # Check if motion is significant
     if mean_magnitude < STATIC_THRESHOLD:
-        return MotionType.STATIC, mean_magnitude
+        return MotionType.STATIC, float(mean_magnitude)
 
     # Check for zoom (divergence from center)
     h, w = flow.shape[:2]
@@ -209,9 +209,9 @@ def _classify_flow(flow: np.ndarray) -> tuple[MotionType, float]:
 
     if abs(divergence) > ZOOM_THRESHOLD * mean_magnitude:
         if divergence > 0:
-            return MotionType.ZOOM_IN, mean_magnitude
+            return MotionType.ZOOM_IN, float(mean_magnitude)
         else:
-            return MotionType.ZOOM_OUT, mean_magnitude
+            return MotionType.ZOOM_OUT, float(mean_magnitude)
 
     # Check for pan/tilt (consistent directional flow)
     abs_mean_x = abs(mean_x)
@@ -224,25 +224,25 @@ def _classify_flow(flow: np.ndarray) -> tuple[MotionType, float]:
             if mean_x > 0:
                 return (
                     MotionType.PAN_LEFT,
-                    mean_magnitude,
+                    float(mean_magnitude),
                 )  # Flow right = camera pans left
             else:
-                return MotionType.PAN_RIGHT, mean_magnitude
+                return MotionType.PAN_RIGHT, float(mean_magnitude)
 
     # Strong vertical motion = tilt
     if abs_mean_y > abs_mean_x and abs_mean_y > MOTION_THRESHOLD:
         ratio = abs_mean_y / (mean_magnitude + 1e-7)
         if ratio > PAN_TILT_THRESHOLD:
             if mean_y > 0:
-                return MotionType.TILT_UP, mean_magnitude  # Flow down = camera tilts up
+                return MotionType.TILT_UP, float(mean_magnitude)  # Flow down = camera tilts up
             else:
-                return MotionType.TILT_DOWN, mean_magnitude
+                return MotionType.TILT_DOWN, float(mean_magnitude)
 
     # Significant motion but not consistent direction = handheld/complex
     if mean_magnitude > MOTION_THRESHOLD:
-        return MotionType.HANDHELD, mean_magnitude
+        return MotionType.HANDHELD, float(mean_magnitude)
 
-    return MotionType.STATIC, mean_magnitude
+    return MotionType.STATIC, float(mean_magnitude)
 
 
 def _build_segments(
@@ -271,7 +271,7 @@ def _build_segments(
                     start=current_start,
                     end=timestamp,
                     motion_type=current_type,
-                    intensity=np.mean(current_intensities),
+                    intensity=float(np.mean(current_intensities)),
                 )
             )
             current_type = motion_type
@@ -285,7 +285,7 @@ def _build_segments(
                 start=current_start,
                 end=frame_motions[-1][0] + 0.2,  # Extend slightly past last frame
                 motion_type=current_type,
-                intensity=np.mean(current_intensities),
+                intensity=float(np.mean(current_intensities)),
             )
         )
 
