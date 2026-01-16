@@ -27,11 +27,6 @@ Create a new batch extraction job.
   "enable_clip": false,
   "enable_ocr": false,
   "enable_motion": false,
-  "object_detector": "yolo",
-  "whisper_model": "auto",
-  "qwen_model": "auto",
-  "yolo_model": "auto",
-  "clip_model": "auto",
   "language_hints": ["en", "no"],
   "context_hint": "Interview about technology",
   "contexts": {
@@ -54,15 +49,12 @@ Create a new batch extraction job.
 | `enable_clip` | bool | false | CLIP embeddings for similarity search |
 | `enable_ocr` | bool | false | Text extraction from frames |
 | `enable_motion` | bool | false | Camera motion analysis |
-| `object_detector` | string | "auto" | "yolo", "qwen", or "auto" |
-| `whisper_model` | string | "auto" | "tiny", "small", "medium", "large-v3", or "auto" |
-| `yolo_model` | string | "auto" | "yolov8n.pt", "yolov8s.pt", "yolov8m.pt", etc. |
-| `clip_model` | string | "auto" | "ViT-B-16", "ViT-B-32", "ViT-L-14", or "auto" |
-| `qwen_model` | string | "auto" | "Qwen/Qwen2-VL-2B-Instruct" or "auto" |
 | `contexts` | object | null | Per-file context for Qwen (file path -> context dict) |
 | `language_hints` | string[] | null | Hint languages for transcription |
 | `context_hint` | string | null | Context hint for Whisper |
 | `qwen_timestamps` | float[] | null | Specific timestamps for Qwen analysis |
+
+**Note:** Model selection (whisper_model, yolo_model, clip_model, object_detector) is configured via `PUT /settings`. This keeps hardware-dependent configuration in one place.
 
 **Note:** Telemetry (GPS/flight path) is always extracted automatically when available. No flag needed - it's lightweight and included in results.
 

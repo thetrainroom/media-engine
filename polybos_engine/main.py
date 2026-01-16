@@ -26,10 +26,6 @@ from pydantic import BaseModel
 from polybos_engine import __version__
 from polybos_engine.config import (
     ObjectDetector,
-    get_auto_clip_model,
-    get_auto_qwen_model,
-    get_auto_whisper_model,
-    get_auto_yolo_model,
     get_settings,
     get_vram_summary,
     reload_settings,
@@ -203,9 +199,8 @@ JOB_TTL_SECONDS = 3600
 class BatchRequest(BaseModel):
     """Request for batch extraction.
 
-    Model fields support:
-    - "auto" - auto-select based on VRAM
-    - Specific model name (e.g., "yolov8m.pt", "ViT-L-14")
+    Model selection is configured via global settings (GET/PUT /settings).
+    This keeps batch requests simple and hardware config in one place.
     """
 
     files: list[str]
@@ -218,15 +213,6 @@ class BatchRequest(BaseModel):
     enable_clip: bool = False
     enable_ocr: bool = False
     enable_motion: bool = False
-
-    # Object detection settings
-    object_detector: ObjectDetector | None = None
-
-    # Model selection (per-request overrides, "auto" = VRAM-based selection)
-    whisper_model: str = "auto"
-    qwen_model: str = "auto"
-    yolo_model: str = "auto"
-    clip_model: str = "auto"
 
     # Context for Whisper
     language_hints: list[str] | None = None
@@ -315,24 +301,12 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
     """
     settings = get_settings()
 
-    # Resolve object detector (handles "auto")
-    detector = request.object_detector or settings.get_object_detector()
-
-    # Resolve model names (handles "auto" -> actual model name)
-    whisper_model = (
-        get_auto_whisper_model()
-        if request.whisper_model == "auto"
-        else request.whisper_model
-    )
-    qwen_model = (
-        get_auto_qwen_model() if request.qwen_model == "auto" else request.qwen_model
-    )
-    yolo_model = (
-        get_auto_yolo_model() if request.yolo_model == "auto" else request.yolo_model
-    )
-    clip_model = (
-        get_auto_clip_model() if request.clip_model == "auto" else request.clip_model
-    )
+    # Resolve models from settings (handles "auto" -> actual model name)
+    detector = settings.get_object_detector()
+    whisper_model = settings.get_whisper_model()
+    qwen_model = settings.get_qwen_model()
+    yolo_model = settings.get_yolo_model()
+    clip_model = settings.get_clip_model()
 
     logger.info(
         f"Batch {batch_id} models: whisper={whisper_model}, qwen={qwen_model}, "
@@ -1161,9 +1135,9 @@ async def extract(request: ExtractRequest):
         try:
             transcript = extract_transcript(
                 analysis_file,
-                model=request.whisper_model,
+                model=settings.get_whisper_model(),
                 language=request.language,
-                fallback_language=request.fallback_language,
+                fallback_language=settings.fallback_language,
                 language_hints=request.language_hints,
                 context_hint=request.context_hint,
             )
@@ -1178,7 +1152,7 @@ async def extract(request: ExtractRequest):
             faces = extract_faces(
                 analysis_file,
                 scenes=scenes.detections if scenes else None,
-                sample_fps=request.face_sample_fps,
+                sample_fps=settings.face_sample_fps,
             )
             logger.info(
                 f"Face detection: {faces.count} faces, ~{faces.unique_estimate} unique"
@@ -1219,8 +1193,8 @@ async def extract(request: ExtractRequest):
     if request.enable_objects:
         try:
             scene_detections = scenes.detections if scenes else None
-            # Resolve object detector (handles "auto")
-            detector = request.object_detector or settings.get_object_detector()
+            # Get object detector from settings (handles "auto")
+            detector = settings.get_object_detector()
             if detector == ObjectDetector.QWEN:
                 # Use timestamps from request (frontend decides)
                 timestamps = request.qwen_timestamps
@@ -1239,7 +1213,7 @@ async def extract(request: ExtractRequest):
                 objects = extract_objects(
                     analysis_file,
                     scenes=scene_detections,
-                    sample_fps=request.object_sample_fps,
+                    sample_fps=settings.object_sample_fps,
                 )
                 logger.info(
                     f"YOLO object detection: {len(objects.detections)} detections"

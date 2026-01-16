@@ -5,8 +5,6 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
-from polybos_engine.config import ObjectDetector
-
 
 class MediaDeviceType(StrEnum):
     """Type of media capture device."""
@@ -32,7 +30,10 @@ class DetectionMethod(StrEnum):
 
 
 class ExtractRequest(BaseModel):
-    """Request body for /extract endpoint."""
+    """Request body for /extract endpoint.
+
+    Model selection is configured via global settings (GET/PUT /settings).
+    """
 
     file: str = Field(..., description="Path to video file")
     proxy_file: str | None = Field(
@@ -51,15 +52,9 @@ class ExtractRequest(BaseModel):
     enable_ocr: bool = Field(default=False, description="Extract OCR")
     enable_motion: bool = Field(default=False, description="Analyze camera motion")
 
-    # Whisper options
-    whisper_model: str = Field(
-        default="auto", description="Whisper model size (auto=VRAM-based)"
-    )
+    # Transcript options (content-specific, not hardware)
     language: str | None = Field(
         default=None, description="Force language (skip detection)"
-    )
-    fallback_language: str = Field(
-        default="en", description="Fallback for short clips with low confidence"
     )
     language_hints: list[str] = Field(
         default_factory=list, description="Language hints"
@@ -68,18 +63,7 @@ class ExtractRequest(BaseModel):
         default=None, description="Context hint for transcription (e.g., dialect info)"
     )
 
-    # Sampling options
-    face_sample_fps: float = Field(
-        default=1.0, description="Face detection sample rate"
-    )
-    object_sample_fps: float = Field(
-        default=2.0, description="Object detection sample rate"
-    )
-
-    # Object detection
-    object_detector: ObjectDetector | None = Field(
-        default=None, description="Object detector backend"
-    )
+    # Object detection context (for VLM)
     context: dict[str, str] | None = Field(
         default=None,
         description="Context for VLM (person, location, topic, language, etc.)",
