@@ -144,22 +144,24 @@ def _get_qwen_model(
 
 def _build_analysis_prompt(context: dict[str, str] | None = None) -> str:
     """Build the analysis prompt, optionally including context."""
-    base_prompt = """Analyze this image and return JSON with two fields:
-{
-  "objects": ["object1", "object2", ...],
-  "description": "A brief 1-2 sentence description of the scene."
-}
+    base_prompt = """Look at this image carefully and describe what you see.
 
-For objects:
-- Be specific (e.g., "scissors" not "tool", "remote control" not "device")
-- Include people as "person" or "man"/"woman" if clear
+List all visible objects and write a brief description of the scene.
+
+You MUST respond with ONLY this exact JSON format:
+{"objects": ["item1", "item2"], "description": "One or two sentences describing the scene."}
+
+Rules for objects:
+- Be specific: "scissors" not "tool", "laptop" not "device"
+- Include people as "person" or "man"/"woman"
 - Only list clearly visible objects
-- For miniatures/models, prefix with "model " (e.g., "model train")
 
-For description:
-- Describe what's happening in the scene
+Rules for description:
+- Describe what's happening
 - Mention the setting/environment
-- Note any activity or action taking place"""
+- Keep it to 1-2 sentences
+
+Respond with JSON only, no other text."""
 
     if not context:
         return base_prompt
@@ -211,23 +213,24 @@ IMPORTANT: This location has these nearby landmarks: {nearby_landmarks}
     # Enhanced prompt with context
     return f"""{context_section}
 {person_instruction}{landmark_instruction}
-Analyze this image and return JSON with two fields:
-{{
-  "objects": ["object1", "object2", ...],
-  "description": "A brief 1-2 sentence description."
-}}
+Look at this image carefully and describe what you see.
 
-For objects:
-- Be specific (e.g., "scissors" not "tool", "remote control" not "device")
-- IMPORTANT: If a person is visible and identified above, use their name (e.g., "{person_name}" not "person")
-- IMPORTANT: If a known landmark is visible, use its proper name from the context
+You MUST respond with ONLY this exact JSON format:
+{{"objects": ["item1", "item2"], "description": "One or two sentences describing the scene."}}
+
+Rules for objects:
+- Be specific: "scissors" not "tool", "laptop" not "device"
+- If a person is visible and identified above, use their name ("{person_name}") not "person"
+- If a known landmark is visible, use its proper name from the context
 - Only list clearly visible objects
 
-For description:
-- Use the person's name "{person_name}" if they are visible
-- Use proper landmark names if any are visible (from nearby landmarks list)
-- Reference the known location/activity if relevant
-- Describe what's happening in the scene"""
+Rules for description:
+- Use "{person_name}" if they are visible
+- Use proper landmark names if visible
+- Describe what's happening in the scene
+- Keep it to 1-2 sentences
+
+Respond with JSON only, no other text."""
 
 
 def extract_objects_qwen(
@@ -324,6 +327,10 @@ def extract_objects_qwen(
             try:
                 # Build the prompt with optional context
                 prompt = _build_analysis_prompt(context)
+
+                # Log prompt on first frame for debugging
+                if frame_count == 1:
+                    logger.info(f"Qwen prompt: {prompt[:500]}")
 
                 # Prepare message for Qwen - ask for both objects and description
                 messages = [
@@ -523,14 +530,14 @@ def _parse_objects_and_description(response: str) -> tuple[list[str], str | None
                     for item in data:
                         if isinstance(item, dict):
                             raw_objects = item.get("objects", [])
-                            if raw_objects:
-                                objects = [
-                                    obj
-                                    for obj in raw_objects
-                                    if isinstance(obj, str)
-                                    and len(obj) < 100
-                                    and not obj.startswith('"')
-                                ]
+                            for obj in raw_objects:
+                                if isinstance(obj, str) and len(obj) < 100 and obj.strip():
+                                    objects.append(obj)
+                                elif isinstance(obj, dict):
+                                    # Handle nested format: {"name": "person"}
+                                    name = obj.get("name", "") or obj.get("label", "")
+                                    if isinstance(name, str) and len(name) < 100 and name.strip():
+                                        objects.append(name)
                             desc = item.get("description", "")
                             if (
                                 isinstance(desc, str)
@@ -545,15 +552,16 @@ def _parse_objects_and_description(response: str) -> tuple[list[str], str | None
                 json_str = clean_response[start_brace : clean_response.rindex("}") + 1]
                 data = json.loads(json_str)
 
-                # Extract objects
+                # Extract objects - handle both string and dict formats
                 raw_objects = data.get("objects", [])
-                objects = [
-                    obj
-                    for obj in raw_objects
-                    if isinstance(obj, str)
-                    and len(obj) < 100
-                    and not obj.startswith('"')
-                ]
+                for obj in raw_objects:
+                    if isinstance(obj, str) and len(obj) < 100 and obj.strip():
+                        objects.append(obj)
+                    elif isinstance(obj, dict):
+                        # Handle nested format: {"name": "person", "position": "..."}
+                        name = obj.get("name", "") or obj.get("label", "")
+                        if isinstance(name, str) and len(name) < 100 and name.strip():
+                            objects.append(name)
 
                 # Extract description
                 desc = data.get("description", "")

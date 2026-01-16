@@ -24,6 +24,7 @@ Create a new batch extraction job.
   "enable_transcript": false,
   "enable_faces": false,
   "enable_objects": false,
+  "enable_visual": false,
   "enable_clip": false,
   "enable_ocr": false,
   "enable_motion": false,
@@ -45,7 +46,8 @@ Create a new batch extraction job.
 | `enable_scenes` | bool | false | Scene boundary detection |
 | `enable_transcript` | bool | false | Whisper transcription |
 | `enable_faces` | bool | false | Face detection with embeddings |
-| `enable_objects` | bool | false | Object detection (YOLO or Qwen) |
+| `enable_objects` | bool | false | Object detection with YOLO (fast, bounding boxes) |
+| `enable_visual` | bool | false | Scene descriptions with Qwen2-VL (slower, richer) |
 | `enable_clip` | bool | false | CLIP embeddings for similarity search |
 | `enable_ocr` | bool | false | Text extraction from frames |
 | `enable_motion` | bool | false | Camera motion analysis |
@@ -54,7 +56,7 @@ Create a new batch extraction job.
 | `context_hint` | string | null | Context hint for Whisper |
 | `qwen_timestamps` | float[] | null | Specific timestamps for Qwen analysis |
 
-**Note:** Model selection (whisper_model, yolo_model, clip_model, object_detector) is configured via `PUT /settings`. This keeps hardware-dependent configuration in one place.
+**Note:** Model selection (whisper_model, yolo_model, qwen_model, clip_model) is configured via `PUT /settings`. This keeps hardware-dependent configuration in one place.
 
 **Note:** Telemetry (GPS/flight path) is always extracted automatically when available. No flag needed - it's lightweight and included in results.
 

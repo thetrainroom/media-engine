@@ -25,7 +25,6 @@ from pydantic import BaseModel
 
 from polybos_engine import __version__
 from polybos_engine.config import (
-    ObjectDetector,
     get_settings,
     get_vram_summary,
     reload_settings,
@@ -204,7 +203,8 @@ class BatchRequest(BaseModel):
     enable_scenes: bool = False
     enable_transcript: bool = False
     enable_faces: bool = False
-    enable_objects: bool = False
+    enable_objects: bool = False  # YOLO object detection (fast, bounding boxes)
+    enable_visual: bool = False  # Qwen VLM scene descriptions (slower, richer)
     enable_clip: bool = False
     enable_ocr: bool = False
     enable_motion: bool = False
@@ -297,7 +297,6 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
     settings = get_settings()
 
     # Resolve models from settings (handles "auto" -> actual model name)
-    detector = settings.get_object_detector()
     whisper_model = settings.get_whisper_model()
     qwen_model = settings.get_qwen_model()
     yolo_model = settings.get_yolo_model()
@@ -305,7 +304,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
     logger.info(
         f"Batch {batch_id} models: whisper={whisper_model}, qwen={qwen_model}, "
-        f"yolo={yolo_model}, clip={clip_model}, detector={detector}"
+        f"yolo={yolo_model}, clip={clip_model}"
     )
 
     batch_start_time = time.time()
@@ -533,6 +532,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         needs_motion = request.enable_motion or (
             (
                 request.enable_objects
+                or request.enable_visual
                 or request.enable_faces
                 or request.enable_clip
                 or request.enable_ocr
@@ -592,7 +592,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 update_file_timing(i, "motion", time.time() - file_start)
             end_extractor_timing("motion", total_files)
 
-        # Stage 7: Objects (YOLO with motion-adaptive timestamps, or Qwen)
+        # Stage 7: Objects (YOLO - fast object detection with bounding boxes)
         # Store person timestamps for face detection
         person_timestamps: dict[int, list[float]] = (
             {}
@@ -600,121 +600,118 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
         if request.enable_objects:
             start_extractor_timing("objects")
-            logger.info(
-                f"Objects enabled. Detector type: {type(detector)}, value: {detector}, is QWEN: {detector == ObjectDetector.QWEN}"
+            logger.info("Objects enabled (YOLO)")
+            update_batch_progress(
+                "objects", "Detecting objects with YOLO...", 0, total_files
             )
-            if detector == ObjectDetector.QWEN:
-                # Clear memory before loading heavy model
-                logger.info("Clearing memory before Qwen...")
-                _clear_memory()
+            for i, file_path in enumerate(files):
+                file_start = time.time()
                 update_batch_progress(
-                    "objects", "Loading Qwen model...", 0, total_files
+                    "objects",
+                    f"Processing {Path(file_path).name}",
+                    i + 1,
+                    total_files,
                 )
-                # Log contexts for debugging
-                logger.info(f"Qwen batch contexts: {request.contexts}")
-
-                for i, file_path in enumerate(files):
-                    file_start = time.time()
-                    fname = Path(file_path).name
-                    update_batch_progress(
-                        "objects", f"Analyzing: {fname}", i + 1, total_files
+                try:
+                    # Use motion-adaptive timestamps if available
+                    timestamps = (
+                        adaptive_timestamps.get(i)
+                        if adaptive_timestamps.get(i)
+                        else None
                     )
-                    try:
-                        # Use motion-based timestamps for Qwen (fewer samples for VLM)
-                        motion = motion_data.get(i)
-                        timestamps = (
-                            request.qwen_timestamps
-                        )  # Use provided timestamps first
-                        if timestamps is None and motion:
-                            timestamps = get_sample_timestamps(motion, max_samples=5)
-
-                        # Get per-file context
-                        file_context = (
-                            request.contexts.get(file_path)
-                            if request.contexts
-                            else None
-                        )
-                        logger.info(
-                            f"Calling Qwen with context for {fname}: {file_context}"
-                        )
-                        objects = extract_objects_qwen(
-                            file_path,
-                            timestamps=timestamps,
-                            model_name=qwen_model,
-                            context=file_context,
-                        )
-                        objects_data: dict[str, Any] = {"summary": objects.summary}
-                        if objects.descriptions:
-                            objects_data["descriptions"] = objects.descriptions
-                        logger.info(
-                            f"Qwen result for file {i}: summary={objects.summary}, descriptions={objects.descriptions}"
-                        )
-                        update_file_status(i, "running", "objects", objects_data)
-                        logger.info(f"Stored objects_data for file {i}: {objects_data}")
-
-                        # Qwen doesn't return per-detection timestamps, so no person_timestamps
-                        person_timestamps[i] = []
-                    except Exception as e:
-                        logger.warning(
-                            f"Objects failed for {file_path}: {e}", exc_info=True
-                        )
-                        person_timestamps[i] = []
-                    update_file_timing(i, "objects", time.time() - file_start)
-                # Unload Qwen to free memory
-                update_batch_progress("objects", "Unloading Qwen model...", None, None)
-                unload_qwen_model()
-            else:
-                # YOLO with motion-adaptive timestamps
-                update_batch_progress(
-                    "objects", "Detecting objects with YOLO...", 0, total_files
-                )
-                for i, file_path in enumerate(files):
-                    file_start = time.time()
-                    update_batch_progress(
-                        "objects",
-                        f"Processing {Path(file_path).name}",
-                        i + 1,
-                        total_files,
+                    objects = extract_objects(
+                        file_path, timestamps=timestamps, model_name=yolo_model
                     )
-                    try:
-                        # Use motion-adaptive timestamps if available
-                        timestamps = (
-                            adaptive_timestamps.get(i)
-                            if adaptive_timestamps.get(i)
-                            else None
-                        )
-                        objects = extract_objects(
-                            file_path, timestamps=timestamps, model_name=yolo_model
+
+                    if objects:
+                        update_file_status(
+                            i, "running", "objects", {"summary": objects.summary}
                         )
 
-                        if objects:
-                            update_file_status(
-                                i, "running", "objects", {"summary": objects.summary}
+                        # Collect timestamps where persons were detected (for smart face sampling)
+                        person_ts = list(
+                            set(
+                                d.timestamp
+                                for d in objects.detections
+                                if d.label == "person"
                             )
-
-                            # Collect timestamps where persons were detected (for smart face sampling)
-                            person_ts = list(
-                                set(
-                                    d.timestamp
-                                    for d in objects.detections
-                                    if d.label == "person"
-                                )
+                        )
+                        person_timestamps[i] = sorted(person_ts)
+                        if person_ts:
+                            logger.info(
+                                f"Found {len(person_ts)} person frames in {Path(file_path).name}"
                             )
-                            person_timestamps[i] = sorted(person_ts)
-                            if person_ts:
-                                logger.info(
-                                    f"Found {len(person_ts)} person frames in {Path(file_path).name}"
-                                )
-                        else:
-                            person_timestamps[i] = []
-                    except Exception as e:
-                        logger.warning(f"Objects failed for {file_path}: {e}")
+                    else:
                         person_timestamps[i] = []
-                    update_file_timing(i, "objects", time.time() - file_start)
-                # Unload YOLO to free memory
-                update_batch_progress("objects", "Unloading YOLO model...", None, None)
-                unload_yolo_model()
+                except Exception as e:
+                    logger.warning(f"Objects failed for {file_path}: {e}")
+                    person_timestamps[i] = []
+                update_file_timing(i, "objects", time.time() - file_start)
+            # Unload YOLO to free memory
+            update_batch_progress("objects", "Unloading YOLO model...", None, None)
+            unload_yolo_model()
             end_extractor_timing("objects", total_files)
+
+        # Stage 7b: Visual (Qwen VLM - scene descriptions)
+        if request.enable_visual:
+            start_extractor_timing("visual")
+            logger.info("Visual enabled (Qwen VLM)")
+            # Clear memory before loading heavy model
+            logger.info("Clearing memory before Qwen...")
+            _clear_memory()
+            update_batch_progress(
+                "visual", "Loading Qwen model...", 0, total_files
+            )
+            # Log contexts for debugging
+            logger.info(f"Qwen batch contexts: {request.contexts}")
+
+            for i, file_path in enumerate(files):
+                file_start = time.time()
+                fname = Path(file_path).name
+                update_batch_progress(
+                    "visual", f"Analyzing: {fname}", i + 1, total_files
+                )
+                try:
+                    # Use motion-based timestamps for Qwen (fewer samples for VLM)
+                    motion = motion_data.get(i)
+                    timestamps = (
+                        request.qwen_timestamps
+                    )  # Use provided timestamps first
+                    if timestamps is None and motion:
+                        timestamps = get_sample_timestamps(motion, max_samples=5)
+
+                    # Get per-file context
+                    file_context = (
+                        request.contexts.get(file_path)
+                        if request.contexts
+                        else None
+                    )
+                    logger.info(
+                        f"Calling Qwen with context for {fname}: {file_context}"
+                    )
+                    visual_result = extract_objects_qwen(
+                        file_path,
+                        timestamps=timestamps,
+                        model_name=qwen_model,
+                        context=file_context,
+                    )
+                    visual_data: dict[str, Any] = {"summary": visual_result.summary}
+                    if visual_result.descriptions:
+                        visual_data["descriptions"] = visual_result.descriptions
+                    logger.info(
+                        f"Qwen result for file {i}: summary={visual_result.summary}, descriptions={visual_result.descriptions}"
+                    )
+                    update_file_status(i, "running", "visual", visual_data)
+                    logger.info(f"Stored visual_data for file {i}: {visual_data}")
+                except Exception as e:
+                    logger.warning(
+                        f"Visual failed for {file_path}: {e}", exc_info=True
+                    )
+                update_file_timing(i, "visual", time.time() - file_start)
+            # Unload Qwen to free memory
+            update_batch_progress("visual", "Unloading Qwen model...", None, None)
+            unload_qwen_model()
+            end_extractor_timing("visual", total_files)
 
         # Stage 8: Faces (YOLO-triggered - only where persons detected)
         if request.enable_faces:
@@ -1073,9 +1070,13 @@ async def list_extractors():
             },
             {
                 "name": "objects",
-                "description": "Object detection (YOLO or Qwen2-VL)",
+                "description": "Object detection with YOLO (fast, bounding boxes)",
                 "enable_flag": "enable_objects",
-                "backend": str(get_settings().get_object_detector()),
+            },
+            {
+                "name": "visual",
+                "description": "Scene descriptions with Qwen2-VL (slower, richer)",
+                "enable_flag": "enable_visual",
             },
             {
                 "name": "clip",
