@@ -51,6 +51,7 @@ class DiarizationResult:
     segments: list[SpeakerSegment] = field(default_factory=list)
     speaker_count: int = 0
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -115,7 +116,9 @@ class WhisperMLX(TranscriptionBackend):
             language=result.get("language", "unknown"),
             language_probability=result.get("language_probability", 0.0),
             segments=[
-                TranscriptionSegment(start=s["start"], end=s["end"], text=s["text"].strip())
+                TranscriptionSegment(
+                    start=s["start"], end=s["end"], text=s["text"].strip()
+                )
                 for s in result.get("segments", [])
             ],
         )
@@ -200,7 +203,9 @@ class WhisperCPU(TranscriptionBackend):
             language=result.get("language", "unknown"),
             language_probability=0.0,  # Not provided by openai-whisper
             segments=[
-                TranscriptionSegment(start=s["start"], end=s["end"], text=s["text"].strip())
+                TranscriptionSegment(
+                    start=s["start"], end=s["end"], text=s["text"].strip()
+                )
                 for s in result.get("segments", [])
             ],
         )
@@ -263,11 +268,13 @@ def unload_whisper_model() -> None:
         _backend = None
 
         import gc
+
         gc.collect()
 
         # Free GPU memory with sync
         try:
             import torch
+
             if torch.cuda.is_available():
                 torch.cuda.synchronize()
                 torch.cuda.empty_cache()
@@ -354,7 +361,9 @@ def run_diarization(audio_path: str) -> DiarizationResult | None:
             )
             speakers.add(speaker)
 
-        logger.info(f"Diarization complete: {len(speakers)} speakers, {len(segments)} segments")
+        logger.info(
+            f"Diarization complete: {len(speakers)} speakers, {len(segments)} segments"
+        )
 
         return DiarizationResult(
             segments=segments,
@@ -463,6 +472,7 @@ def extract_transcript(
     # Resolve "auto" model based on available VRAM
     if model == "auto":
         from polybos_engine.config import get_auto_whisper_model
+
         model = get_auto_whisper_model()
         logger.info(f"Auto-selected Whisper model: {model}")
 
@@ -499,13 +509,17 @@ def extract_transcript(
             detected_lang = detect_result.language
             confidence = detect_result.language_probability
 
-            logger.info(f"Detected language: {detected_lang} (confidence: {confidence:.2f})")
+            logger.info(
+                f"Detected language: {detected_lang} (confidence: {confidence:.2f})"
+            )
 
             # Apply fallback for short clips with low confidence
             if confidence < 0.7 and audio_duration < 15:
                 use_language = fallback_language
                 fallback_applied = True
-                logger.info(f"Low confidence on short clip, using fallback: {use_language}")
+                logger.info(
+                    f"Low confidence on short clip, using fallback: {use_language}"
+                )
             else:
                 use_language = detected_lang
 
@@ -532,7 +546,9 @@ def extract_transcript(
                 result.segments, diarization
             )
             segments = [
-                TranscriptSegment(start=s.start, end=s.end, text=s.text, speaker=speaker)
+                TranscriptSegment(
+                    start=s.start, end=s.end, text=s.text, speaker=speaker
+                )
                 for s, speaker in segments_with_speakers
             ]
             speaker_count = diarization.speaker_count

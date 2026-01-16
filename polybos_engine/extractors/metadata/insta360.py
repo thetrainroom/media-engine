@@ -52,7 +52,9 @@ class Insta360Extractor:
         model, is_360 = self._detect_model(probe_data, file_path)
 
         # 360 cameras with unstitched footage get CAMERA_360 type
-        device_type = MediaDeviceType.CAMERA_360 if is_360 else MediaDeviceType.ACTION_CAMERA
+        device_type = (
+            MediaDeviceType.CAMERA_360 if is_360 else MediaDeviceType.ACTION_CAMERA
+        )
 
         device = DeviceInfo(
             make="Insta360",
@@ -81,8 +83,7 @@ class Insta360Extractor:
 
         # Count video streams - 360 cameras have 2 (front + back lens)
         video_streams = [
-            s for s in probe_data.get("streams", [])
-            if s.get("codec_type") == "video"
+            s for s in probe_data.get("streams", []) if s.get("codec_type") == "video"
         ]
 
         if len(video_streams) >= 2:

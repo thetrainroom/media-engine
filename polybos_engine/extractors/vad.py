@@ -39,11 +39,15 @@ def _extract_audio(video_path: str, output_path: str, sample_rate: int = 16000) 
     """
     cmd = [
         "ffmpeg",
-        "-i", video_path,
+        "-i",
+        video_path,
         "-vn",  # No video
-        "-acodec", "pcm_s16le",  # 16-bit PCM
-        "-ar", str(sample_rate),  # Sample rate
-        "-ac", "1",  # Mono
+        "-acodec",
+        "pcm_s16le",  # 16-bit PCM
+        "-ar",
+        str(sample_rate),  # Sample rate
+        "-ac",
+        "1",  # Mono
         "-y",  # Overwrite
         output_path,
     ]

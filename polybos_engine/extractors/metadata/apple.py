@@ -110,7 +110,9 @@ class AppleExtractor:
         # Check for Apple QuickTime-specific tags
         if tags.get("com.apple.quicktime.creationdate"):
             # This is a strong indicator of Apple origin
-            if tags.get("com.apple.quicktime.make") or tags.get("com.apple.quicktime.model"):
+            if tags.get("com.apple.quicktime.make") or tags.get(
+                "com.apple.quicktime.model"
+            ):
                 return True
 
         return False
@@ -122,19 +124,9 @@ class AppleExtractor:
         tags = get_tags_lower(probe_data)
 
         # Get device info from QuickTime tags (preferred) or standard tags
-        make = (
-            tags.get("com.apple.quicktime.make")
-            or tags.get("make")
-            or "Apple"
-        )
-        model = (
-            tags.get("com.apple.quicktime.model")
-            or tags.get("model")
-        )
-        software = (
-            tags.get("com.apple.quicktime.software")
-            or tags.get("software")
-        )
+        make = tags.get("com.apple.quicktime.make") or tags.get("make") or "Apple"
+        model = tags.get("com.apple.quicktime.model") or tags.get("model")
+        software = tags.get("com.apple.quicktime.software") or tags.get("software")
 
         # Clean up model name
         model = _clean_model_name(model)

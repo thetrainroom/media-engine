@@ -61,10 +61,7 @@ __all__ = [
 ]
 
 
-def extract_metadata(
-    file_path: str,
-    probe_data: dict | None = None
-) -> Metadata:
+def extract_metadata(file_path: str, probe_data: dict | None = None) -> Metadata:
     """Extract metadata from video file.
 
     This function:

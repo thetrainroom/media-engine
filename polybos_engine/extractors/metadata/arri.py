@@ -96,9 +96,7 @@ class ArriExtractor:
 
         return base_metadata
 
-    def _detect_model(
-        self, probe_data: dict[str, Any], file_path: str
-    ) -> str | None:
+    def _detect_model(self, probe_data: dict[str, Any], file_path: str) -> str | None:
         """Try to detect ARRI camera model."""
         # Check all metadata for model hints
         all_text = ""

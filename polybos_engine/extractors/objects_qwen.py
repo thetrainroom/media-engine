@@ -48,6 +48,7 @@ def unload_qwen_model() -> None:
         _qwen_device = None
 
         import gc
+
         gc.collect()
 
         # Free GPU memory with sync
@@ -81,6 +82,7 @@ def _get_qwen_model(
 
     # Need to load new model - first clear any existing GPU memory
     import gc
+
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.synchronize()
@@ -113,6 +115,7 @@ def _get_qwen_model(
 
     # Disable tqdm progress bars and warnings to avoid BrokenPipeError when running as daemon
     import transformers
+
     transformers.logging.disable_progress_bar()
     transformers.logging.set_verbosity_error()  # Suppress info/warning output
     os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
@@ -256,7 +259,9 @@ def extract_objects_qwen(
     """
     from qwen_vl_utils import process_vision_info
 
-    logger.info(f"extract_objects_qwen called: file={file_path}, timestamps={timestamps}, context={context}")
+    logger.info(
+        f"extract_objects_qwen called: file={file_path}, timestamps={timestamps}, context={context}"
+    )
 
     settings = get_settings()
     # Resolve model name (handles "auto")
@@ -278,7 +283,9 @@ def extract_objects_qwen(
         if timestamps is None:
             duration = _get_video_duration(file_path)
             timestamps = [duration / 2]
-            logger.info(f"No timestamps provided, sampling from middle ({duration/2:.1f}s)")
+            logger.info(
+                f"No timestamps provided, sampling from middle ({duration/2:.1f}s)"
+            )
         else:
             logger.info(f"Analyzing {len(timestamps)} provided timestamps")
 
@@ -289,7 +296,9 @@ def extract_objects_qwen(
         total_frames = len([p for p in frame_paths if p])
 
         if total_frames == 0:
-            logger.warning(f"No frames could be extracted from {file_path} at timestamps {timestamps}")
+            logger.warning(
+                f"No frames could be extracted from {file_path} at timestamps {timestamps}"
+            )
             return ObjectsResult(summary={}, detections=[], descriptions=None)
 
         logger.info(f"Processing {total_frames} frames for Qwen analysis")
@@ -306,7 +315,11 @@ def extract_objects_qwen(
 
             frame_count += 1
             if progress_callback:
-                progress_callback(f"Analyzing frame {frame_count}/{total_frames}...", frame_count, total_frames)
+                progress_callback(
+                    f"Analyzing frame {frame_count}/{total_frames}...",
+                    frame_count,
+                    total_frames,
+                )
 
             try:
                 # Build the prompt with optional context
@@ -347,7 +360,7 @@ def extract_objects_qwen(
                         no_repeat_ngram_size=3,  # Prevent 3-gram repetition
                     )
                 generated_ids_trimmed = [
-                    out_ids[len(in_ids):]
+                    out_ids[len(in_ids) :]
                     for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
                 ]
                 output_text = processor.batch_decode(
@@ -357,20 +370,28 @@ def extract_objects_qwen(
                 )[0]
 
                 # Parse response
-                logger.info(f"Qwen raw output for {timestamp:.1f}s: {output_text[:500]}")
+                logger.info(
+                    f"Qwen raw output for {timestamp:.1f}s: {output_text[:500]}"
+                )
                 objects, description = _parse_objects_and_description(output_text)
                 if not description:
-                    logger.warning(f"No description parsed from Qwen output at {timestamp:.1f}s")
+                    logger.warning(
+                        f"No description parsed from Qwen output at {timestamp:.1f}s"
+                    )
                 for obj in objects:
                     obj_lower = obj.lower().strip()
                     all_objects[obj_lower] = all_objects.get(obj_lower, 0) + 1
 
-                    detections.append(ObjectDetection(
-                        timestamp=round(timestamp, 2),
-                        label=obj_lower,
-                        confidence=0.95,  # VLM confidence is generally high
-                        bbox=BoundingBox(x=0, y=0, width=0, height=0),  # No bbox from VLM
-                    ))
+                    detections.append(
+                        ObjectDetection(
+                            timestamp=round(timestamp, 2),
+                            label=obj_lower,
+                            confidence=0.95,  # VLM confidence is generally high
+                            bbox=BoundingBox(
+                                x=0, y=0, width=0, height=0
+                            ),  # No bbox from VLM
+                        )
+                    )
 
                 if description:
                     descriptions.append(description)
@@ -386,7 +407,9 @@ def extract_objects_qwen(
                     torch.cuda.empty_cache()
 
             except Exception as e:
-                logger.error(f"Failed to process frame {frame_path}: {e}", exc_info=True)
+                logger.error(
+                    f"Failed to process frame {frame_path}: {e}", exc_info=True
+                )
                 # Try to recover memory
                 if torch_device == "mps":
                     torch.mps.empty_cache()
@@ -395,7 +418,9 @@ def extract_objects_qwen(
         # Deduplicate - count unique objects per type
         unique_objects = _deduplicate_objects(all_objects)
 
-        logger.info(f"Qwen detected {len(unique_objects)} unique object types, {len(descriptions)} descriptions")
+        logger.info(
+            f"Qwen detected {len(unique_objects)} unique object types, {len(descriptions)} descriptions"
+        )
 
         return ObjectsResult(
             summary=unique_objects,
@@ -410,9 +435,13 @@ def extract_objects_qwen(
 def _get_video_duration(video_path: str) -> float:
     """Get video duration in seconds."""
     cmd = [
-        "ffprobe", "-v", "quiet",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
+        "ffprobe",
+        "-v",
+        "quiet",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
         video_path,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -425,19 +454,28 @@ def _extract_frames_at_timestamps(
     """Extract frames at specific timestamps, resized for VLM inference."""
     frame_paths: list[str] = []
 
-    logger.info(f"Extracting {len(timestamps)} frames from {video_path} at timestamps {timestamps}")
+    logger.info(
+        f"Extracting {len(timestamps)} frames from {video_path} at timestamps {timestamps}"
+    )
 
     for i, ts in enumerate(timestamps):
         output_path = os.path.join(output_dir, f"frame_{i:04d}.jpg")
         # Scale to max width while preserving aspect ratio, reduce quality for memory
         cmd = [
-            "ffmpeg", "-y",
-            "-ss", str(ts),
-            "-i", video_path,
-            "-frames:v", "1",
-            "-update", "1",  # Required for ffmpeg 8.x single-image output
-            "-vf", f"scale='min({max_width},iw)':-2",
-            "-q:v", "3",
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(ts),
+            "-i",
+            video_path,
+            "-frames:v",
+            "1",
+            "-update",
+            "1",  # Required for ffmpeg 8.x single-image output
+            "-vf",
+            f"scale='min({max_width},iw)':-2",
+            "-q:v",
+            "3",
             output_path,
         ]
         try:
@@ -445,11 +483,15 @@ def _extract_frames_at_timestamps(
             frame_paths.append(output_path)
             logger.info(f"Extracted frame {i} at {ts:.2f}s: {output_path}")
         except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to extract frame at {ts:.2f}s: {e.stderr.decode() if e.stderr else 'no stderr'}")
+            logger.warning(
+                f"Failed to extract frame at {ts:.2f}s: {e.stderr.decode() if e.stderr else 'no stderr'}"
+            )
             frame_paths.append("")
 
     successful = sum(1 for p in frame_paths if p)
-    logger.info(f"Frame extraction complete: {successful}/{len(timestamps)} frames extracted")
+    logger.info(
+        f"Frame extraction complete: {successful}/{len(timestamps)} frames extracted"
+    )
     return frame_paths
 
 
@@ -471,7 +513,9 @@ def _parse_objects_and_description(response: str) -> tuple[list[str], str | None
 
             if start_bracket >= 0 and (start_brace < 0 or start_bracket < start_brace):
                 # Array format - find matching ]
-                json_str = clean_response[start_bracket:clean_response.rindex("]") + 1]
+                json_str = clean_response[
+                    start_bracket : clean_response.rindex("]") + 1
+                ]
                 data = json.loads(json_str)
 
                 # Array of objects - take the first non-empty one
@@ -481,24 +525,34 @@ def _parse_objects_and_description(response: str) -> tuple[list[str], str | None
                             raw_objects = item.get("objects", [])
                             if raw_objects:
                                 objects = [
-                                    obj for obj in raw_objects
-                                    if isinstance(obj, str) and len(obj) < 100 and not obj.startswith('"')
+                                    obj
+                                    for obj in raw_objects
+                                    if isinstance(obj, str)
+                                    and len(obj) < 100
+                                    and not obj.startswith('"')
                                 ]
                             desc = item.get("description", "")
-                            if isinstance(desc, str) and len(desc) > 10 and not description:
+                            if (
+                                isinstance(desc, str)
+                                and len(desc) > 10
+                                and not description
+                            ):
                                 description = desc.strip()
                     return objects, description
 
             # Single object format
             if start_brace >= 0:
-                json_str = clean_response[start_brace:clean_response.rindex("}") + 1]
+                json_str = clean_response[start_brace : clean_response.rindex("}") + 1]
                 data = json.loads(json_str)
 
                 # Extract objects
                 raw_objects = data.get("objects", [])
                 objects = [
-                    obj for obj in raw_objects
-                    if isinstance(obj, str) and len(obj) < 100 and not obj.startswith('"')
+                    obj
+                    for obj in raw_objects
+                    if isinstance(obj, str)
+                    and len(obj) < 100
+                    and not obj.startswith('"')
                 ]
 
                 # Extract description

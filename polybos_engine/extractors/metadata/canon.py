@@ -68,14 +68,16 @@ def _parse_xml_sidecar(video_path: str) -> SidecarMetadata | None:
         # Extract device info
         device_elem = root.find(".//canon:Device", ns) or root.find(".//{*}Device")
         if device_elem is not None:
-            manufacturer_elem = device_elem.find("canon:Manufacturer", ns) or device_elem.find(
-                "{*}Manufacturer"
-            )
+            manufacturer_elem = device_elem.find(
+                "canon:Manufacturer", ns
+            ) or device_elem.find("{*}Manufacturer")
             model_elem = device_elem.find("canon:ModelName", ns) or device_elem.find(
                 "{*}ModelName"
             )
 
-            manufacturer = manufacturer_elem.text if manufacturer_elem is not None else None
+            manufacturer = (
+                manufacturer_elem.text if manufacturer_elem is not None else None
+            )
             model_name = model_elem.text if model_elem is not None else None
 
             if manufacturer or model_name:
@@ -89,7 +91,9 @@ def _parse_xml_sidecar(video_path: str) -> SidecarMetadata | None:
                 )
 
         # Extract GPS from Location element
-        location_elem = root.find(".//canon:Location", ns) or root.find(".//{*}Location")
+        location_elem = root.find(".//canon:Location", ns) or root.find(
+            ".//{*}Location"
+        )
         if location_elem is not None:
             lat_elem = location_elem.find("canon:Latitude", ns) or location_elem.find(
                 "{*}Latitude"

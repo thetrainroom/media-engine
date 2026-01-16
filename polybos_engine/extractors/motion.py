@@ -21,6 +21,7 @@ STATIC_THRESHOLD = 0.5  # Below this = static
 
 class MotionType(StrEnum):
     """Types of camera motion."""
+
     STATIC = "static"
     PAN_LEFT = "pan_left"
     PAN_RIGHT = "pan_right"
@@ -35,6 +36,7 @@ class MotionType(StrEnum):
 @dataclass
 class MotionSegment:
     """A segment of video with consistent motion."""
+
     start: float
     end: float
     motion_type: MotionType
@@ -44,6 +46,7 @@ class MotionSegment:
 @dataclass
 class MotionAnalysis:
     """Complete motion analysis for a video."""
+
     duration: float
     fps: float
     primary_motion: MotionType
@@ -77,10 +80,14 @@ def analyze_motion(
     frame_skip = max(1, int(fps / sample_fps))
     total_samples = frame_count // frame_skip
 
-    logger.info(f"Analyzing motion: {duration:.1f}s @ {fps:.1f}fps, ~{total_samples} samples")
+    logger.info(
+        f"Analyzing motion: {duration:.1f}s @ {fps:.1f}fps, ~{total_samples} samples"
+    )
 
     prev_gray = None
-    frame_motions: list[tuple[float, MotionType, float]] = []  # (timestamp, type, intensity)
+    frame_motions: list[tuple[float, MotionType, float]] = (
+        []
+    )  # (timestamp, type, intensity)
 
     for sample_idx in range(total_samples):
         frame_idx = sample_idx * frame_skip
@@ -102,7 +109,8 @@ def analyze_motion(
         if prev_gray is not None:
             # Compute optical flow
             flow = cv2.calcOpticalFlowFarneback(
-                prev_gray, gray,
+                prev_gray,
+                gray,
                 None,
                 pyr_scale=0.5,
                 levels=3,
@@ -110,7 +118,7 @@ def analyze_motion(
                 iterations=3,
                 poly_n=5,
                 poly_sigma=1.2,
-                flags=0
+                flags=0,
             )
 
             # Classify motion
@@ -141,10 +149,14 @@ def analyze_motion(
     avg_intensity = np.mean([m[2] for m in frame_motions])
 
     # Determine if video is stable (mostly static or low intensity)
-    static_time = sum(s.end - s.start for s in segments if s.motion_type == MotionType.STATIC)
+    static_time = sum(
+        s.end - s.start for s in segments if s.motion_type == MotionType.STATIC
+    )
     is_stable = static_time > duration * 0.7 or avg_intensity < MOTION_THRESHOLD
 
-    logger.info(f"Motion analysis: primary={primary_motion}, segments={len(segments)}, stable={is_stable}")
+    logger.info(
+        f"Motion analysis: primary={primary_motion}, segments={len(segments)}, stable={is_stable}"
+    )
 
     return MotionAnalysis(
         duration=duration,
@@ -210,7 +222,10 @@ def _classify_flow(flow: np.ndarray) -> tuple[MotionType, float]:
         ratio = abs_mean_x / (mean_magnitude + 1e-7)
         if ratio > PAN_TILT_THRESHOLD:
             if mean_x > 0:
-                return MotionType.PAN_LEFT, mean_magnitude  # Flow right = camera pans left
+                return (
+                    MotionType.PAN_LEFT,
+                    mean_magnitude,
+                )  # Flow right = camera pans left
             else:
                 return MotionType.PAN_RIGHT, mean_magnitude
 
@@ -251,24 +266,28 @@ def _build_segments(
             current_intensities.append(intensity)
         else:
             # End current segment
-            segments.append(MotionSegment(
-                start=current_start,
-                end=timestamp,
-                motion_type=current_type,
-                intensity=np.mean(current_intensities),
-            ))
+            segments.append(
+                MotionSegment(
+                    start=current_start,
+                    end=timestamp,
+                    motion_type=current_type,
+                    intensity=np.mean(current_intensities),
+                )
+            )
             current_type = motion_type
             current_start = timestamp
             current_intensities = [intensity]
 
     # Add final segment
     if frame_motions:
-        segments.append(MotionSegment(
-            start=current_start,
-            end=frame_motions[-1][0] + 0.2,  # Extend slightly past last frame
-            motion_type=current_type,
-            intensity=np.mean(current_intensities),
-        ))
+        segments.append(
+            MotionSegment(
+                start=current_start,
+                end=frame_motions[-1][0] + 0.2,  # Extend slightly past last frame
+                motion_type=current_type,
+                intensity=np.mean(current_intensities),
+            )
+        )
 
     # Merge short segments
     merged: list[MotionSegment] = []
@@ -279,7 +298,11 @@ def _build_segments(
             merged[-1] = MotionSegment(
                 start=prev.start,
                 end=seg.end,
-                motion_type=prev.motion_type if prev.end - prev.start > seg.end - seg.start else seg.motion_type,
+                motion_type=(
+                    prev.motion_type
+                    if prev.end - prev.start > seg.end - seg.start
+                    else seg.motion_type
+                ),
                 intensity=(prev.intensity + seg.intensity) / 2,
             )
         else:
@@ -297,7 +320,9 @@ def _get_primary_motion(segments: list[MotionSegment], duration: float) -> Motio
     type_durations: dict[MotionType, float] = {}
     for seg in segments:
         seg_duration = seg.end - seg.start
-        type_durations[seg.motion_type] = type_durations.get(seg.motion_type, 0) + seg_duration
+        type_durations[seg.motion_type] = (
+            type_durations.get(seg.motion_type, 0) + seg_duration
+        )
 
     # Return type with longest total duration
     return max(type_durations, key=type_durations.get)  # type: ignore
@@ -324,7 +349,10 @@ def get_sample_timestamps(
             return [motion.duration / 2]
         else:
             # No segments - sample evenly
-            return [motion.duration * i / (max_samples + 1) for i in range(1, max_samples + 1)]
+            return [
+                motion.duration * i / (max_samples + 1)
+                for i in range(1, max_samples + 1)
+            ]
 
     # Check if there are any non-static segments
     has_motion_segments = any(
@@ -345,8 +373,12 @@ def get_sample_timestamps(
             # Static segment - one sample from middle
             timestamps.append((seg.start + seg.end) / 2)
 
-        elif seg.motion_type in (MotionType.PAN_LEFT, MotionType.PAN_RIGHT,
-                                  MotionType.TILT_UP, MotionType.TILT_DOWN):
+        elif seg.motion_type in (
+            MotionType.PAN_LEFT,
+            MotionType.PAN_RIGHT,
+            MotionType.TILT_UP,
+            MotionType.TILT_DOWN,
+        ):
             # Pan/tilt - sample start and end (different content)
             timestamps.append(seg.start + 0.2)
             if seg_duration > 1.0:
@@ -377,7 +409,9 @@ def get_sample_timestamps(
     # Ensure timestamps are within bounds
     timestamps = [max(0.1, min(t, motion.duration - 0.1)) for t in timestamps]
 
-    logger.info(f"Smart sampling: {len(timestamps)} frames from {len(motion.segments)} motion segments")
+    logger.info(
+        f"Smart sampling: {len(timestamps)} frames from {len(motion.segments)} motion segments"
+    )
 
     return timestamps
 

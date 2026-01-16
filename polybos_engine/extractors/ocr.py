@@ -81,7 +81,9 @@ def extract_ocr(
     scenes: ScenesResult | None = None,
     min_confidence: float = 0.5,
     sample_fps: float = 0.5,
-    timestamps: list[float] | None = None,  # Direct timestamp list (e.g., from motion analysis)
+    timestamps: (
+        list[float] | None
+    ) = None,  # Direct timestamp list (e.g., from motion analysis)
     languages: list[str] | None = None,
 ) -> OcrResult:
     """Extract text from video frames using OCR.

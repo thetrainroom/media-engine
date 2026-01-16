@@ -93,17 +93,12 @@ class BlackmagicExtractor:
             or tags.get("make")
             or "Blackmagic Design"
         )
-        camera_name = (
-            tags.get("com.apple.proapps.cameraname")
-            or tags.get("model")
-        )
+        camera_name = tags.get("com.apple.proapps.cameraname") or tags.get("model")
 
         # BRAW files are from cinema cameras
         is_braw = path.suffix.lower() == ".braw"
         if is_braw:
-            logger.info(
-                "BRAW detected. For full metadata, install Blackmagic RAW SDK."
-            )
+            logger.info("BRAW detected. For full metadata, install Blackmagic RAW SDK.")
 
         device = DeviceInfo(
             make=manufacturer,

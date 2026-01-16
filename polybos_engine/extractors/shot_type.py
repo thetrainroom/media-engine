@@ -140,7 +140,9 @@ def _classify_with_openclip(frame_paths: list[str]) -> dict[str, int]:
 
     device: str = "cuda" if has_cuda() else "cpu"
 
-    model, _, preprocess = open_clip.create_model_and_transforms("ViT-B-32", pretrained="openai")
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        "ViT-B-32", pretrained="openai"
+    )
     model = model.to(device)
     model.eval()
 
@@ -160,7 +162,9 @@ def _classify_with_openclip(frame_paths: list[str]) -> dict[str, int]:
 
             with torch.no_grad():
                 image_features = model.encode_image(image_tensor)
-                image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+                image_features = image_features / image_features.norm(
+                    dim=-1, keepdim=True
+                )
 
                 similarity = (image_features @ text_features.T).softmax(dim=-1)
                 best_idx = similarity.argmax().item()

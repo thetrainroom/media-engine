@@ -88,9 +88,7 @@ def _parse_dji_srt_telemetry(
 
         for block in blocks:
             # Parse timestamp from SRT format: 00:00:00,000 --> 00:00:01,000
-            time_match = re.search(
-                r"(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->", block
-            )
+            time_match = re.search(r"(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->", block)
             if not time_match:
                 continue
 
@@ -128,7 +126,9 @@ def _parse_dji_srt_telemetry(
             dt_match = re.search(r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d+)", block)
             if dt_match:
                 try:
-                    recorded_at = datetime.strptime(dt_match.group(1), "%Y-%m-%d %H:%M:%S.%f")
+                    recorded_at = datetime.strptime(
+                        dt_match.group(1), "%Y-%m-%d %H:%M:%S.%f"
+                    )
                 except ValueError:
                     pass
 
@@ -145,7 +145,9 @@ def _parse_dji_srt_telemetry(
                 latitude=lat,
                 longitude=lon,
                 altitude=float(abs_alt_match.group(1)) if abs_alt_match else None,
-                relative_altitude=float(rel_alt_match.group(1)) if rel_alt_match else None,
+                relative_altitude=(
+                    float(rel_alt_match.group(1)) if rel_alt_match else None
+                ),
                 iso=int(iso_match.group(1)) if iso_match else None,
                 shutter=1 / float(shutter_match.group(1)) if shutter_match else None,
                 aperture=float(fnum_match.group(1)) if fnum_match else None,
@@ -211,9 +213,7 @@ def _parse_embedded_subtitle_telemetry(
 
         for block in blocks:
             # Parse timestamp
-            time_match = re.search(
-                r"(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->", block
-            )
+            time_match = re.search(r"(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->", block)
             if not time_match:
                 continue
 
@@ -239,7 +239,9 @@ def _parse_embedded_subtitle_telemetry(
                     latitude=0.0,  # No GPS in this format
                     longitude=0.0,
                     aperture=float(aperture_match.group(1)) if aperture_match else None,
-                    shutter=1 / float(shutter_match.group(1)) if shutter_match else None,
+                    shutter=(
+                        1 / float(shutter_match.group(1)) if shutter_match else None
+                    ),
                     iso=int(iso_match.group(1)) if iso_match else None,
                 )
                 points.append(point)

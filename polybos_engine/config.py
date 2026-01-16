@@ -276,8 +276,9 @@ def get_available_vram_gb() -> float:
     if has_cuda():
         try:
             import torch
+
             props = torch.cuda.get_device_properties(0)
-            total_gb = props.total_memory / (1024 ** 3)
+            total_gb = props.total_memory / (1024**3)
             logger.info(f"CUDA GPU: {props.name}, {total_gb:.1f}GB VRAM")
             return total_gb
         except Exception as e:
@@ -287,6 +288,7 @@ def get_available_vram_gb() -> float:
     elif is_apple_silicon():
         try:
             import subprocess
+
             # Get total system memory (unified memory on Apple Silicon)
             result = subprocess.run(
                 ["sysctl", "-n", "hw.memsize"],
@@ -294,10 +296,12 @@ def get_available_vram_gb() -> float:
                 text=True,
             )
             total_bytes = int(result.stdout.strip())
-            total_gb = total_bytes / (1024 ** 3)
+            total_gb = total_bytes / (1024**3)
             # Apple Silicon can use ~75% of unified memory for GPU
             available_gb = total_gb * 0.75
-            logger.info(f"Apple Silicon: {total_gb:.0f}GB unified, ~{available_gb:.0f}GB for GPU")
+            logger.info(
+                f"Apple Silicon: {total_gb:.0f}GB unified, ~{available_gb:.0f}GB for GPU"
+            )
             return available_gb
         except Exception as e:
             logger.warning(f"Failed to get Apple Silicon memory: {e}")
@@ -490,8 +494,9 @@ def get_available_memory_gb() -> tuple[float, float]:
     """
     try:
         import psutil
+
         mem = psutil.virtual_memory()
-        available_ram = mem.available / (1024 ** 3)
+        available_ram = mem.available / (1024**3)
     except ImportError:
         logger.warning("psutil not installed, cannot monitor RAM")
         available_ram = 8.0  # Conservative default
@@ -501,9 +506,10 @@ def get_available_memory_gb() -> tuple[float, float]:
     if has_cuda():
         try:
             import torch
+
             total = torch.cuda.get_device_properties(0).total_memory
             allocated = torch.cuda.memory_allocated(0)
-            available_vram = (total - allocated) / (1024 ** 3)
+            available_vram = (total - allocated) / (1024**3)
         except Exception:
             available_vram = get_available_vram_gb()
     elif is_apple_silicon():
@@ -513,7 +519,9 @@ def get_available_memory_gb() -> tuple[float, float]:
     return available_ram, available_vram
 
 
-def check_memory_before_load(model_name: str, clear_memory_func: Any | None = None) -> bool:
+def check_memory_before_load(
+    model_name: str, clear_memory_func: Any | None = None
+) -> bool:
     """Check if enough memory is available before loading a model.
 
     If memory is low, attempts to free memory by calling the clear function.

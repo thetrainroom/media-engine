@@ -39,8 +39,7 @@ def get_ffprobe_pool() -> ThreadPoolExecutor:
     global _ffprobe_pool
     if _ffprobe_pool is None:
         _ffprobe_pool = ThreadPoolExecutor(
-            max_workers=FFPROBE_WORKERS,
-            thread_name_prefix="ffprobe"
+            max_workers=FFPROBE_WORKERS, thread_name_prefix="ffprobe"
         )
         logger.info(f"Created ffprobe pool with {FFPROBE_WORKERS} workers")
     return _ffprobe_pool
@@ -81,8 +80,10 @@ def run_ffprobe(file_path: str) -> dict[str, Any]:
     """
     cmd = [
         "ffprobe",
-        "-v", "quiet",
-        "-print_format", "json",
+        "-v",
+        "quiet",
+        "-print_format",
+        "json",
         "-show_format",
         "-show_streams",
     ]
@@ -94,11 +95,7 @@ def run_ffprobe(file_path: str) -> dict[str, Any]:
 
     try:
         result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=FFPROBE_TIMEOUT
+            cmd, capture_output=True, text=True, check=True, timeout=FFPROBE_TIMEOUT
         )
         return json.loads(result.stdout)
     except subprocess.TimeoutExpired:
@@ -127,10 +124,7 @@ def run_ffprobe_batch(
         return {}
 
     pool = get_ffprobe_pool()
-    futures = {
-        pool.submit(run_ffprobe, path): path
-        for path in file_paths
-    }
+    futures = {pool.submit(run_ffprobe, path): path for path in file_paths}
 
     results: dict[str, dict[str, Any] | Exception] = {}
     for future in as_completed(futures):
@@ -229,9 +223,8 @@ def parse_creation_time(
     # Fallback to stream tags if format tags don't have the date
     if not time_str and stream_tags:
         stream_tags_lower = {k.lower(): v for k, v in stream_tags.items()}
-        time_str = (
-            stream_tags_lower.get("creation_time")
-            or stream_tags_lower.get("date")
+        time_str = stream_tags_lower.get("creation_time") or stream_tags_lower.get(
+            "date"
         )
 
     if not time_str:
@@ -434,7 +427,9 @@ def build_base_metadata(
 
     fps = parse_fps(video_stream) if video_stream else None
     duration = float(format_info.get("duration", 0))
-    bitrate = int(format_info.get("bit_rate", 0)) if format_info.get("bit_rate") else None
+    bitrate = (
+        int(format_info.get("bit_rate", 0)) if format_info.get("bit_rate") else None
+    )
     file_size = os.path.getsize(file_path)
 
     # Get stream tags for fallback date extraction

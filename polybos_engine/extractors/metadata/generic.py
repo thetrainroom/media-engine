@@ -83,10 +83,7 @@ class GenericExtractor:
             or tags.get("com.apple.quicktime.model")
             or tags.get("com.apple.proapps.cameraname")
         )
-        software = (
-            tags.get("software")
-            or tags.get("com.apple.quicktime.software")
-        )
+        software = tags.get("software") or tags.get("com.apple.quicktime.software")
 
         # Check encoder tag for additional info
         encoder = tags.get("encoder", "")

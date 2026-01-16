@@ -14,7 +14,12 @@ from typing import TypeAlias
 import numpy as np
 from PIL import Image
 
-from polybos_engine.schemas import BoundingBox, FaceDetection, FacesResult, SceneDetection
+from polybos_engine.schemas import (
+    BoundingBox,
+    FaceDetection,
+    FacesResult,
+    SceneDetection,
+)
 
 Embedding: TypeAlias = list[float]
 
@@ -71,7 +76,9 @@ def extract_faces(
     file_path: str,
     scenes: list[SceneDetection] | None = None,
     sample_fps: float = 0.5,  # Default: every 2 seconds
-    timestamps: list[float] | None = None,  # Direct timestamp list (e.g., from YOLO persons)
+    timestamps: (
+        list[float] | None
+    ) = None,  # Direct timestamp list (e.g., from YOLO persons)
     min_face_size: int = 80,
     min_confidence: float = 0.5,  # Lowered from 0.9 - user can discard false positives
     extract_images: bool = True,
@@ -110,10 +117,14 @@ def extract_faces(
         # Determine sample timestamps (priority: explicit > scenes > fixed fps)
         if timestamps is not None:
             sample_timestamps = sorted(set(timestamps))
-            logger.info(f"Using {len(sample_timestamps)} provided timestamps for face detection")
+            logger.info(
+                f"Using {len(sample_timestamps)} provided timestamps for face detection"
+            )
         elif scenes:
             sample_timestamps = _get_sample_timestamps_from_scenes(scenes, sample_fps)
-            logger.info(f"Sampling {len(sample_timestamps)} frames from {len(scenes)} scenes")
+            logger.info(
+                f"Sampling {len(sample_timestamps)} frames from {len(scenes)} scenes"
+            )
         else:
             # Get video duration and sample at fixed intervals
             duration = _get_video_duration(file_path)
@@ -122,7 +133,9 @@ def extract_faces(
             logger.info(f"Sampling {len(sample_timestamps)} frames at {sample_fps} fps")
 
         # Extract frames at specific timestamps
-        frame_paths = _extract_frames_at_timestamps(file_path, temp_dir, sample_timestamps)
+        frame_paths = _extract_frames_at_timestamps(
+            file_path, temp_dir, sample_timestamps
+        )
 
         detections: list[FaceDetection] = []
         all_embeddings: list[Embedding] = []
@@ -159,7 +172,9 @@ def extract_faces(
                         continue
 
                     # Crop face with padding for better embedding
-                    face_crop = _crop_face_with_padding(frame_img, x, y, w, h, padding=0.3)
+                    face_crop = _crop_face_with_padding(
+                        frame_img, x, y, w, h, padding=0.3
+                    )
 
                     # Generate embedding from cropped face
                     embedding: Embedding = []
@@ -235,9 +250,12 @@ def _get_video_duration(video_path: str) -> float:
     """Get video duration in seconds using ffprobe."""
     cmd = [
         "ffprobe",
-        "-v", "quiet",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
+        "-v",
+        "quiet",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
         video_path,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -283,11 +301,16 @@ def _extract_frames_at_timestamps(
         cmd = [
             "ffmpeg",
             "-y",
-            "-ss", str(ts),
-            "-i", video_path,
-            "-frames:v", "1",
-            "-update", "1",  # Required for ffmpeg 8.x single-image output
-            "-q:v", "2",
+            "-ss",
+            str(ts),
+            "-i",
+            video_path,
+            "-frames:v",
+            "1",
+            "-update",
+            "1",  # Required for ffmpeg 8.x single-image output
+            "-q:v",
+            "2",
             output_path,
         ]
 
@@ -411,16 +434,18 @@ def _find_embedding_match(
     return best_person
 
 
-def _is_near_edge(bbox: BoundingBox, frame_width: int, frame_height: int, margin: float = 0.05) -> bool:
+def _is_near_edge(
+    bbox: BoundingBox, frame_width: int, frame_height: int, margin: float = 0.05
+) -> bool:
     """Check if bbox is near frame edge (partially out of frame)."""
     margin_x = int(frame_width * margin)
     margin_y = int(frame_height * margin)
 
     return (
-        bbox.x < margin_x or
-        bbox.y < margin_y or
-        bbox.x + bbox.width > frame_width - margin_x or
-        bbox.y + bbox.height > frame_height - margin_y
+        bbox.x < margin_x
+        or bbox.y < margin_y
+        or bbox.x + bbox.width > frame_width - margin_x
+        or bbox.y + bbox.height > frame_height - margin_y
     )
 
 

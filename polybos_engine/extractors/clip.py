@@ -205,7 +205,11 @@ def get_clip_backend(model_name: str | None = None) -> CLIPBackend:
     global _backend, _backend_model_name
 
     # If model name changed, unload the old model
-    if _backend is not None and model_name is not None and _backend_model_name != model_name:
+    if (
+        _backend is not None
+        and model_name is not None
+        and _backend_model_name != model_name
+    ):
         logger.info(f"Switching CLIP model from {_backend_model_name} to {model_name}")
         unload_clip_model()
 
@@ -221,7 +225,9 @@ def get_clip_backend(model_name: str | None = None) -> CLIPBackend:
             else:
                 mlx_model = model_name or "openai/clip-vit-base-patch32"
             _backend = MLXCLIPBackend(model_name=mlx_model)
-            _backend_model_name = model_name or mlx_model  # Store original name for comparison
+            _backend_model_name = (
+                model_name or mlx_model
+            )  # Store original name for comparison
             logger.info(f"Using MLX-CLIP backend (Apple Silicon): {mlx_model}")
             return _backend
         except Exception as e:
@@ -239,7 +245,9 @@ def extract_clip(
     file_path: str,
     scenes: ScenesResult | None = None,
     fallback_interval: float = 10.0,
-    timestamps: list[float] | None = None,  # Direct timestamp list (e.g., from motion analysis)
+    timestamps: (
+        list[float] | None
+    ) = None,  # Direct timestamp list (e.g., from motion analysis)
     model_name: str | None = None,  # CLIP model name (e.g., "ViT-B-32", "ViT-L-14")
 ) -> ClipResult:
     """Extract CLIP embeddings from video.
@@ -273,7 +281,9 @@ def extract_clip(
 
         if timestamps is not None:
             # Use provided timestamps directly
-            logger.info(f"Extracting CLIP embeddings at {len(timestamps)} provided timestamps")
+            logger.info(
+                f"Extracting CLIP embeddings at {len(timestamps)} provided timestamps"
+            )
 
             for i, ts in enumerate(sorted(set(timestamps))):
                 frame_path = _extract_frame_at(file_path, temp_dir, ts)
@@ -368,7 +378,8 @@ def _extract_frame_at(video_path: str, output_dir: str, timestamp: float) -> str
         video_path,
         "-vframes",
         "1",
-        "-update", "1",  # Required for ffmpeg 8.x single-image output
+        "-update",
+        "1",  # Required for ffmpeg 8.x single-image output
         "-q:v",
         "2",
         output_path,

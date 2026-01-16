@@ -25,7 +25,9 @@ class FrameExtractor:
     # Default max dimension - scale down 4K to ~HD for faster processing
     DEFAULT_MAX_DIMENSION = 1920
 
-    def __init__(self, video_path: str, max_dimension: int | None = DEFAULT_MAX_DIMENSION):
+    def __init__(
+        self, video_path: str, max_dimension: int | None = DEFAULT_MAX_DIMENSION
+    ):
         """Initialize frame extractor.
 
         Args:
@@ -46,7 +48,9 @@ class FrameExtractor:
         self.cap = cv2.VideoCapture(self.video_path)
 
         if not self.cap.isOpened():
-            logger.warning(f"OpenCV failed to open {self.video_path}, using ffmpeg fallback")
+            logger.warning(
+                f"OpenCV failed to open {self.video_path}, using ffmpeg fallback"
+            )
             self._use_ffmpeg_fallback = True
             self.cap = None
         else:
@@ -84,9 +88,13 @@ class FrameExtractor:
         """Get duration using ffprobe."""
         try:
             cmd = [
-                "ffprobe", "-v", "quiet",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
                 self.video_path,
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
@@ -143,7 +151,9 @@ class FrameExtractor:
 
         return self._scale_frame(frame)
 
-    def get_frames_at(self, timestamps: list[float]) -> list[tuple[float, np.ndarray | None]]:
+    def get_frames_at(
+        self, timestamps: list[float]
+    ) -> list[tuple[float, np.ndarray | None]]:
         """Extract multiple frames at given timestamps.
 
         More efficient than calling get_frame_at repeatedly as it
@@ -172,12 +182,18 @@ class FrameExtractor:
 
         try:
             cmd = [
-                "ffmpeg", "-y",
-                "-ss", str(timestamp),
-                "-i", self.video_path,
-                "-frames:v", "1",
-                "-update", "1",  # Required for ffmpeg 8.x single-image output
-                "-q:v", "2",
+                "ffmpeg",
+                "-y",
+                "-ss",
+                str(timestamp),
+                "-i",
+                self.video_path,
+                "-frames:v",
+                "1",
+                "-update",
+                "1",  # Required for ffmpeg 8.x single-image output
+                "-q:v",
+                "2",
                 tmp_path,
             ]
             subprocess.run(cmd, capture_output=True, check=True)
@@ -193,7 +209,9 @@ class FrameExtractor:
 
         return None
 
-    def save_frame(self, frame: np.ndarray, output_path: str, quality: int = 95) -> bool:
+    def save_frame(
+        self, frame: np.ndarray, output_path: str, quality: int = 95
+    ) -> bool:
         """Save frame to file.
 
         Args:
@@ -264,9 +282,13 @@ def get_video_duration(video_path: str) -> float:
     # Fallback to ffprobe
     try:
         cmd = [
-            "ffprobe", "-v", "quiet",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
             video_path,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)

@@ -7,7 +7,12 @@ from typing import Any
 
 from polybos_engine.config import DeviceType, get_device
 from polybos_engine.extractors.frames import FrameExtractor, get_video_duration
-from polybos_engine.schemas import BoundingBox, ObjectDetection, ObjectsResult, SceneDetection
+from polybos_engine.schemas import (
+    BoundingBox,
+    ObjectDetection,
+    ObjectsResult,
+    SceneDetection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +80,9 @@ def extract_objects(
     file_path: str,
     scenes: list[SceneDetection] | None = None,
     sample_fps: float = 0.5,
-    timestamps: list[float] | None = None,  # Direct timestamp list (e.g., from motion analysis)
+    timestamps: (
+        list[float] | None
+    ) = None,  # Direct timestamp list (e.g., from motion analysis)
     min_confidence: float = 0.6,
     min_size: int = 50,
     model_name: str = "yolov8m.pt",
@@ -105,7 +112,11 @@ def extract_objects(
 
     # Determine device for GPU acceleration
     device = get_device()
-    device_str = "mps" if device == DeviceType.MPS else "cuda" if device == DeviceType.CUDA else "cpu"
+    device_str = (
+        "mps"
+        if device == DeviceType.MPS
+        else "cuda" if device == DeviceType.CUDA else "cpu"
+    )
 
     # Load model (singleton)
     model = _get_yolo_model(model_name)
@@ -113,10 +124,14 @@ def extract_objects(
     # Determine timestamps to sample (priority: explicit > scenes > fixed fps)
     if timestamps is not None:
         sample_timestamps = sorted(set(timestamps))
-        logger.info(f"Using {len(sample_timestamps)} provided timestamps for object detection")
+        logger.info(
+            f"Using {len(sample_timestamps)} provided timestamps for object detection"
+        )
     elif scenes:
         sample_timestamps = _get_timestamps_from_scenes(scenes, sample_fps)
-        logger.info(f"Sampling {len(sample_timestamps)} frames from {len(scenes)} scenes")
+        logger.info(
+            f"Sampling {len(sample_timestamps)} frames from {len(scenes)} scenes"
+        )
     else:
         duration = get_video_duration(file_path)
         interval = 1.0 / sample_fps
@@ -159,15 +174,19 @@ def extract_objects(
                         class_id = int(boxes.cls[i])
                         label = model.names[class_id] if model.names else str(class_id)
 
-                        raw_detections.append(ObjectDetection(
-                            timestamp=round(timestamp, 2),
-                            label=label,
-                            confidence=round(confidence, 3),
-                            bbox=BoundingBox(
-                                x=int(x1), y=int(y1),
-                                width=width, height=height,
-                            ),
-                        ))
+                        raw_detections.append(
+                            ObjectDetection(
+                                timestamp=round(timestamp, 2),
+                                label=label,
+                                confidence=round(confidence, 3),
+                                bbox=BoundingBox(
+                                    x=int(x1),
+                                    y=int(y1),
+                                    width=width,
+                                    height=height,
+                                ),
+                            )
+                        )
 
             except Exception as e:
                 logger.warning(f"Failed to process frame at {timestamp}s: {e}")

@@ -38,7 +38,7 @@ class ExtractRequest(BaseModel):
     proxy_file: str | None = Field(
         default=None,
         description="Path to proxy file for RAW formats (BRAW, ARRIRAW). "
-        "Metadata is extracted from main file, frame analysis uses proxy."
+        "Metadata is extracted from main file, frame analysis uses proxy.",
     )
 
     # Extractor toggles (all default to off)
@@ -52,29 +52,41 @@ class ExtractRequest(BaseModel):
     enable_motion: bool = Field(default=False, description="Analyze camera motion")
 
     # Whisper options
-    whisper_model: str = Field(default="auto", description="Whisper model size (auto=VRAM-based)")
-    language: str | None = Field(default=None, description="Force language (skip detection)")
+    whisper_model: str = Field(
+        default="auto", description="Whisper model size (auto=VRAM-based)"
+    )
+    language: str | None = Field(
+        default=None, description="Force language (skip detection)"
+    )
     fallback_language: str = Field(
         default="en", description="Fallback for short clips with low confidence"
     )
-    language_hints: list[str] = Field(default_factory=list, description="Language hints")
+    language_hints: list[str] = Field(
+        default_factory=list, description="Language hints"
+    )
     context_hint: str | None = Field(
         default=None, description="Context hint for transcription (e.g., dialect info)"
     )
 
     # Sampling options
-    face_sample_fps: float = Field(default=1.0, description="Face detection sample rate")
-    object_sample_fps: float = Field(default=2.0, description="Object detection sample rate")
+    face_sample_fps: float = Field(
+        default=1.0, description="Face detection sample rate"
+    )
+    object_sample_fps: float = Field(
+        default=2.0, description="Object detection sample rate"
+    )
 
     # Object detection
-    object_detector: ObjectDetector | None = Field(default=None, description="Object detector backend")
+    object_detector: ObjectDetector | None = Field(
+        default=None, description="Object detector backend"
+    )
     context: dict[str, str] | None = Field(
         default=None,
-        description="Context for VLM (person, location, topic, language, etc.)"
+        description="Context for VLM (person, location, topic, language, etc.)",
     )
     qwen_timestamps: list[float] | None = Field(
         default=None,
-        description="Timestamps (seconds) for Qwen frame analysis. If None, samples from middle."
+        description="Timestamps (seconds) for Qwen frame analysis. If None, samples from middle.",
     )
 
 
@@ -125,7 +137,9 @@ class GPS(BaseModel):
 class ColorSpace(BaseModel):
     """Color space information for LOG/HDR footage."""
 
-    transfer: str | None = None  # Gamma/transfer function (e.g., "slog3", "bt709", "hlg")
+    transfer: str | None = (
+        None  # Gamma/transfer function (e.g., "slog3", "bt709", "hlg")
+    )
     primaries: str | None = None  # Color primaries (e.g., "sgamut3", "bt709", "bt2020")
     matrix: str | None = None  # Color matrix (e.g., "bt709", "bt2020nc")
     lut_file: str | None = None  # Reference to LUT file for conversion
@@ -205,7 +219,9 @@ class Transcript(BaseModel):
     language: str
     confidence: float
     duration: float
-    speaker_count: int | None = None  # Number of speakers detected (None if diarization disabled)
+    speaker_count: int | None = (
+        None  # Number of speakers detected (None if diarization disabled)
+    )
     hints_used: TranscriptHints
     segments: list[TranscriptSegment]
 
@@ -396,5 +412,3 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     api_version: str
-
-
