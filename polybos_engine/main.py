@@ -639,8 +639,9 @@ class BatchRequest(BaseModel):
     # Context for Whisper
     language_hints: list[str] | None = None
     context_hint: str | None = None
-    # Context for Qwen VLM
-    context: dict[str, str] | None = None
+    # Context for Qwen VLM - per-file context mapping (file path -> context dict)
+    # Example: {"/path/video1.mp4": {"location": "Oslo"}, "/path/video2.mp4": {"location": "Bergen"}}
+    contexts: dict[str, dict[str, str]] | None = None
     qwen_timestamps: list[float] | None = None
 
 
@@ -976,8 +977,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 logger.info("Clearing memory before Qwen...")
                 _clear_memory()
                 update_batch_progress("objects", "Loading Qwen model...", 0, total_files)
-                # Log context for debugging
-                logger.info(f"Qwen batch context: {request.context}")
+                # Log contexts for debugging
+                logger.info(f"Qwen batch contexts: {request.contexts}")
 
                 for i, file_path in enumerate(files):
                     file_start = time.time()
@@ -990,12 +991,14 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         if timestamps is None and motion:
                             timestamps = get_sample_timestamps(motion, max_samples=5)
 
-                        logger.info(f"Calling Qwen with context: {request.context}")
+                        # Get per-file context
+                        file_context = request.contexts.get(file_path) if request.contexts else None
+                        logger.info(f"Calling Qwen with context for {fname}: {file_context}")
                         objects = extract_objects_qwen(
                             file_path,
                             timestamps=timestamps,
                             model_name=qwen_model,
-                            context=request.context,
+                            context=file_context,
                         )
                         objects_data: dict[str, Any] = {"summary": objects.summary}
                         if objects.descriptions:
