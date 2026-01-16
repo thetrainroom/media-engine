@@ -21,6 +21,13 @@ Embedding: TypeAlias = list[float]
 
 logger = logging.getLogger(__name__)
 
+# Map OpenCLIP-style model names to HuggingFace model names for MLX-CLIP
+OPENCLIP_TO_HF_MODEL_MAP: dict[str, str] = {
+    "ViT-B-16": "openai/clip-vit-base-patch16",
+    "ViT-B-32": "openai/clip-vit-base-patch32",
+    "ViT-L-14": "openai/clip-vit-large-patch14",
+}
+
 
 def _load_image_rgb(image_path: str) -> NDArray[np.uint8]:  # type: ignore[type-var]
     """Load image using OpenCV and convert to RGB."""
@@ -207,10 +214,14 @@ def get_clip_backend(model_name: str | None = None) -> CLIPBackend:
 
     if is_apple_silicon():
         try:
-            # MLX-CLIP uses HuggingFace model names
-            mlx_model = model_name or "openai/clip-vit-base-patch32"
+            # MLX-CLIP uses HuggingFace model names - translate if needed
+            if model_name and model_name in OPENCLIP_TO_HF_MODEL_MAP:
+                mlx_model = OPENCLIP_TO_HF_MODEL_MAP[model_name]
+                logger.info(f"Translated CLIP model name: {model_name} -> {mlx_model}")
+            else:
+                mlx_model = model_name or "openai/clip-vit-base-patch32"
             _backend = MLXCLIPBackend(model_name=mlx_model)
-            _backend_model_name = mlx_model
+            _backend_model_name = model_name or mlx_model  # Store original name for comparison
             logger.info(f"Using MLX-CLIP backend (Apple Silicon): {mlx_model}")
             return _backend
         except Exception as e:

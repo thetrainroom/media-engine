@@ -94,6 +94,16 @@ def _clear_memory() -> None:
     gc.collect()
 
 
+def _get_memory_mb() -> int:
+    """Get current process memory usage in MB."""
+    try:
+        import psutil
+        process = psutil.Process()
+        return process.memory_info().rss // (1024 * 1024)
+    except ImportError:
+        return 0
+
+
 # Create FastAPI app
 app = FastAPI(
     title="Polybos Media Engine",
@@ -641,6 +651,16 @@ class BatchFileStatus(BaseModel):
     status: str  # pending, running, completed, failed
     results: dict[str, Any] = {}
     error: str | None = None
+    timings: dict[str, float] = {}  # extractor -> seconds
+
+
+class ExtractorTiming(BaseModel):
+    """Timing for a single extractor stage."""
+    extractor: str
+    started_at: datetime
+    completed_at: datetime | None = None
+    duration_seconds: float | None = None
+    files_processed: int = 0
 
 
 class BatchJobStatus(BaseModel):
@@ -652,6 +672,11 @@ class BatchJobStatus(BaseModel):
     files: list[BatchFileStatus] = []
     created_at: datetime
     completed_at: datetime | None = None
+    # Timing and resource metrics
+    extractor_timings: list[ExtractorTiming] = []
+    elapsed_seconds: float | None = None
+    memory_mb: int | None = None  # Current process memory
+    peak_memory_mb: int | None = None  # Peak process memory during batch
 
 
 # In-memory batch store
@@ -726,13 +751,23 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         f"yolo={yolo_model}, clip={clip_model}, detector={detector}"
     )
 
+    batch_start_time = time.time()
+    peak_memory = _get_memory_mb()
+
     def update_batch_progress(extractor: str, message: str, current: int | None = None, total: int | None = None) -> None:
+        nonlocal peak_memory
         with batch_jobs_lock:
             if batch_id in batch_jobs:
                 batch_jobs[batch_id].current_extractor = extractor
                 batch_jobs[batch_id].progress = JobProgress(
                     message=message, current=current, total=total
                 )
+                # Update memory and elapsed time
+                current_mem = _get_memory_mb()
+                peak_memory = max(peak_memory, current_mem)
+                batch_jobs[batch_id].memory_mb = current_mem
+                batch_jobs[batch_id].peak_memory_mb = peak_memory
+                batch_jobs[batch_id].elapsed_seconds = round(time.time() - batch_start_time, 1)
 
     def update_file_status(file_idx: int, status: str, result_key: str | None = None, result: Any = None, error: str | None = None) -> None:
         with batch_jobs_lock:
@@ -743,6 +778,34 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 if error:
                     batch_jobs[batch_id].files[file_idx].error = error
 
+    def start_extractor_timing(extractor: str) -> datetime:
+        """Start timing for an extractor stage."""
+        started = datetime.now(timezone.utc)
+        with batch_jobs_lock:
+            if batch_id in batch_jobs:
+                batch_jobs[batch_id].extractor_timings.append(
+                    ExtractorTiming(extractor=extractor, started_at=started)
+                )
+        return started
+
+    def end_extractor_timing(extractor: str, files_processed: int) -> None:
+        """End timing for an extractor stage."""
+        completed = datetime.now(timezone.utc)
+        with batch_jobs_lock:
+            if batch_id in batch_jobs:
+                for timing in batch_jobs[batch_id].extractor_timings:
+                    if timing.extractor == extractor and timing.completed_at is None:
+                        timing.completed_at = completed
+                        timing.duration_seconds = round((completed - timing.started_at).total_seconds(), 2)
+                        timing.files_processed = files_processed
+                        break
+
+    def update_file_timing(file_idx: int, extractor: str, duration: float) -> None:
+        """Record per-file timing for an extractor."""
+        with batch_jobs_lock:
+            if batch_id in batch_jobs and file_idx < len(batch_jobs[batch_id].files):
+                batch_jobs[batch_id].files[file_idx].timings[extractor] = round(duration, 2)
+
     try:
         with batch_jobs_lock:
             batch_jobs[batch_id].status = "running"
@@ -752,6 +815,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
         # Stage 1: Metadata (parallel ffprobe for speed)
         if request.enable_metadata:
+            start_extractor_timing("metadata")
             update_batch_progress(
                 "metadata",
                 f"Running ffprobe ({FFPROBE_WORKERS} parallel workers)...",
@@ -764,12 +828,14 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
             # Extract metadata from each probe result
             for i, file_path in enumerate(files):
+                file_start = time.time()
                 update_batch_progress("metadata", f"Processing {Path(file_path).name}", i + 1, total_files)
                 probe_data = probe_results.get(file_path)
 
                 if isinstance(probe_data, Exception):
                     logger.warning(f"Metadata failed for {file_path}: {probe_data}")
                     update_file_status(i, "running", "metadata", None, str(probe_data))
+                    update_file_timing(i, "metadata", time.time() - file_start)
                     continue
 
                 try:
@@ -778,39 +844,51 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 except Exception as e:
                     logger.warning(f"Metadata failed for {file_path}: {e}")
                     update_file_status(i, "running", "metadata", None, str(e))
+                update_file_timing(i, "metadata", time.time() - file_start)
+            end_extractor_timing("metadata", total_files)
 
         # Stage 2: Voice Activity Detection (Silero VAD - lightweight)
         if request.enable_vad:
+            start_extractor_timing("vad")
             update_batch_progress("vad", "Loading VAD model...", 0, total_files)
             for i, file_path in enumerate(files):
+                file_start = time.time()
                 update_batch_progress("vad", f"Analyzing {Path(file_path).name}", i + 1, total_files)
                 try:
                     vad_result = detect_voice_activity(file_path)
                     update_file_status(i, "running", "vad", vad_result)
                 except Exception as e:
                     logger.warning(f"VAD failed for {file_path}: {e}")
+                update_file_timing(i, "vad", time.time() - file_start)
             # Unload VAD model to free memory
             update_batch_progress("vad", "Unloading VAD model...", None, None)
             unload_vad_model()
+            end_extractor_timing("vad", total_files)
 
         # Stage 3: Scenes (PySceneDetect - moderate memory)
         if request.enable_scenes:
+            start_extractor_timing("scenes")
             update_batch_progress("scenes", "Detecting scenes...", 0, total_files)
             for i, file_path in enumerate(files):
+                file_start = time.time()
                 update_batch_progress("scenes", f"Processing {Path(file_path).name}", i + 1, total_files)
                 try:
                     scenes = extract_scenes(file_path)
                     update_file_status(i, "running", "scenes", scenes.model_dump() if scenes else None)
                 except Exception as e:
                     logger.warning(f"Scenes failed for {file_path}: {e}")
+                update_file_timing(i, "scenes", time.time() - file_start)
+            end_extractor_timing("scenes", total_files)
 
         # Stage 4: Transcript (Whisper - heavy model)
         if request.enable_transcript:
+            start_extractor_timing("transcript")
             # Clear memory before loading heavy model
             logger.info("Clearing memory before Whisper...")
             _clear_memory()
             update_batch_progress("transcript", "Loading Whisper model...", 0, total_files)
             for i, file_path in enumerate(files):
+                file_start = time.time()
                 update_batch_progress("transcript", f"Transcribing {Path(file_path).name}", i + 1, total_files)
                 try:
                     transcript = extract_transcript(
@@ -822,9 +900,11 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     update_file_status(i, "running", "transcript", transcript.model_dump() if transcript else None)
                 except Exception as e:
                     logger.warning(f"Transcript failed for {file_path}: {e}")
+                update_file_timing(i, "transcript", time.time() - file_start)
             # Unload Whisper to free memory
             update_batch_progress("transcript", "Unloading Whisper model...", None, None)
             unload_whisper_model()
+            end_extractor_timing("transcript", total_files)
 
         # Stage 5: Motion Analysis (for smart sampling of faces/objects/clip/ocr)
         # Store motion data per file for later use
@@ -842,8 +922,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             logger.info(f"Using {len(request.qwen_timestamps)} pre-computed timestamps, skipping motion analysis")
 
         if needs_motion:
+            start_extractor_timing("motion")
             update_batch_progress("motion", "Analyzing camera motion...", 0, total_files)
             for i, file_path in enumerate(files):
+                file_start = time.time()
                 update_batch_progress("motion", f"Analyzing {Path(file_path).name}", i + 1, total_files)
                 try:
                     motion = analyze_motion(file_path)
@@ -879,12 +961,15 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     # Fall back to None (will use default sampling)
                     motion_data[i] = None
                     adaptive_timestamps[i] = []
+                update_file_timing(i, "motion", time.time() - file_start)
+            end_extractor_timing("motion", total_files)
 
         # Stage 6: Objects (YOLO with motion-adaptive timestamps, or Qwen)
         # Store person timestamps for face detection
         person_timestamps: dict[int, list[float]] = {}  # file_idx -> timestamps where persons detected
 
         if request.enable_objects:
+            start_extractor_timing("objects")
             logger.info(f"Objects enabled. Detector type: {type(detector)}, value: {detector}, is QWEN: {detector == ObjectDetector.QWEN}")
             if detector == ObjectDetector.QWEN:
                 # Clear memory before loading heavy model
@@ -895,6 +980,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 logger.info(f"Qwen batch context: {request.context}")
 
                 for i, file_path in enumerate(files):
+                    file_start = time.time()
                     fname = Path(file_path).name
                     update_batch_progress("objects", f"Analyzing: {fname}", i + 1, total_files)
                     try:
@@ -923,6 +1009,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     except Exception as e:
                         logger.warning(f"Objects failed for {file_path}: {e}", exc_info=True)
                         person_timestamps[i] = []
+                    update_file_timing(i, "objects", time.time() - file_start)
                 # Unload Qwen to free memory
                 update_batch_progress("objects", "Unloading Qwen model...", None, None)
                 unload_qwen_model()
@@ -930,6 +1017,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 # YOLO with motion-adaptive timestamps
                 update_batch_progress("objects", "Detecting objects with YOLO...", 0, total_files)
                 for i, file_path in enumerate(files):
+                    file_start = time.time()
                     update_batch_progress("objects", f"Processing {Path(file_path).name}", i + 1, total_files)
                     try:
                         # Use motion-adaptive timestamps if available
@@ -951,14 +1039,18 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     except Exception as e:
                         logger.warning(f"Objects failed for {file_path}: {e}")
                         person_timestamps[i] = []
+                    update_file_timing(i, "objects", time.time() - file_start)
                 # Unload YOLO to free memory
                 update_batch_progress("objects", "Unloading YOLO model...", None, None)
                 unload_yolo_model()
+            end_extractor_timing("objects", total_files)
 
         # Stage 7: Faces (YOLO-triggered - only where persons detected)
         if request.enable_faces:
+            start_extractor_timing("faces")
             update_batch_progress("faces", "Detecting faces...", 0, total_files)
             for i, file_path in enumerate(files):
+                file_start = time.time()
                 update_batch_progress("faces", f"Processing {Path(file_path).name}", i + 1, total_files)
                 try:
                     # Smart sampling: use person timestamps from YOLO if available
@@ -1000,14 +1092,18 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         update_file_status(i, "running", "faces", {"count": 0, "unique_estimate": 0, "detections": []})
                 except Exception as e:
                     logger.warning(f"Faces failed for {file_path}: {e}")
+                update_file_timing(i, "faces", time.time() - file_start)
             # Unload face detection models to free memory
             update_batch_progress("faces", "Unloading face models...", None, None)
             unload_face_model()
+            end_extractor_timing("faces", total_files)
 
         # Stage 8: OCR (EasyOCR - moderate model) with motion-adaptive timestamps
         if request.enable_ocr:
+            start_extractor_timing("ocr")
             update_batch_progress("ocr", "Extracting text...", 0, total_files)
             for i, file_path in enumerate(files):
+                file_start = time.time()
                 update_batch_progress("ocr", f"Processing {Path(file_path).name}", i + 1, total_files)
                 try:
                     # Use motion-adaptive timestamps if available
@@ -1016,14 +1112,18 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     update_file_status(i, "running", "ocr", ocr.model_dump() if ocr else None)
                 except Exception as e:
                     logger.warning(f"OCR failed for {file_path}: {e}")
+                update_file_timing(i, "ocr", time.time() - file_start)
             # Unload OCR model to free memory
             update_batch_progress("ocr", "Unloading OCR model...", None, None)
             unload_ocr_model()
+            end_extractor_timing("ocr", total_files)
 
         # Stage 9: CLIP embeddings with motion-adaptive timestamps
         if request.enable_clip:
+            start_extractor_timing("clip")
             update_batch_progress("clip", "Extracting CLIP embeddings...", 0, total_files)
             for i, file_path in enumerate(files):
+                file_start = time.time()
                 update_batch_progress("clip", f"Processing {Path(file_path).name}", i + 1, total_files)
                 try:
                     # Use motion-adaptive timestamps if available
@@ -1035,9 +1135,11 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         update_file_status(i, "running", "clip", None)
                 except Exception as e:
                     logger.warning(f"CLIP failed for {file_path}: {e}")
+                update_file_timing(i, "clip", time.time() - file_start)
             # Unload CLIP model to free memory
             update_batch_progress("clip", "Unloading CLIP model...", None, None)
             unload_clip_model()
+            end_extractor_timing("clip", total_files)
 
         # Mark all files as completed
         with batch_jobs_lock:
@@ -1050,6 +1152,15 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             batch_jobs[batch_id].current_extractor = None
             batch_jobs[batch_id].progress = None
             batch_jobs[batch_id].completed_at = datetime.now(timezone.utc)
+            # Final metrics
+            batch_jobs[batch_id].elapsed_seconds = round(time.time() - batch_start_time, 2)
+            batch_jobs[batch_id].memory_mb = _get_memory_mb()
+            batch_jobs[batch_id].peak_memory_mb = max(peak_memory, _get_memory_mb())
+
+        # Log timing summary
+        logger.info(f"Batch {batch_id} completed in {batch_jobs[batch_id].elapsed_seconds}s, peak memory: {batch_jobs[batch_id].peak_memory_mb}MB")
+        for timing in batch_jobs[batch_id].extractor_timings:
+            logger.info(f"  {timing.extractor}: {timing.duration_seconds}s ({timing.files_processed} files)")
 
     except Exception as e:
         logger.error(f"Batch {batch_id} failed: {e}")
@@ -1057,6 +1168,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             if batch_id in batch_jobs:
                 batch_jobs[batch_id].status = "failed"
                 batch_jobs[batch_id].completed_at = datetime.now(timezone.utc)
+                batch_jobs[batch_id].elapsed_seconds = round(time.time() - batch_start_time, 2)
+                batch_jobs[batch_id].memory_mb = _get_memory_mb()
+                batch_jobs[batch_id].peak_memory_mb = peak_memory
 
 
 @app.post("/batch")

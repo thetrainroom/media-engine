@@ -9,6 +9,11 @@ from fastapi.testclient import TestClient
 from polybos_engine.main import app
 
 
+def pytest_configure(config):
+    """Register custom markers."""
+    config.addinivalue_line("markers", "slow: marks tests as slow (deselect with '-m \"not slow\"')")
+
+
 @pytest.fixture
 def client():
     """FastAPI test client."""
