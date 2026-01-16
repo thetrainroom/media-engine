@@ -59,8 +59,6 @@ from polybos_engine.schemas import (
     HealthResponse,
     MotionResult,
     MotionSegment,
-    Pass2Request,
-    Pass2Response,
     TelemetryResult,
 )
 
@@ -1679,103 +1677,6 @@ async def telemetry_gpx(
         content=gpx_content,
         media_type="application/gpx+xml",
         headers={"Content-Disposition": f"attachment; filename={file_path.stem}.gpx"},
-    )
-
-
-# ============================================================================
-# Pass 2: Context-Aware AI Processing
-# ============================================================================
-
-
-@app.post("/pass2", response_model=Pass2Response)
-async def process_pass2(request: Pass2Request):
-    """Run Pass 2 context-aware AI processing.
-
-    Pass 2 runs after user review and includes:
-    1. Whisper transcription (full transcription with timestamps)
-    2. Qwen VLM scene descriptions on motion-selected frames
-
-    The calling application (e.g., Polybos Archive) can use these results
-    to generate summaries via its own LLM integration.
-    """
-    file_path = Path(request.file)
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {request.file}")
-
-    logger.info(f"Starting Pass 2 for: {file_path.name}")
-
-    transcript = None
-    qwen_descriptions: list[str] | None = None
-
-    # 1. Whisper transcription (if enabled)
-    if request.enable_whisper:
-        try:
-            logger.info("Running Whisper transcription...")
-            # Clear memory before loading Whisper model
-            _clear_memory()
-            transcript_result = extract_transcript(
-                request.file,
-                model=request.whisper_model,
-            )
-            if transcript_result:
-                transcript = transcript_result
-                logger.info(f"Transcription complete: {len(transcript.segments)} segments")
-            # Unload Whisper to free memory for Qwen
-            from .extractors.transcribe import unload_whisper_model
-            unload_whisper_model()
-            _clear_memory()
-        except Exception as e:
-            logger.warning(f"Whisper failed: {e}")
-
-    # 2. Qwen VLM scene descriptions (if enabled)
-    if request.enable_qwen:
-        try:
-            logger.info("Running Qwen scene descriptions...")
-            # Clear memory before loading Qwen model
-            _clear_memory()
-
-            # Use provided timestamps or select from motion data
-            timestamps = request.qwen_timestamps
-            if timestamps is None and request.motion_data:
-                # Extract timestamps from motion data segments
-                segments = request.motion_data.get("segments", [])
-                if segments:
-                    # Pick one frame from each segment
-                    timestamps = [
-                        (seg.get("start", 0) + seg.get("end", 0)) / 2
-                        for seg in segments[:5]  # Max 5 frames
-                    ]
-
-            # Build context for Qwen
-            qwen_context: dict[str, str] = {}
-            if request.faces:
-                qwen_context["person"] = ", ".join(request.faces)
-            if request.location:
-                qwen_context["location"] = request.location
-            if request.notes:
-                qwen_context["topic"] = request.notes
-
-            objects_result = extract_objects_qwen(
-                request.file,
-                timestamps=timestamps,
-                context=qwen_context if qwen_context else None,
-            )
-            if objects_result and objects_result.descriptions:
-                qwen_descriptions = objects_result.descriptions
-                logger.info(f"Qwen complete: {len(qwen_descriptions)} descriptions")
-
-            # Unload Qwen to free memory
-            from .extractors.objects_qwen import unload_qwen_model
-            unload_qwen_model()
-            _clear_memory()
-        except Exception as e:
-            logger.warning(f"Qwen failed: {e}")
-
-    logger.info(f"Pass 2 complete for: {file_path.name}")
-
-    return Pass2Response(
-        transcript=transcript,
-        qwen_descriptions=qwen_descriptions,
     )
 
 
