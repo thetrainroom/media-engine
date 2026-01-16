@@ -301,6 +301,9 @@
                     </div>
                     <span class="card-title">Location</span>
                     <span id="locationName" class="text-gray-400 font-normal text-sm"></span>
+                    <button id="exportGpxBtn" class="hidden ml-auto text-xs bg-green-600 hover:bg-green-500 px-3 py-1 rounded transition">
+                        Export GPX
+                    </button>
                 </div>
                 <div id="map"></div>
             </div>
@@ -440,7 +443,10 @@
     </div>
 
     <script>
-        const API_URL = 'http://localhost:8001';
+        // Engine API (extraction endpoints)
+        const ENGINE_URL = 'http://localhost:8001';
+        // Demo server (file browsing and video streaming)
+        const DEMO_URL = 'http://localhost:8002';
         let map = null;
         let currentFile = null;
 
@@ -533,7 +539,7 @@
             selectedPath = null;
 
             try {
-                const response = await fetch(`${API_URL}/browse?path=${encodeURIComponent(path)}`);
+                const response = await fetch(`${DEMO_URL}/browse?path=${encodeURIComponent(path)}`);
                 if (!response.ok) {
                     const err = await response.json();
                     throw new Error(err.detail);
@@ -616,8 +622,9 @@
             showProcessing(filename);
 
             try {
-                const requestBody = {
-                    file: filePath,
+                // Build batch request (telemetry is always extracted automatically)
+                const batchRequest = {
+                    files: [filePath],
                     enable_metadata: enableMetadata,
                     enable_scenes: enableScenes,
                     enable_faces: enableFaces,
@@ -627,15 +634,15 @@
                     enable_ocr: enableOcr,
                     enable_motion: enableMotion,
                     object_detector: objectDetector,
-                    context: Object.keys(context).length > 0 ? context : null,
+                    contexts: Object.keys(context).length > 0 ? { [filePath]: context } : null,
                     context_hint: contextHint,
                     qwen_timestamps: getTimestampsFromInput()
                 };
 
-                const createResponse = await fetch(`${API_URL}/jobs`, {
+                const createResponse = await fetch(`${ENGINE_URL}/batch`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(requestBody)
+                    body: JSON.stringify(batchRequest)
                 });
 
                 if (!createResponse.ok) {
@@ -643,56 +650,62 @@
                     throw new Error(err.detail || `API error: ${createResponse.status}`);
                 }
 
-                const { job_id } = await createResponse.json();
-                console.log('Job created:', job_id);
+                const { batch_id } = await createResponse.json();
+                console.log('Batch created:', batch_id);
 
                 // Poll for status
-                let jobData = null;
+                let batchData = null;
                 while (true) {
-                    const statusResponse = await fetch(`${API_URL}/jobs/${job_id}`);
+                    const statusResponse = await fetch(`${ENGINE_URL}/batch/${batch_id}`);
                     if (!statusResponse.ok) {
-                        throw new Error('Failed to get job status');
+                        throw new Error('Failed to get batch status');
                     }
 
-                    jobData = await statusResponse.json();
-                    updateJobProgress(jobData);
+                    batchData = await statusResponse.json();
+                    updateBatchProgress(batchData);
 
-                    if (jobData.status === 'completed' || jobData.status === 'failed') {
+                    if (batchData.status === 'completed' || batchData.status === 'failed') {
                         break;
                     }
 
                     await new Promise(resolve => setTimeout(resolve, 500));
                 }
 
-                if (jobData.status === 'failed') {
-                    throw new Error(jobData.error || 'Extraction failed');
+                if (batchData.status === 'failed') {
+                    throw new Error(batchData.error || 'Extraction failed');
                 }
 
+                // Get results from first file in batch
+                const fileResults = batchData.files[0]?.results || {};
+
                 // Merge with previous results (for incremental runs)
-                const mergedResults = { ...lastResults, ...jobData.results };
+                const mergedResults = { ...lastResults, ...fileResults };
                 lastResults = mergedResults;
 
-                const mergedJobData = { ...jobData, results: mergedResults };
-                showJobResults(mergedJobData, filePath);
+                showBatchResults(batchData, mergedResults, filePath);
 
             } catch (error) {
                 showError(error.message);
             }
         }
 
-        function updateJobProgress(jobData) {
-            // Mark completed steps
-            for (const step of jobData.completed_steps) {
+        function updateBatchProgress(batchData) {
+            // For batch API, track extractor completion via extractor_timings
+            const completedExtractors = batchData.extractor_timings
+                ?.filter(t => t.completed_at)
+                ?.map(t => t.extractor) || [];
+
+            for (const step of completedExtractors) {
                 updateStep(step, 'done');
             }
 
-            // Mark current step as active with progress info
-            if (jobData.current_step) {
-                updateStep(jobData.current_step, 'active', jobData.progress);
+            // Mark current extractor as active with progress info
+            if (batchData.current_extractor) {
+                updateStep(batchData.current_extractor, 'active', batchData.progress);
             }
 
-            // Update results display as they come in
-            const r = jobData.results;
+            // Update results display as they come in (from first file in batch)
+            const r = batchData.files[0]?.results || {};
 
             // Metadata
             if (r.metadata && !document.getElementById('metadataContent').dataset.filled) {
@@ -700,7 +713,7 @@
             }
 
             // Transcript
-            if (jobData.completed_steps.includes('transcript')) {
+            if (completedExtractors.includes('transcript')) {
                 if (r.transcript && r.transcript.segments && r.transcript.segments.length > 0) {
                     document.getElementById('transcriptLang').textContent =
                         `${r.transcript.language.toUpperCase()} (${Math.round(r.transcript.confidence * 100)}%)`;
@@ -714,7 +727,7 @@
             }
 
             // Scenes
-            if (jobData.completed_steps.includes('scenes')) {
+            if (completedExtractors.includes('scenes')) {
                 const count = r.scenes?.count || 0;
                 document.getElementById('sceneCount').textContent = count;
                 document.getElementById('sceneCount').className = 'bg-purple-500 text-white text-xs px-2 py-1 rounded-full ml-2';
@@ -725,7 +738,7 @@
             }
 
             // Faces
-            if (jobData.completed_steps.includes('faces')) {
+            if (completedExtractors.includes('faces')) {
                 const count = r.faces?.count || 0;
                 const unique = r.faces?.unique_estimate || 0;
                 document.getElementById('faceCount').textContent = count;
@@ -765,7 +778,7 @@
             }
 
             // Objects
-            if (jobData.completed_steps.includes('objects') && r.objects?.summary) {
+            if (completedExtractors.includes('objects') && r.objects?.summary) {
                 const entries = Object.entries(r.objects.summary);
                 if (entries.length > 0) {
                     document.getElementById('objectsList').innerHTML = entries
@@ -788,23 +801,23 @@
                 } else {
                     descriptionsSection.classList.add('hidden');
                 }
-            } else if (jobData.completed_steps.includes('objects')) {
+            } else if (completedExtractors.includes('objects')) {
                 document.getElementById('objectsList').innerHTML = '<p class="empty-state w-full">No objects detected</p>';
                 document.getElementById('descriptionsSection').classList.add('hidden');
             }
 
             // OCR
-            if (jobData.completed_steps.includes('ocr') && r.ocr?.detections?.length > 0) {
+            if (completedExtractors.includes('ocr') && r.ocr?.detections?.length > 0) {
                 const texts = [...new Set(r.ocr.detections.map(d => d.text))].slice(0, 10);
                 document.getElementById('ocrContent').innerHTML = texts.map(t =>
                     `<div class="bg-teal-500/10 border border-teal-500/20 px-3 py-2 rounded-lg text-sm text-teal-200">"${t}"</div>`
                 ).join('');
-            } else if (jobData.completed_steps.includes('ocr')) {
+            } else if (completedExtractors.includes('ocr')) {
                 document.getElementById('ocrContent').innerHTML = '<p class="text-gray-500">No text detected</p>';
             }
 
             // Motion
-            if (jobData.completed_steps.includes('motion') && r.motion) {
+            if (completedExtractors.includes('motion') && r.motion) {
                 const m = r.motion;
                 document.getElementById('motionPrimary').textContent = m.primary_motion.replace('_', ' ');
 
@@ -869,7 +882,7 @@
                 }
 
                 document.getElementById('motionContent').innerHTML = html;
-            } else if (jobData.completed_steps.includes('motion')) {
+            } else if (completedExtractors.includes('motion')) {
                 document.getElementById('motionContent').innerHTML = '<p class="text-gray-500">No motion data</p>';
             }
         }
@@ -982,22 +995,25 @@
             return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
         }
 
-        function showJobResults(jobData, filePath) {
-            // Convert job results to the format showResults expects
+        function showBatchResults(batchData, mergedResults, filePath) {
+            // Convert batch results to the format showResults expects
             const data = {
-                metadata: jobData.results.metadata,
-                transcript: jobData.results.transcript,
-                faces: jobData.results.faces,
-                scenes: jobData.results.scenes,
-                objects: jobData.results.objects,
-                ocr: jobData.results.ocr,
-                motion: jobData.results.motion,
+                metadata: mergedResults.metadata,
+                transcript: mergedResults.transcript,
+                faces: mergedResults.faces,
+                scenes: mergedResults.scenes,
+                objects: mergedResults.objects,
+                ocr: mergedResults.ocr,
+                motion: mergedResults.motion,
             };
 
-            // Track which steps completed (even if null result)
-            const completedSteps = new Set(jobData.completed_steps);
+            // Track which extractors completed
+            const completedExtractors = batchData.extractor_timings
+                ?.filter(t => t.completed_at)
+                ?.map(t => t.extractor) || [];
+            const completedSteps = new Set(completedExtractors);
 
-            const telemetry = jobData.results.telemetry;
+            const telemetry = mergedResults.telemetry;
             showResults(data, telemetry, filePath, completedSteps);
         }
 
@@ -1137,8 +1153,8 @@
             // Helper to check if step failed (completed but no result)
             const stepFailed = (step, result) => completedSteps.has(step) && !result;
 
-            // Video player - use streaming endpoint
-            document.getElementById('videoPlayer').src = `${API_URL}/video?file=${encodeURIComponent(filePath)}`;
+            // Video player - use demo server streaming endpoint
+            document.getElementById('videoPlayer').src = `${DEMO_URL}/video?file=${encodeURIComponent(filePath)}`;
 
             // Metadata
             const meta = data.metadata;
@@ -1154,6 +1170,9 @@
                 }).addTo(map);
                 L.marker([meta.gps.latitude, meta.gps.longitude]).addTo(map);
 
+                // Store telemetry for GPX export
+                currentTelemetry = telemetry;
+
                 // Add flight path if telemetry available
                 if (telemetry && telemetry.points && telemetry.points.length > 1) {
                     const coords = telemetry.points
@@ -1163,7 +1182,14 @@
                         L.polyline(coords, {color: '#3b82f6', weight: 3}).addTo(map);
                         map.fitBounds(coords);
                     }
+                    // Show GPX export button
+                    document.getElementById('exportGpxBtn').classList.remove('hidden');
+                } else {
+                    document.getElementById('exportGpxBtn').classList.add('hidden');
                 }
+            } else {
+                currentTelemetry = null;
+                document.getElementById('exportGpxBtn').classList.add('hidden');
             }
 
             // Transcript
@@ -1445,6 +1471,47 @@
             video.currentTime = time;
             video.play();
         }
+
+        // Store current telemetry for GPX export
+        let currentTelemetry = null;
+
+        function exportGpx(telemetry, filename) {
+            if (!telemetry?.points?.length) return;
+
+            let gpx = '<?xml version="1.0" encoding="UTF-8"?>\n';
+            gpx += '<gpx version="1.1" creator="Polybos Media Engine">\n';
+            gpx += '  <trk>\n';
+            gpx += '    <name>Flight Path</name>\n';
+            gpx += '    <trkseg>\n';
+
+            for (const pt of telemetry.points) {
+                gpx += `      <trkpt lat="${pt.latitude}" lon="${pt.longitude}">`;
+                if (pt.altitude) gpx += `<ele>${pt.altitude}</ele>`;
+                gpx += '</trkpt>\n';
+            }
+
+            gpx += '    </trkseg>\n';
+            gpx += '  </trk>\n';
+            gpx += '</gpx>';
+
+            // Download as file
+            const blob = new Blob([gpx], { type: 'application/gpx+xml' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename.replace(/\.[^.]+$/, '.gpx');
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        // Set up GPX export button
+        document.getElementById('exportGpxBtn').addEventListener('click', () => {
+            if (currentTelemetry && selectedPath) {
+                exportGpx(currentTelemetry, selectedPath.split('/').pop());
+            }
+        });
     </script>
 </body>
 </html>

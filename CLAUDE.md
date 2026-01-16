@@ -37,34 +37,60 @@ export TEST_VIDEO_PATH=/path/to/test.mp4
 pytest tests/
 pytest tests/test_metadata.py -v          # Single test file
 pytest -m "not slow"                       # Skip slow tests
+
+# Run demo (starts both engine and demo server)
+./demo/run.sh start       # Start both servers
+./demo/run.sh stop        # Stop both servers
+./demo/run.sh status      # Check status
 ```
+
+## Demo
+
+The demo frontend requires two servers:
+- **Engine** (port 8001): The main extraction API
+- **Demo server** (port 8002): File browsing and video streaming
+
+```bash
+# Start both servers
+./demo/run.sh start
+
+# Or manually:
+python3.12 -m uvicorn polybos_engine.main:app --port 8001
+python3.12 demo/server.py
+```
+
+Then open http://localhost:8002 in your browser.
 
 ## API Endpoints
 
 ```
-POST /extract      # Main extraction endpoint
+POST /batch        # Batch extraction (recommended, memory-efficient)
+GET  /batch/{id}   # Get batch status and results
+POST /extract      # Synchronous extraction (single file)
 GET  /health       # Health check
 GET  /extractors   # List available extractors
+GET  /hardware     # Get hardware capabilities and auto-selected models
 ```
 
-### Extract Request Example
+### Batch Request Example (Recommended)
 
 ```bash
-curl -X POST http://localhost:8000/extract \
+curl -X POST http://localhost:8001/batch \
   -H "Content-Type: application/json" \
   -d '{
-    "file": "/path/to/video.mp4",
-    "skip_transcript": false,
-    "skip_faces": false,
-    "skip_scenes": false,
-    "skip_objects": false,
-    "skip_clip": false,
-    "skip_ocr": false,
-    "whisper_model": "large-v3",
-    "face_sample_fps": 1.0,
-    "object_sample_fps": 2.0
+    "files": ["/path/to/video.mp4"],
+    "enable_metadata": true,
+    "enable_transcript": false,
+    "enable_scenes": false,
+    "enable_faces": false,
+    "enable_objects": false,
+    "enable_clip": false,
+    "enable_ocr": false,
+    "enable_motion": false
   }'
 ```
+
+**Note:** Telemetry (GPS/flight path) is always extracted automatically when available.
 
 ## Architecture
 
@@ -73,7 +99,7 @@ curl -X POST http://localhost:8000/extract \
 ```
 polybos_engine/
 ├── __init__.py          # Version
-├── main.py              # FastAPI app with /extract and /health
+├── main.py              # FastAPI app with /batch, /extract, /health
 ├── config.py            # Settings and platform detection
 ├── schemas.py           # Pydantic request/response models
 └── extractors/
@@ -89,6 +115,7 @@ polybos_engine/
     │   ├── blackmagic.py # Blackmagic cameras
     │   ├── ffmpeg.py    # FFmpeg-encoded files (OBS, etc.)
     │   └── generic.py   # Fallback for unknown devices
+    ├── telemetry.py     # GPS/flight path from SRT sidecars
     ├── transcribe.py    # Whisper with MLX/CUDA/CPU backends
     ├── faces.py         # DeepFace + Facenet for detection and embeddings
     ├── scenes.py        # PySceneDetect ContentDetector
@@ -98,6 +125,11 @@ polybos_engine/
     ├── ocr.py           # PaddleOCR text extraction
     ├── motion.py        # Camera motion analysis (optical flow)
     └── shot_type.py     # CLIP-based shot classification
+
+demo/
+├── index.html           # Demo frontend (single-page app)
+├── server.py            # Demo server (file browsing, video streaming)
+└── run.sh               # Start/stop script for both servers
 ```
 
 ### Platform Detection Pattern
@@ -126,16 +158,18 @@ else:
 
 ## Extractors
 
-| Extractor | Skip Flag | Output |
-|-----------|-----------|--------|
-| metadata | (always runs) | duration, resolution, codec, fps, device, GPS |
-| transcript | skip_transcript | segments with timestamps, language detection, speaker diarization |
-| scenes | skip_scenes | scene boundaries with start/end times |
-| faces | skip_faces | bounding boxes, embeddings, unique count estimate |
-| objects | skip_objects | labels, bounding boxes, summary counts |
-| clip | skip_clip | per-scene embeddings for similarity search |
-| ocr | skip_ocr | detected text with bounding boxes |
-| shot_type | (uses skip_clip) | aerial, interview, b-roll, studio, etc. |
+| Extractor | Enable Flag | Output |
+|-----------|-------------|--------|
+| metadata | enable_metadata | duration, resolution, codec, fps, device, GPS |
+| telemetry | (always runs) | GPS/flight path from drone sidecar files |
+| transcript | enable_transcript | segments with timestamps, language detection, speaker diarization |
+| scenes | enable_scenes | scene boundaries with start/end times |
+| faces | enable_faces | bounding boxes, embeddings, unique count estimate |
+| objects | enable_objects | labels, bounding boxes, summary counts (YOLO or Qwen) |
+| clip | enable_clip | per-scene embeddings for similarity search |
+| ocr | enable_ocr | detected text with bounding boxes |
+| motion | enable_motion | camera motion analysis (pan, tilt, zoom, handheld) |
+| shot_type | (part of metadata) | aerial, interview, b-roll, studio, etc. |
 
 ## Configuration
 

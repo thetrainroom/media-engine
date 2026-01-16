@@ -20,10 +20,8 @@ logging.basicConfig(
     ]
 )
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from polybos_engine import __version__
@@ -59,7 +57,6 @@ from polybos_engine.schemas import (
     HealthResponse,
     MotionResult,
     MotionSegment,
-    TelemetryResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -109,19 +106,14 @@ app = FastAPI(
     version=__version__,
 )
 
-# Add CORS middleware for demo frontend
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins for demo
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Serve demo frontend
-demo_path = Path(__file__).parent.parent / "demo"
-if demo_path.exists():
-    app.mount("/demo", StaticFiles(directory=str(demo_path), html=True), name="demo")
 
 
 # ============================================================================
@@ -181,7 +173,7 @@ async def shutdown_engine():
 
 
 # ============================================================================
-# Job Queue System
+# Batch Job System (extractor-first processing for memory efficiency)
 # ============================================================================
 
 class JobProgress(BaseModel):
@@ -191,421 +183,8 @@ class JobProgress(BaseModel):
     total: int | None = None
 
 
-class JobStatus(BaseModel):
-    """Status of an extraction job."""
-    job_id: str
-    status: str  # pending, running, completed, failed
-    file: str
-    filename: str
-    current_step: str | None = None
-    progress: JobProgress | None = None  # Progress within current step
-    completed_steps: list[str] = []
-    results: dict[str, Any] = {}
-    error: str | None = None
-    created_at: datetime
-    completed_at: datetime | None = None
-
-
-# In-memory job store (use Redis in production)
-jobs: dict[str, JobStatus] = {}
-jobs_lock = threading.Lock()
-
 # Job TTL for automatic cleanup (1 hour)
 JOB_TTL_SECONDS = 3600
-
-
-def _cleanup_expired_jobs() -> int:
-    """Remove completed/failed jobs older than TTL.
-
-    Returns:
-        Number of jobs removed
-    """
-    now = datetime.now(timezone.utc)
-    removed = 0
-
-    with jobs_lock:
-        expired = [
-            jid for jid, job in jobs.items()
-            if job.status in ("completed", "failed")
-            and job.completed_at is not None
-            and (now - job.completed_at).total_seconds() > JOB_TTL_SECONDS
-        ]
-        for jid in expired:
-            del jobs[jid]
-            removed += 1
-
-    if removed > 0:
-        logger.info(f"Cleaned up {removed} expired jobs")
-
-    return removed
-
-
-def _build_qwen_context(results: dict[str, Any]) -> dict[str, str] | None:
-    """Build context for Qwen from earlier extraction results.
-
-    Extracts relevant information from metadata, transcript, faces, etc.
-    to provide context for more accurate scene descriptions.
-    """
-    context: dict[str, str] = {}
-
-    # From metadata
-    metadata = results.get("metadata")
-    if metadata:
-        # Device info
-        device = metadata.get("device")
-        if device and device.get("make"):
-            device_str = device.get("make", "")
-            if device.get("model"):
-                device_str += f" {device['model']}"
-            if device_str:
-                context["device"] = device_str
-
-        # Shot type
-        shot_type = metadata.get("shot_type")
-        if shot_type and shot_type.get("primary"):
-            context["shot_type"] = shot_type["primary"]
-
-        # GPS location
-        gps = metadata.get("gps")
-        if gps and gps.get("latitude"):
-            context["coordinates"] = f"{gps['latitude']:.4f}, {gps['longitude']:.4f}"
-
-    # From transcript
-    transcript = results.get("transcript")
-    if transcript:
-        # Language
-        lang = transcript.get("language")
-        if lang and isinstance(lang, str):
-            # Map language codes to readable names
-            lang_names = {
-                "en": "English", "de": "German", "fr": "French",
-                "es": "Spanish", "it": "Italian", "no": "Norwegian",
-                "sv": "Swedish", "da": "Danish", "nl": "Dutch",
-                "ja": "Japanese", "zh": "Chinese", "ko": "Korean",
-            }
-            context["language"] = lang_names.get(lang, lang)
-
-        # Speaker count
-        speaker_count = transcript.get("speaker_count")
-        if speaker_count and speaker_count > 0:
-            context["speakers"] = f"{speaker_count} speaker(s)"
-
-    # From faces (could be matched to database in future)
-    faces = results.get("faces")
-    if faces:
-        unique_count = faces.get("unique_estimate", 0)
-        if unique_count > 0:
-            context["people_visible"] = f"{unique_count} person(s)"
-
-    # Return None if no context was found
-    return context if context else None
-
-
-def run_extraction_job(
-    job_id: str,
-    request: ExtractRequest,
-) -> None:
-    """Run extraction in background thread."""
-    settings = get_settings()
-    file_path = request.file
-    # Use proxy file for frame-based analysis if provided
-    analysis_file = request.proxy_file or request.file
-    # Use request parameter or fall back to settings
-    # Resolve object detector (handles "auto")
-    detector = request.object_detector or settings.get_object_detector()
-    context = request.context
-
-    def update_step(step: str) -> None:
-        with jobs_lock:
-            if job_id in jobs:
-                jobs[job_id].current_step = step
-                jobs[job_id].progress = None
-
-    def update_progress(message: str, current: int | None = None, total: int | None = None) -> None:
-        """Update progress within current step."""
-        with jobs_lock:
-            if job_id in jobs:
-                jobs[job_id].progress = JobProgress(
-                    message=message, current=current, total=total
-                )
-
-    def complete_step(step: str, result: Any) -> None:
-        with jobs_lock:
-            if job_id in jobs:
-                jobs[job_id].completed_steps.append(step)
-                jobs[job_id].current_step = None
-                jobs[job_id].progress = None
-                if result is not None:
-                    jobs[job_id].results[step] = result
-
-    try:
-        with jobs_lock:
-            jobs[job_id].status = "running"
-
-        # Metadata
-        if request.enable_metadata:
-            update_step("metadata")
-            metadata = extract_metadata(file_path)
-            complete_step("metadata", metadata.model_dump())
-
-            # Shot type (part of metadata) - uses frames
-            update_step("shot_type")
-            try:
-                from polybos_engine.extractors.shot_type import detect_shot_type
-                shot_type = detect_shot_type(analysis_file)
-                if shot_type:
-                    complete_step("shot_type", shot_type.model_dump())
-                else:
-                    complete_step("shot_type", None)
-            except Exception as e:
-                logger.warning(f"Shot type failed: {e}")
-                complete_step("shot_type", None)
-
-        # Scenes (frame-based)
-        if request.enable_scenes:
-            update_step("scenes")
-            try:
-                scenes = extract_scenes(analysis_file)
-                complete_step("scenes", scenes.model_dump() if scenes else None)
-            except Exception as e:
-                logger.warning(f"Scenes failed: {e}")
-                complete_step("scenes", None)
-
-        # Transcript (audio-based)
-        if request.enable_transcript:
-            update_step("transcript")
-            try:
-                transcript = extract_transcript(
-                    analysis_file,
-                    model=request.whisper_model,
-                    language=request.language,
-                    fallback_language=request.fallback_language,
-                    language_hints=request.language_hints,
-                    context_hint=request.context_hint,
-                    progress_callback=update_progress,
-                )
-                complete_step("transcript", transcript.model_dump() if transcript else None)
-            except Exception as e:
-                logger.warning(f"Transcript failed: {e}")
-                complete_step("transcript", None)
-
-        # Faces (frame-based)
-        if request.enable_faces:
-            update_step("faces")
-            try:
-                # Get scene detections for better sampling
-                scene_detections = None
-                if "scenes" in jobs[job_id].results and jobs[job_id].results["scenes"]:
-                    from polybos_engine.schemas import SceneDetection
-                    scene_data = jobs[job_id].results["scenes"]
-                    scene_detections = [
-                        SceneDetection(**s) for s in scene_data.get("detections", [])
-                    ]
-
-                faces = extract_faces(
-                    analysis_file,
-                    scenes=scene_detections,
-                    sample_fps=request.face_sample_fps,
-                )
-                # Exclude embeddings from job results (too large for JSON polling)
-                if faces:
-                    faces_data = {
-                        "count": faces.count,
-                        "unique_estimate": faces.unique_estimate,
-                        "detections": [
-                            {
-                                "timestamp": d.timestamp,
-                                "bbox": d.bbox.model_dump(),
-                                "confidence": d.confidence,
-                                "image_base64": d.image_base64,
-                                "needs_review": d.needs_review,
-                                "review_reason": d.review_reason,
-                            }
-                            for d in faces.detections
-                        ],
-                    }
-                    complete_step("faces", faces_data)
-                else:
-                    complete_step("faces", None)
-            except Exception as e:
-                logger.warning(f"Faces failed: {e}")
-                complete_step("faces", None)
-
-        # Motion analysis (frame-based)
-        if request.enable_motion:
-            update_step("motion")
-            try:
-                motion_analysis = analyze_motion(analysis_file)
-                motion_result = MotionResult(
-                    duration=motion_analysis.duration,
-                    fps=motion_analysis.fps,
-                    primary_motion=str(motion_analysis.primary_motion),
-                    segments=[
-                        MotionSegment(
-                            start=s.start,
-                            end=s.end,
-                            motion_type=str(s.motion_type),
-                            intensity=s.intensity,
-                        )
-                        for s in motion_analysis.segments
-                    ],
-                    avg_intensity=motion_analysis.avg_intensity,
-                    is_stable=motion_analysis.is_stable,
-                )
-                complete_step("motion", motion_result.model_dump())
-                logger.info(f"Motion: {motion_result.primary_motion}, {len(motion_result.segments)} segments")
-            except Exception as e:
-                logger.warning(f"Motion analysis failed: {e}")
-                complete_step("motion", None)
-
-        # Objects (frame-based, use configurable detector)
-        if request.enable_objects:
-            update_step("objects")
-            try:
-                # Get scene detections for scene-aware sampling
-                scene_detections = None
-                if "scenes" in jobs[job_id].results and jobs[job_id].results["scenes"]:
-                    from polybos_engine.schemas import SceneDetection
-                    scene_data = jobs[job_id].results["scenes"]
-                    scene_detections = [
-                        SceneDetection(**s) for s in scene_data.get("detections", [])
-                    ]
-
-                # Use configured detector (yolo or qwen)
-                if detector == ObjectDetector.QWEN:
-                    # Use passed context, or build from earlier extraction results
-                    qwen_context = context or _build_qwen_context(jobs[job_id].results)
-
-                    # Use timestamps from request (frontend decides)
-                    timestamps = request.qwen_timestamps
-                    if timestamps:
-                        logger.info(f"Using {len(timestamps)} timestamps from request")
-                    else:
-                        logger.info("No timestamps provided, Qwen will sample from middle")
-
-                    objects = extract_objects_qwen(
-                        analysis_file,
-                        timestamps=timestamps,
-                        context=qwen_context,
-                        progress_callback=update_progress,
-                    )
-                else:
-                    objects = extract_objects(analysis_file, scenes=scene_detections)
-
-                # Only include summary for job polling (full detections too large)
-                if objects:
-                    objects_data: dict[str, Any] = {"summary": objects.summary}
-                    if objects.descriptions:
-                        objects_data["descriptions"] = objects.descriptions
-                    complete_step("objects", objects_data)
-                else:
-                    complete_step("objects", None)
-            except Exception as e:
-                logger.warning(f"Objects failed: {e}")
-                complete_step("objects", None)
-
-        # CLIP (frame-based)
-        if request.enable_clip:
-            update_step("clip")
-            try:
-                embeddings = extract_clip(analysis_file)
-                complete_step("clip", {"count": len(embeddings.segments)} if embeddings else None)
-            except Exception as e:
-                logger.warning(f"CLIP failed: {e}")
-                complete_step("clip", None)
-
-        # OCR (frame-based)
-        if request.enable_ocr:
-            update_step("ocr")
-            try:
-                ocr = extract_ocr(analysis_file)
-                complete_step("ocr", ocr.model_dump() if ocr else None)
-            except Exception as e:
-                logger.warning(f"OCR failed: {e}")
-                complete_step("ocr", None)
-
-        # Telemetry
-        update_step("telemetry")
-        try:
-            telemetry = extract_telemetry(file_path)
-            complete_step("telemetry", telemetry.model_dump() if telemetry else None)
-        except Exception as e:
-            logger.warning(f"Telemetry failed: {e}")
-            complete_step("telemetry", None)
-
-        with jobs_lock:
-            jobs[job_id].status = "completed"
-            jobs[job_id].completed_at = datetime.now(timezone.utc)
-
-    except Exception as e:
-        logger.error(f"Job {job_id} failed: {e}")
-        with jobs_lock:
-            if job_id in jobs:
-                jobs[job_id].status = "failed"
-                jobs[job_id].error = str(e)
-                jobs[job_id].completed_at = datetime.now(timezone.utc)
-
-
-@app.post("/jobs")
-async def create_job(request: ExtractRequest) -> dict[str, str]:
-    """Create a new extraction job."""
-    # Cleanup expired jobs on new job creation (lazy cleanup)
-    _cleanup_expired_jobs()
-
-    file_path = Path(request.file)
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {request.file}")
-
-    job_id = str(uuid.uuid4())[:8]
-    job = JobStatus(
-        job_id=job_id,
-        status="pending",
-        file=request.file,
-        filename=file_path.name,
-        created_at=datetime.now(timezone.utc),
-    )
-
-    with jobs_lock:
-        jobs[job_id] = job
-
-    # Start background thread
-    thread = threading.Thread(
-        target=run_extraction_job,
-        args=(job_id, request)
-    )
-    thread.start()
-
-    return {"job_id": job_id}
-
-
-@app.get("/jobs/{job_id}")
-async def get_job(job_id: str) -> JobStatus:
-    """Get job status and partial results."""
-    with jobs_lock:
-        if job_id not in jobs:
-            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-        return jobs[job_id]
-
-
-@app.delete("/jobs/{job_id}")
-async def delete_job(job_id: str) -> dict[str, str]:
-    """Delete a job and free its memory.
-
-    Jobs can be deleted at any time, but deleting a running job
-    will not stop its processing - it will just remove the status.
-    """
-    with jobs_lock:
-        if job_id not in jobs:
-            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-        del jobs[job_id]
-
-    logger.info(f"Deleted job {job_id}")
-    return {"status": "deleted", "job_id": job_id}
-
-
-# ============================================================================
-# Batch Job System (extractor-first processing for memory efficiency)
-# ============================================================================
 
 class BatchRequest(BaseModel):
     """Request for batch extraction.
@@ -846,7 +425,21 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 update_file_timing(i, "metadata", time.time() - file_start)
             end_extractor_timing("metadata", total_files)
 
-        # Stage 2: Voice Activity Detection (Silero VAD - lightweight)
+        # Stage 2: Telemetry (always runs - lightweight, no models)
+        start_extractor_timing("telemetry")
+        update_batch_progress("telemetry", "Extracting telemetry...", 0, total_files)
+        for i, file_path in enumerate(files):
+            file_start = time.time()
+            update_batch_progress("telemetry", f"Processing {Path(file_path).name}", i + 1, total_files)
+            try:
+                telemetry = extract_telemetry(file_path)
+                update_file_status(i, "running", "telemetry", telemetry.model_dump() if telemetry else None)
+            except Exception as e:
+                logger.warning(f"Telemetry failed for {file_path}: {e}")
+            update_file_timing(i, "telemetry", time.time() - file_start)
+        end_extractor_timing("telemetry", total_files)
+
+        # Stage 3: Voice Activity Detection (Silero VAD - lightweight)
         if request.enable_vad:
             start_extractor_timing("vad")
             update_batch_progress("vad", "Loading VAD model...", 0, total_files)
@@ -864,7 +457,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             unload_vad_model()
             end_extractor_timing("vad", total_files)
 
-        # Stage 3: Scenes (PySceneDetect - moderate memory)
+        # Stage 4: Scenes (PySceneDetect - moderate memory)
         if request.enable_scenes:
             start_extractor_timing("scenes")
             update_batch_progress("scenes", "Detecting scenes...", 0, total_files)
@@ -879,7 +472,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 update_file_timing(i, "scenes", time.time() - file_start)
             end_extractor_timing("scenes", total_files)
 
-        # Stage 4: Transcript (Whisper - heavy model)
+        # Stage 5: Transcript (Whisper - heavy model)
         if request.enable_transcript:
             start_extractor_timing("transcript")
             # Clear memory before loading heavy model
@@ -905,7 +498,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             unload_whisper_model()
             end_extractor_timing("transcript", total_files)
 
-        # Stage 5: Motion Analysis (for smart sampling of faces/objects/clip/ocr)
+        # Stage 6: Motion Analysis (for smart sampling of faces/objects/clip/ocr)
         # Store motion data per file for later use
         motion_data: dict[int, Any] = {}  # file_idx -> MotionAnalysis
         adaptive_timestamps: dict[int, list[float]] = {}  # file_idx -> timestamps
@@ -963,7 +556,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 update_file_timing(i, "motion", time.time() - file_start)
             end_extractor_timing("motion", total_files)
 
-        # Stage 6: Objects (YOLO with motion-adaptive timestamps, or Qwen)
+        # Stage 7: Objects (YOLO with motion-adaptive timestamps, or Qwen)
         # Store person timestamps for face detection
         person_timestamps: dict[int, list[float]] = {}  # file_idx -> timestamps where persons detected
 
@@ -1046,7 +639,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 unload_yolo_model()
             end_extractor_timing("objects", total_files)
 
-        # Stage 7: Faces (YOLO-triggered - only where persons detected)
+        # Stage 8: Faces (YOLO-triggered - only where persons detected)
         if request.enable_faces:
             start_extractor_timing("faces")
             update_batch_progress("faces", "Detecting faces...", 0, total_files)
@@ -1099,7 +692,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             unload_face_model()
             end_extractor_timing("faces", total_files)
 
-        # Stage 8: OCR (EasyOCR - moderate model) with motion-adaptive timestamps
+        # Stage 9: OCR (EasyOCR - moderate model) with motion-adaptive timestamps
         if request.enable_ocr:
             start_extractor_timing("ocr")
             update_batch_progress("ocr", "Extracting text...", 0, total_files)
@@ -1119,7 +712,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             unload_ocr_model()
             end_extractor_timing("ocr", total_files)
 
-        # Stage 9: CLIP embeddings with motion-adaptive timestamps
+        # Stage 10: CLIP embeddings with motion-adaptive timestamps
         if request.enable_clip:
             start_extractor_timing("clip")
             update_batch_progress("clip", "Extracting CLIP embeddings...", 0, total_files)
@@ -1432,6 +1025,15 @@ async def extract(request: ExtractRequest):
         except Exception as e:
             logger.warning(f"OCR failed: {e}")
 
+    # Extract telemetry (always - lightweight, no models)
+    telemetry = None
+    try:
+        telemetry = extract_telemetry(request.file)
+        if telemetry:
+            logger.info(f"Telemetry: {len(telemetry.points)} points from {telemetry.source}")
+    except Exception as e:
+        logger.warning(f"Telemetry extraction failed: {e}")
+
     extraction_time = time.time() - start_time
     logger.info(f"Extraction complete in {extraction_time:.2f}s")
 
@@ -1450,124 +1052,8 @@ async def extract(request: ExtractRequest):
         embeddings=embeddings,
         ocr=ocr,
         motion=motion_result,
+        telemetry=telemetry,
     )
-
-
-@app.get("/browse")
-async def browse_directory(
-    path: str = Query("/Volumes/Backup", description="Directory to browse"),
-):
-    """Browse a directory for video files."""
-    dir_path = Path(path)
-    if not dir_path.exists():
-        raise HTTPException(status_code=404, detail=f"Directory not found: {path}")
-    if not dir_path.is_dir():
-        raise HTTPException(status_code=400, detail=f"Not a directory: {path}")
-
-    video_extensions = {".mp4", ".mov", ".mxf", ".avi", ".mkv", ".m4v", ".webm"}
-    items = []
-
-    try:
-        for item in sorted(dir_path.iterdir()):
-            if item.name.startswith("."):
-                continue
-            if item.is_dir():
-                items.append({"name": item.name, "path": str(item), "type": "directory"})
-            elif item.suffix.lower() in video_extensions:
-                size_mb = item.stat().st_size / (1024 * 1024)
-                items.append({
-                    "name": item.name,
-                    "path": str(item),
-                    "type": "video",
-                    "size_mb": round(size_mb, 1),
-                })
-    except PermissionError:
-        raise HTTPException(status_code=403, detail=f"Permission denied: {path}")
-
-    return {
-        "path": str(dir_path),
-        "parent": str(dir_path.parent) if dir_path.parent != dir_path else None,
-        "items": items,
-    }
-
-
-# MIME types for video files
-VIDEO_MIME_TYPES = {
-    ".mp4": "video/mp4",
-    ".mov": "video/quicktime",
-    ".mxf": "video/mxf",
-    ".avi": "video/x-msvideo",
-    ".mkv": "video/x-matroska",
-    ".m4v": "video/x-m4v",
-    ".webm": "video/webm",
-}
-
-
-@app.get("/video")
-async def stream_video(
-    request: Request,
-    file: str = Query(..., description="Path to video file"),
-):
-    """Stream a video file with range request support for seeking."""
-    file_path = Path(file)
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {file}")
-    if not file_path.is_file():
-        raise HTTPException(status_code=400, detail=f"Not a file: {file}")
-
-    file_size = file_path.stat().st_size
-    content_type = VIDEO_MIME_TYPES.get(file_path.suffix.lower(), "video/mp4")
-
-    # Parse range header for seeking support
-    range_header = request.headers.get("range")
-
-    if range_header:
-        # Parse "bytes=start-end" format
-        range_match = range_header.replace("bytes=", "").split("-")
-        start = int(range_match[0]) if range_match[0] else 0
-        end = int(range_match[1]) if range_match[1] else file_size - 1
-
-        # Clamp end to file size
-        end = min(end, file_size - 1)
-        chunk_size = end - start + 1
-
-        def iter_file():
-            with open(file_path, "rb") as f:
-                f.seek(start)
-                remaining = chunk_size
-                while remaining > 0:
-                    read_size = min(remaining, 1024 * 1024)  # 1MB chunks
-                    data = f.read(read_size)
-                    if not data:
-                        break
-                    remaining -= len(data)
-                    yield data
-
-        return StreamingResponse(
-            iter_file(),
-            status_code=206,  # Partial Content
-            media_type=content_type,
-            headers={
-                "Content-Range": f"bytes {start}-{end}/{file_size}",
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(chunk_size),
-            },
-        )
-    else:
-        # No range header - stream entire file
-        def iter_file():
-            with open(file_path, "rb") as f:
-                while chunk := f.read(1024 * 1024):
-                    yield chunk
-
-        return StreamingResponse(
-            iter_file(),
-            media_type=content_type,
-            headers={
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(file_size),
-            },
-        )
 
 
 @app.get("/extractors")
@@ -1613,71 +1099,10 @@ async def list_extractors():
             },
             {
                 "name": "telemetry",
-                "description": "GPS/flight path from drone sidecar files",
-                "endpoint": "/telemetry",
+                "description": "GPS/flight path (always extracted automatically)",
             },
         ]
     }
-
-
-@app.get("/telemetry", response_model=TelemetryResult | None)
-async def telemetry(
-    file: str = Query(..., description="Path to video file"),
-    sample_interval: float = Query(1.0, description="Sample one point every N seconds"),
-):
-    """Extract telemetry/flight path from video sidecar files.
-
-    Returns GPS track with timestamps for drones with SRT sidecars (DJI, etc.)
-    or exposure-only data for cameras with embedded subtitles (DJI Pocket).
-    """
-    file_path = Path(file)
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {file}")
-
-    if not file_path.is_file():
-        raise HTTPException(status_code=400, detail=f"Not a file: {file}")
-
-    try:
-        result = extract_telemetry(file, sample_interval=sample_interval)
-        if not result:
-            raise HTTPException(
-                status_code=404,
-                detail="No telemetry data found (no SRT sidecar or embedded subtitles)",
-            )
-        logger.info(f"Telemetry extracted: {len(result.points)} points from {result.source}")
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Telemetry extraction failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Telemetry extraction failed: {e}")
-
-
-@app.get("/telemetry/gpx")
-async def telemetry_gpx(
-    file: str = Query(..., description="Path to video file"),
-    sample_interval: float = Query(1.0, description="Sample one point every N seconds"),
-):
-    """Export telemetry as GPX track for use in mapping applications."""
-    from fastapi.responses import Response
-
-    file_path = Path(file)
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {file}")
-
-    result = extract_telemetry(file, sample_interval=sample_interval)
-    if not result:
-        raise HTTPException(
-            status_code=404,
-            detail="No telemetry data found",
-        )
-
-    gpx_content = result.to_gpx()
-    return Response(
-        content=gpx_content,
-        media_type="application/gpx+xml",
-        headers={"Content-Disposition": f"attachment; filename={file_path.stem}.gpx"},
-    )
 
 
 if __name__ == "__main__":

@@ -387,6 +387,7 @@ class ExtractResponse(BaseModel):
     embeddings: ClipResult | None = None
     ocr: OcrResult | None = None
     motion: MotionResult | None = None
+    telemetry: TelemetryResult | None = None
 
 
 class HealthResponse(BaseModel):

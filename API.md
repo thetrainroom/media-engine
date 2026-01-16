@@ -64,6 +64,8 @@ Create a new batch extraction job.
 | `context_hint` | string | null | Context hint for Whisper |
 | `qwen_timestamps` | float[] | null | Specific timestamps for Qwen analysis |
 
+**Note:** Telemetry (GPS/flight path) is always extracted automatically when available. No flag needed - it's lightweight and included in results.
+
 **Response:**
 ```json
 {
@@ -105,9 +107,10 @@ Get batch job status and results.
       "file": "/path/to/video1.mp4",
       "filename": "video1.mp4",
       "status": "completed",
-      "timings": {"metadata": 2.5, "scenes": 30.0},
+      "timings": {"metadata": 2.5, "telemetry": 0.1, "scenes": 30.0},
       "results": {
         "metadata": {...},
+        "telemetry": {...},
         "scenes": {...}
       },
       "error": null
@@ -137,33 +140,6 @@ Delete a batch job and free memory.
   "status": "deleted"
 }
 ```
-
----
-
-## Single-File Jobs (Legacy)
-
-For processing individual files. Consider using batch API with a single file instead.
-
-### POST /jobs
-
-Create a single-file extraction job.
-
-**Request Body:** Same as `/extract` (see below)
-
-**Response:**
-```json
-{
-  "job_id": "abc12345"
-}
-```
-
-### GET /jobs/{job_id}
-
-Get job status and partial results.
-
-### DELETE /jobs/{job_id}
-
-Delete a job and free memory.
 
 ---
 
@@ -199,7 +175,9 @@ Extract features from a video file synchronously (blocks until complete).
 }
 ```
 
-**Response:** Full extraction results (metadata, transcript, faces, scenes, objects, clip, ocr, motion).
+**Response:** Full extraction results (metadata, transcript, faces, scenes, objects, clip, ocr, motion, telemetry).
+
+**Note:** Telemetry is always extracted automatically when available (no flag needed).
 
 ---
 
@@ -260,88 +238,6 @@ List available extractors.
   ]
 }
 ```
-
----
-
-### GET /browse
-
-Browse directories for video files.
-
-**Query Parameters:**
-- `path` (string): Directory to browse (default: "/Volumes/Backup")
-
-**Response:**
-```json
-{
-  "path": "/Volumes/Backup",
-  "directories": ["drone", "interviews"],
-  "files": [
-    {
-      "name": "video.mp4",
-      "path": "/Volumes/Backup/video.mp4",
-      "size": 1234567890,
-      "modified": "2024-01-15T10:00:00Z"
-    }
-  ]
-}
-```
-
----
-
-### GET /video
-
-Stream video file with range request support.
-
-**Query Parameters:**
-- `file` (string, required): Path to video file
-
-**Headers:**
-- `Range`: byte range for partial content
-
----
-
-### GET /telemetry
-
-Extract GPS telemetry from video.
-
-**Query Parameters:**
-- `file` (string, required): Path to video file
-- `sample_interval` (float): Sample one point every N seconds (default: 1.0)
-
-**Response:**
-```json
-{
-  "source": "srt_sidecar",
-  "points": [
-    {
-      "timestamp": 0.0,
-      "latitude": 59.9139,
-      "longitude": 10.7522,
-      "altitude": 150.0,
-      "speed": 5.2,
-      "heading": 180.0
-    }
-  ],
-  "summary": {
-    "duration": 120.0,
-    "distance_km": 0.5,
-    "max_altitude": 200.0,
-    "max_speed": 15.0
-  }
-}
-```
-
----
-
-### GET /telemetry/gpx
-
-Export GPS telemetry as GPX file.
-
-**Query Parameters:**
-- `file` (string, required): Path to video file
-- `sample_interval` (float): Sample interval in seconds (default: 1.0)
-
-**Response:** GPX XML file download
 
 ---
 
