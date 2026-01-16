@@ -29,51 +29,6 @@ class DetectionMethod(StrEnum):
 # === Request Models ===
 
 
-class ExtractRequest(BaseModel):
-    """Request body for /extract endpoint.
-
-    Model selection is configured via global settings (GET/PUT /settings).
-    """
-
-    file: str = Field(..., description="Path to video file")
-    proxy_file: str | None = Field(
-        default=None,
-        description="Path to proxy file for RAW formats (BRAW, ARRIRAW). "
-        "Metadata is extracted from main file, frame analysis uses proxy.",
-    )
-
-    # Extractor toggles (all default to off)
-    enable_metadata: bool = Field(default=False, description="Extract metadata")
-    enable_transcript: bool = Field(default=False, description="Extract transcript")
-    enable_faces: bool = Field(default=False, description="Extract faces")
-    enable_scenes: bool = Field(default=False, description="Extract scenes")
-    enable_objects: bool = Field(default=False, description="Extract objects")
-    enable_clip: bool = Field(default=False, description="Extract CLIP embeddings")
-    enable_ocr: bool = Field(default=False, description="Extract OCR")
-    enable_motion: bool = Field(default=False, description="Analyze camera motion")
-
-    # Transcript options (content-specific, not hardware)
-    language: str | None = Field(
-        default=None, description="Force language (skip detection)"
-    )
-    language_hints: list[str] = Field(
-        default_factory=list, description="Language hints"
-    )
-    context_hint: str | None = Field(
-        default=None, description="Context hint for transcription (e.g., dialect info)"
-    )
-
-    # Object detection context (for VLM)
-    context: dict[str, str] | None = Field(
-        default=None,
-        description="Context for VLM (person, location, topic, language, etc.)",
-    )
-    qwen_timestamps: list[float] | None = Field(
-        default=None,
-        description="Timestamps (seconds) for Qwen frame analysis. If None, samples from middle.",
-    )
-
-
 # === Response Models ===
 
 
@@ -367,27 +322,6 @@ class TelemetryResult(BaseModel):
             )
         lines.extend(["    </trkseg>", "  </trk>", "</gpx>"])
         return "\n".join(lines)
-
-
-class ExtractResponse(BaseModel):
-    """Response from /extract endpoint."""
-
-    file: str
-    filename: str
-    extracted_at: datetime
-    extraction_time_seconds: float
-    api_version: str
-    engine_version: str
-
-    metadata: Metadata | None = None
-    transcript: Transcript | None = None
-    faces: FacesResult | None = None
-    scenes: ScenesResult | None = None
-    objects: ObjectsResult | None = None
-    embeddings: ClipResult | None = None
-    ocr: OcrResult | None = None
-    motion: MotionResult | None = None
-    telemetry: TelemetryResult | None = None
 
 
 class HealthResponse(BaseModel):

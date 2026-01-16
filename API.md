@@ -135,44 +135,6 @@ Delete a batch job and free memory.
 
 ---
 
-## Synchronous Extraction
-
-### POST /extract
-
-Extract features from a video file synchronously (blocks until complete).
-
-**Request Body:**
-```json
-{
-  "file": "/path/to/video.mp4",
-  "proxy_file": null,
-  "enable_metadata": true,
-  "enable_transcript": false,
-  "enable_faces": false,
-  "enable_scenes": false,
-  "enable_objects": false,
-  "enable_clip": false,
-  "enable_ocr": false,
-  "enable_motion": false,
-  "whisper_model": "auto",
-  "language": null,
-  "fallback_language": "en",
-  "language_hints": [],
-  "context_hint": null,
-  "face_sample_fps": 1.0,
-  "object_sample_fps": 2.0,
-  "object_detector": null,
-  "context": {"location": "Oslo"},
-  "qwen_timestamps": null
-}
-```
-
-**Response:** Full extraction results (metadata, transcript, faces, scenes, objects, clip, ocr, motion, telemetry).
-
-**Note:** Telemetry is always extracted automatically when available (no flag needed).
-
----
-
 ## Utility Endpoints
 
 ### GET /health

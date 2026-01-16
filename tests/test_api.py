@@ -1,7 +1,5 @@
 """Tests for API endpoints."""
 
-import pytest
-
 
 def test_health(client):
     """Test health endpoint."""
@@ -32,46 +30,30 @@ def test_extractors_list(client):
     assert "ocr" in names
 
 
-def test_extract_file_not_found(client):
-    """Test extract with non-existent file."""
-    response = client.post("/extract", json={"file": "/nonexistent/video.mp4"})
-    assert response.status_code == 404
-
-
-def test_extract_metadata_only(client, test_video_path):
-    """Test extract with only metadata (all extractors skipped)."""
-    response = client.post(
-        "/extract",
-        json={
-            "file": test_video_path,
-            "skip_transcript": True,
-            "skip_faces": True,
-            "skip_scenes": True,
-            "skip_objects": True,
-            "skip_clip": True,
-            "skip_ocr": True,
-        },
-    )
+def test_settings_get(client):
+    """Test GET /settings endpoint."""
+    response = client.get("/settings")
     assert response.status_code == 200
 
     data = response.json()
-    assert data["file"] == test_video_path
-    assert "metadata" in data
-    assert data["metadata"]["duration"] > 0
-    assert data["transcript"] is None
-    assert data["faces"] is None
+    assert "whisper_model" in data
+    assert "hf_token_set" in data
+    assert isinstance(data["hf_token_set"], bool)
+    assert "face_sample_fps" in data
+    assert "object_detector" in data
 
 
-@pytest.mark.slow
-def test_extract_full(client, test_video_path):
-    """Test full extraction (all extractors enabled)."""
-    response = client.post(
-        "/extract",
-        json={"file": test_video_path},
-        timeout=300,  # 5 minutes for full extraction
-    )
+def test_settings_update(client):
+    """Test PUT /settings endpoint."""
+    # Get current settings
+    original = client.get("/settings").json()
+
+    # Update a setting
+    response = client.put("/settings", json={"face_sample_fps": 2.5})
     assert response.status_code == 200
 
     data = response.json()
-    assert "metadata" in data
-    assert "extraction_time_seconds" in data
+    assert data["face_sample_fps"] == 2.5
+
+    # Restore original
+    client.put("/settings", json={"face_sample_fps": original["face_sample_fps"]})
