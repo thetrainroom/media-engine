@@ -3,6 +3,8 @@
 import atexit
 import gc
 import logging
+import os
+import signal
 import threading
 import time
 import uuid
@@ -25,7 +27,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from polybos_engine import __version__
-from polybos_engine.config import ObjectDetector, get_settings
+from polybos_engine.config import (
+    ObjectDetector,
+    get_auto_clip_model,
+    get_auto_qwen_model,
+    get_auto_whisper_model,
+    get_auto_yolo_model,
+    get_settings,
+    get_vram_summary,
+)
 from polybos_engine.extractors import (
     FFPROBE_WORKERS,
     analyze_motion,
@@ -42,6 +52,7 @@ from polybos_engine.extractors import (
     get_adaptive_timestamps,
     get_sample_timestamps,
     run_ffprobe_batch,
+    shutdown_ffprobe_pool,
     unload_clip_model,
     unload_face_model,
     unload_ocr_model,
@@ -124,16 +135,6 @@ def _cleanup_resources():
     """Clean up all resources."""
     logger.info("Cleaning up resources...")
     try:
-        from polybos_engine.extractors import (
-            shutdown_ffprobe_pool,
-            unload_clip_model,
-            unload_face_model,
-            unload_ocr_model,
-            unload_qwen_model,
-            unload_vad_model,
-            unload_whisper_model,
-            unload_yolo_model,
-        )
         shutdown_ffprobe_pool()
         unload_whisper_model()
         unload_qwen_model()
@@ -155,9 +156,6 @@ async def shutdown_engine():
 
     Call this before killing the process to ensure clean resource cleanup.
     """
-    import os
-    import signal
-
     logger.info("Shutdown requested via API")
     _cleanup_resources()
 
@@ -294,13 +292,6 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
     This is more memory efficient as each model is loaded once,
     processes all files, then is unloaded before the next model.
     """
-    from polybos_engine.config import (
-        get_auto_clip_model,
-        get_auto_qwen_model,
-        get_auto_whisper_model,
-        get_auto_yolo_model,
-    )
-
     settings = get_settings()
 
     # Resolve object detector (handles "auto")
@@ -845,7 +836,6 @@ async def hardware():
     Returns information about available GPU/VRAM and which models
     will be used with the current "auto" settings.
     """
-    from polybos_engine.config import get_vram_summary
     return get_vram_summary()
 
 

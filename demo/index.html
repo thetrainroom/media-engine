@@ -448,7 +448,6 @@
         // Demo server (file browsing and video streaming)
         const DEMO_URL = 'http://localhost:8002';
         let map = null;
-        let currentFile = null;
 
         // DOM Elements
         const fileList = document.getElementById('fileList');
@@ -818,70 +817,8 @@
 
             // Motion
             if (completedExtractors.includes('motion') && r.motion) {
-                const m = r.motion;
-                document.getElementById('motionPrimary').textContent = m.primary_motion.replace('_', ' ');
-
-                // Build motion segment display
-                const motionColors = {
-                    static: 'bg-gray-500',
-                    pan_left: 'bg-blue-500',
-                    pan_right: 'bg-blue-400',
-                    tilt_up: 'bg-green-500',
-                    tilt_down: 'bg-green-400',
-                    zoom_in: 'bg-purple-500',
-                    zoom_out: 'bg-purple-400',
-                    handheld: 'bg-yellow-500',
-                    complex: 'bg-red-500'
-                };
-
-                let html = `<div class="text-sm text-gray-400 mb-2">`;
-                html += `<span class="text-cyan-300">${m.segments.length}</span> segments, `;
-                html += `avg intensity: <span class="text-cyan-300">${m.avg_intensity.toFixed(1)}</span>, `;
-                html += m.is_stable ? '<span class="text-green-400">stable</span>' : '<span class="text-yellow-400">moving</span>';
-                html += `</div>`;
-
-                // Segment timeline
-                if (m.segments.length > 0 && m.duration > 0) {
-                    html += `<div class="flex gap-0.5 h-6 rounded overflow-hidden bg-gray-700/50">`;
-                    m.segments.forEach(seg => {
-                        const widthPct = ((seg.end - seg.start) / m.duration * 100).toFixed(1);
-                        const color = motionColors[seg.motion_type] || 'bg-gray-500';
-                        const label = seg.motion_type.replace('_', ' ');
-                        html += `<div class="${color} opacity-80 hover:opacity-100 transition" style="width: ${widthPct}%" title="${label}: ${seg.start.toFixed(1)}s - ${seg.end.toFixed(1)}s"></div>`;
-                    });
-                    html += `</div>`;
-
-                    // Legend
-                    const types = [...new Set(m.segments.map(s => s.motion_type))];
-                    html += `<div class="flex flex-wrap gap-2 mt-2 text-xs">`;
-                    types.forEach(t => {
-                        const color = motionColors[t] || 'bg-gray-500';
-                        html += `<span class="flex items-center gap-1"><span class="w-3 h-3 rounded ${color}"></span>${t.replace('_', ' ')}</span>`;
-                    });
-                    html += `</div>`;
-
-                    // Generate suggested timestamps
-                    let suggested = [];
-                    for (const seg of m.segments) {
-                        const segDuration = seg.end - seg.start;
-                        if (seg.motion_type === 'static' || seg.motion_type === 'handheld') {
-                            suggested.push((seg.start + seg.end) / 2);
-                        } else {
-                            suggested.push(seg.start + 0.2);
-                            if (segDuration > 1.0) suggested.push(seg.end - 0.2);
-                        }
-                    }
-                    suggested = [...new Set(suggested)].sort((a, b) => a - b).slice(0, 5);
-                    suggested = suggested.map(t => Math.max(0.1, Math.min(t, m.duration - 0.1)));
-                    const suggestedStr = suggested.map(t => t.toFixed(1)).join(', ');
-
-                    html += `<div class="mt-3 pt-3 border-t border-gray-700">`;
-                    html += `<span class="text-xs text-gray-500">Suggested timestamps: </span>`;
-                    html += `<code class="text-xs text-cyan-300 bg-gray-800 px-2 py-1 rounded select-all cursor-pointer" title="Click to select">${suggestedStr}</code>`;
-                    html += `</div>`;
-                }
-
-                document.getElementById('motionContent').innerHTML = html;
+                document.getElementById('motionPrimary').textContent = r.motion.primary_motion.replace('_', ' ');
+                document.getElementById('motionContent').innerHTML = renderMotionHtml(r.motion);
             } else if (completedExtractors.includes('motion')) {
                 document.getElementById('motionContent').innerHTML = '<p class="text-gray-500">No motion data</p>';
             }
@@ -1310,67 +1247,8 @@
 
             // Motion
             if (data.motion && data.motion.segments) {
-                const m = data.motion;
-                document.getElementById('motionPrimary').textContent = m.primary_motion.replace('_', ' ');
-
-                const motionColors = {
-                    static: 'bg-gray-500',
-                    pan_left: 'bg-blue-500',
-                    pan_right: 'bg-blue-400',
-                    tilt_up: 'bg-green-500',
-                    tilt_down: 'bg-green-400',
-                    zoom_in: 'bg-purple-500',
-                    zoom_out: 'bg-purple-400',
-                    handheld: 'bg-yellow-500',
-                    complex: 'bg-red-500'
-                };
-
-                let html = `<div class="text-sm text-gray-400 mb-2">`;
-                html += `<span class="text-cyan-300">${m.segments.length}</span> segments, `;
-                html += `avg intensity: <span class="text-cyan-300">${m.avg_intensity.toFixed(1)}</span>, `;
-                html += m.is_stable ? '<span class="text-green-400">stable</span>' : '<span class="text-yellow-400">moving</span>';
-                html += `</div>`;
-
-                if (m.segments.length > 0 && m.duration > 0) {
-                    html += `<div class="flex gap-0.5 h-6 rounded overflow-hidden bg-gray-700/50">`;
-                    m.segments.forEach(seg => {
-                        const widthPct = ((seg.end - seg.start) / m.duration * 100).toFixed(1);
-                        const color = motionColors[seg.motion_type] || 'bg-gray-500';
-                        const label = seg.motion_type.replace('_', ' ');
-                        html += `<div class="${color} opacity-80 hover:opacity-100 transition" style="width: ${widthPct}%" title="${label}: ${seg.start.toFixed(1)}s - ${seg.end.toFixed(1)}s"></div>`;
-                    });
-                    html += `</div>`;
-
-                    const types = [...new Set(m.segments.map(s => s.motion_type))];
-                    html += `<div class="flex flex-wrap gap-2 mt-2 text-xs">`;
-                    types.forEach(t => {
-                        const color = motionColors[t] || 'bg-gray-500';
-                        html += `<span class="flex items-center gap-1"><span class="w-3 h-3 rounded ${color}"></span>${t.replace('_', ' ')}</span>`;
-                    });
-                    html += `</div>`;
-
-                    // Generate suggested timestamps
-                    let suggested = [];
-                    for (const seg of m.segments) {
-                        const segDuration = seg.end - seg.start;
-                        if (seg.motion_type === 'static' || seg.motion_type === 'handheld') {
-                            suggested.push((seg.start + seg.end) / 2);
-                        } else {
-                            suggested.push(seg.start + 0.2);
-                            if (segDuration > 1.0) suggested.push(seg.end - 0.2);
-                        }
-                    }
-                    suggested = [...new Set(suggested)].sort((a, b) => a - b).slice(0, 5);
-                    suggested = suggested.map(t => Math.max(0.1, Math.min(t, m.duration - 0.1)));
-                    const suggestedStr = suggested.map(t => t.toFixed(1)).join(', ');
-
-                    html += `<div class="mt-3 pt-3 border-t border-gray-700">`;
-                    html += `<span class="text-xs text-gray-500">Suggested timestamps: </span>`;
-                    html += `<code class="text-xs text-cyan-300 bg-gray-800 px-2 py-1 rounded select-all cursor-pointer" title="Click to select">${suggestedStr}</code>`;
-                    html += `</div>`;
-                }
-
-                document.getElementById('motionContent').innerHTML = html;
+                document.getElementById('motionPrimary').textContent = data.motion.primary_motion.replace('_', ' ');
+                document.getElementById('motionContent').innerHTML = renderMotionHtml(data.motion);
             } else if (stepFailed('motion', data.motion)) {
                 document.getElementById('motionContent').innerHTML =
                     '<p class="empty-state text-yellow-500">Motion analysis failed</p>';
@@ -1464,6 +1342,70 @@
             const m = Math.floor(seconds / 60);
             const s = Math.floor(seconds % 60);
             return `${m}:${s.toString().padStart(2, '0')}`;
+        }
+
+        // Motion colors for timeline rendering
+        const MOTION_COLORS = {
+            static: 'bg-gray-500',
+            pan_left: 'bg-blue-500',
+            pan_right: 'bg-blue-400',
+            tilt_up: 'bg-green-500',
+            tilt_down: 'bg-green-400',
+            zoom_in: 'bg-purple-500',
+            zoom_out: 'bg-purple-400',
+            handheld: 'bg-yellow-500',
+            complex: 'bg-red-500'
+        };
+
+        function renderMotionHtml(m) {
+            let html = `<div class="text-sm text-gray-400 mb-2">`;
+            html += `<span class="text-cyan-300">${m.segments.length}</span> segments, `;
+            html += `avg intensity: <span class="text-cyan-300">${m.avg_intensity.toFixed(1)}</span>, `;
+            html += m.is_stable ? '<span class="text-green-400">stable</span>' : '<span class="text-yellow-400">moving</span>';
+            html += `</div>`;
+
+            if (m.segments.length > 0 && m.duration > 0) {
+                // Segment timeline
+                html += `<div class="flex gap-0.5 h-6 rounded overflow-hidden bg-gray-700/50">`;
+                m.segments.forEach(seg => {
+                    const widthPct = ((seg.end - seg.start) / m.duration * 100).toFixed(1);
+                    const color = MOTION_COLORS[seg.motion_type] || 'bg-gray-500';
+                    const label = seg.motion_type.replace('_', ' ');
+                    html += `<div class="${color} opacity-80 hover:opacity-100 transition" style="width: ${widthPct}%" title="${label}: ${seg.start.toFixed(1)}s - ${seg.end.toFixed(1)}s"></div>`;
+                });
+                html += `</div>`;
+
+                // Legend
+                const types = [...new Set(m.segments.map(s => s.motion_type))];
+                html += `<div class="flex flex-wrap gap-2 mt-2 text-xs">`;
+                types.forEach(t => {
+                    const color = MOTION_COLORS[t] || 'bg-gray-500';
+                    html += `<span class="flex items-center gap-1"><span class="w-3 h-3 rounded ${color}"></span>${t.replace('_', ' ')}</span>`;
+                });
+                html += `</div>`;
+
+                // Generate suggested timestamps
+                let suggested = [];
+                for (const seg of m.segments) {
+                    const segDuration = seg.end - seg.start;
+                    if (seg.motion_type === 'static' || seg.motion_type === 'handheld') {
+                        suggested.push((seg.start + seg.end) / 2);
+                    } else {
+                        suggested.push(seg.start + 0.2);
+                        if (segDuration > 1.0) suggested.push(seg.end - 0.2);
+                    }
+                }
+                suggested = [...new Set(suggested)].sort((a, b) => a - b).slice(0, 5);
+                suggested = suggested.map(t => Math.max(0.1, Math.min(t, m.duration - 0.1)));
+                const suggestedStr = suggested.map(t => t.toFixed(1)).join(', ');
+
+                html += `<div class="mt-3 pt-3 border-t border-gray-700">`;
+                html += `<span class="text-xs text-gray-500">Suggested timestamps: </span>`;
+                html += `<code class="text-xs text-cyan-300 bg-gray-800 px-2 py-1 rounded select-all cursor-pointer" title="Click to select">${suggestedStr}</code>`;
+                html += `</div>`;
+            }
+
+            return html;
         }
 
         function seekTo(time) {

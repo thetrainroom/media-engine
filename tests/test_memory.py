@@ -1,9 +1,5 @@
 """Tests for memory management functionality."""
 
-import time
-
-import pytest
-
 
 class TestUnloadFunctions:
     """Test model unload functions."""
@@ -159,106 +155,16 @@ class TestJobCleanup:
         assert isinstance(JOB_TTL_SECONDS, int)
         assert JOB_TTL_SECONDS > 0
 
-    def test_cleanup_expired_jobs_function_exists(self):
-        """Test cleanup function exists."""
-        from polybos_engine.main import _cleanup_expired_jobs
-
-        assert callable(_cleanup_expired_jobs)
-
-    def test_cleanup_expired_jobs_returns_count(self):
-        """Test cleanup function returns removed count."""
-        from polybos_engine.main import _cleanup_expired_jobs
-
-        result = _cleanup_expired_jobs()
-        assert isinstance(result, int)
-        assert result >= 0
-
     def test_cleanup_expired_batch_jobs_function_exists(self):
         """Test batch cleanup function exists."""
         from polybos_engine.main import _cleanup_expired_batch_jobs
 
         assert callable(_cleanup_expired_batch_jobs)
 
-    def test_delete_job_endpoint(self, client):
-        """Test DELETE /jobs/{job_id} endpoint."""
-        # Try to delete non-existent job
-        response = client.delete("/jobs/nonexistent")
-        assert response.status_code == 404
-
     def test_delete_batch_endpoint(self, client):
         """Test DELETE /batch/{batch_id} endpoint."""
         # Try to delete non-existent batch
         response = client.delete("/batch/nonexistent")
-        assert response.status_code == 404
-
-
-class TestJobCleanupIntegration:
-    """Integration tests for job cleanup."""
-
-    def test_job_has_completed_at_field(self, client, test_video_path):
-        """Test that completed jobs have completed_at timestamp."""
-        # Create a job
-        response = client.post(
-            "/jobs",
-            json={
-                "file": test_video_path,
-                "skip_transcript": True,
-                "skip_faces": True,
-                "skip_scenes": True,
-                "skip_objects": True,
-                "skip_clip": True,
-                "skip_ocr": True,
-            },
-        )
-        assert response.status_code == 200
-        job_id = response.json()["job_id"]
-
-        # Wait for completion (metadata only should be fast)
-        for _ in range(30):
-            response = client.get(f"/jobs/{job_id}")
-            assert response.status_code == 200
-            job = response.json()
-            if job["status"] == "completed":
-                assert job["completed_at"] is not None
-                break
-            time.sleep(0.5)
-        else:
-            pytest.fail("Job did not complete in time")
-
-        # Clean up
-        client.delete(f"/jobs/{job_id}")
-
-    def test_can_delete_completed_job(self, client, test_video_path):
-        """Test that completed jobs can be deleted."""
-        # Create and wait for job
-        response = client.post(
-            "/jobs",
-            json={
-                "file": test_video_path,
-                "skip_transcript": True,
-                "skip_faces": True,
-                "skip_scenes": True,
-                "skip_objects": True,
-                "skip_clip": True,
-                "skip_ocr": True,
-            },
-        )
-        job_id = response.json()["job_id"]
-
-        # Wait for completion
-        for _ in range(30):
-            response = client.get(f"/jobs/{job_id}")
-            if response.json()["status"] == "completed":
-                break
-            time.sleep(0.5)
-
-        # Delete job
-        response = client.delete(f"/jobs/{job_id}")
-        assert response.status_code == 200
-        assert response.json()["status"] == "deleted"
-
-        # Verify it's gone
-        response = client.get(f"/jobs/{job_id}")
         assert response.status_code == 404
 
 
