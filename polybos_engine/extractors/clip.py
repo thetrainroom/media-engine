@@ -241,6 +241,9 @@ def get_clip_backend(model_name: str | None = None) -> CLIPBackend:
     return _backend
 
 
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif", ".heic", ".heif"}
+
+
 def extract_clip(
     file_path: str,
     scenes: ScenesResult | None = None,
@@ -250,15 +253,16 @@ def extract_clip(
     ) = None,  # Direct timestamp list (e.g., from motion analysis)
     model_name: str | None = None,  # CLIP model name (e.g., "ViT-B-32", "ViT-L-14")
 ) -> ClipResult:
-    """Extract CLIP embeddings from video.
+    """Extract CLIP embeddings from video or image.
 
-    Sampling strategy (in priority order):
+    For images: returns single embedding directly (no frame extraction).
+    For videos, sampling strategy (in priority order):
     1. If timestamps provided: use those directly (e.g., from motion-adaptive sampling)
     2. If scenes provided: one embedding per scene (middle of scene)
     3. Otherwise: sample at fixed interval
 
     Args:
-        file_path: Path to video file
+        file_path: Path to video or image file
         scenes: Optional scene detection results (one embedding per scene)
         fallback_interval: Interval in seconds if no scenes provided
         timestamps: Optional list of specific timestamps to sample (overrides scenes/interval)
@@ -269,10 +273,31 @@ def extract_clip(
     """
     path = Path(file_path)
     if not path.exists():
-        raise FileNotFoundError(f"Video file not found: {file_path}")
+        raise FileNotFoundError(f"File not found: {file_path}")
 
     backend = get_clip_backend(model_name)
 
+    # Check if this is an image - encode directly without frame extraction
+    if path.suffix.lower() in IMAGE_EXTENSIONS:
+        logger.info(f"Encoding image directly: {file_path}")
+        try:
+            embedding = backend.encode_image(file_path)
+            return ClipResult(
+                model=backend.get_model_name(),
+                segments=[
+                    ClipSegment(
+                        start=0.0,
+                        end=0.0,
+                        scene_index=0,
+                        embedding=embedding,
+                    )
+                ],
+            )
+        except Exception as e:
+            logger.error(f"Failed to encode image {file_path}: {e}")
+            raise
+
+    # For videos, extract frames at timestamps
     # Create temp directory for frames
     temp_dir = tempfile.mkdtemp(prefix="polybos_clip_")
 
