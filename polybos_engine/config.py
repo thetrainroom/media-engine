@@ -310,6 +310,112 @@ def get_available_vram_gb() -> float:
     return 0
 
 
+def get_free_memory_gb() -> float:
+    """Get memory available for ML models without causing excessive swapping.
+
+    On macOS, this accounts for:
+    - Current swap usage (if already swapping, memory is tight)
+    - App memory pressure
+    - Leaves buffer for system and other apps
+
+    Returns:
+        Estimated GB available for loading models.
+    """
+    try:
+        import subprocess
+        import sys
+
+        if sys.platform == "darwin":
+            # macOS: Get total RAM and current memory usage
+            # Using sysctl for total memory
+            total_result = subprocess.run(
+                ["sysctl", "-n", "hw.memsize"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            total_bytes = int(total_result.stdout.strip())
+            total_gb = total_bytes / (1024**3)
+
+            # Get swap usage - if swap is being used, we're already tight on memory
+            swap_result = subprocess.run(
+                ["sysctl", "-n", "vm.swapusage"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            # Output like: "total = 2048.00M  used = 512.00M  free = 1536.00M"
+            swap_used_gb = 0.0
+            if "used" in swap_result.stdout:
+                import re
+
+                match = re.search(r"used\s*=\s*([\d.]+)([MG])", swap_result.stdout)
+                if match:
+                    value = float(match.group(1))
+                    unit = match.group(2)
+                    swap_used_gb = value / 1024 if unit == "M" else value
+
+            # Get vm_stat for current memory state
+            vm_result = subprocess.run(
+                ["vm_stat"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            lines = vm_result.stdout.strip().split("\n")
+            page_size = 16384  # Default for Apple Silicon
+
+            if "page size of" in lines[0]:
+                import re
+
+                match = re.search(r"page size of (\d+) bytes", lines[0])
+                if match:
+                    page_size = int(match.group(1))
+
+            # Parse memory stats
+            stats: dict[str, int] = {}
+            for line in lines[1:]:
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    try:
+                        stats[key.strip()] = int(value.strip().rstrip("."))
+                    except ValueError:
+                        pass
+
+            # Calculate used memory (wired + active + compressed)
+            wired = stats.get("Pages wired down", 0) * page_size
+            active = stats.get("Pages active", 0) * page_size
+            compressed = stats.get("Pages occupied by compressor", 0) * page_size
+            used_gb = (wired + active + compressed) / (1024**3)
+
+            # Available = Total - Used - Buffer for system (2GB)
+            # Penalize if swap is being used (indicates memory pressure)
+            # But don't penalize too harshly - some swap is normal
+            swap_penalty = min(swap_used_gb, 4.0)  # Cap penalty at 4GB
+            available_gb = total_gb - used_gb - 2.0 - swap_penalty
+            available_gb = max(0.0, available_gb)
+
+            logger.info(
+                f"Memory: {total_gb:.0f}GB total, {used_gb:.1f}GB used, "
+                f"{swap_used_gb:.1f}GB swap, {available_gb:.1f}GB available for models"
+            )
+            return available_gb
+
+        else:
+            # Linux/other: try /proc/meminfo
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("MemAvailable:"):
+                        # Value is in kB
+                        kb = int(line.split()[1])
+                        return kb / (1024**2)
+            return 8.0  # Fallback
+
+    except Exception as e:
+        logger.warning(f"Failed to get free memory: {e}")
+        return 8.0  # Conservative fallback
+
+
 def get_auto_whisper_model() -> str:
     """Select Whisper model based on available VRAM.
 
@@ -434,23 +540,41 @@ def get_vram_summary() -> dict:
 
     Useful for frontend to display hardware capabilities.
     """
-    vram = get_available_vram_gb()
+    vram = get_available_vram_gb()  # Total VRAM (cached)
+    free_mem = get_free_memory_gb()  # Currently available (not cached)
     device = get_device()
+
+    # Model memory requirements
+    qwen_2b_needs = 5.0
+    qwen_7b_needs = 15.0
+    whisper_large_needs = 6.0
 
     return {
         "device": str(device),
         "vram_gb": round(vram, 1),
+        "free_memory_gb": round(free_mem, 1),
         "auto_whisper_model": get_auto_whisper_model(),
         "auto_qwen_model": get_auto_qwen_model() if vram >= 8 else None,
         "auto_yolo_model": get_auto_yolo_model(),
         "auto_clip_model": get_auto_clip_model(),
         "auto_object_detector": str(get_auto_object_detector()),
+        # What the hardware CAN support (based on total VRAM)
         "recommendations": {
             "can_use_large_whisper": vram >= 10,
             "can_use_qwen": vram >= 8,
             "can_use_qwen_7b": vram >= 16,
             "can_use_clip_l14": vram >= 4,
             "can_use_yolo_xlarge": vram >= 16,
+        },
+        # What can load RIGHT NOW (based on free memory)
+        "available_now": {
+            "qwen_2b": free_mem >= qwen_2b_needs,
+            "qwen_7b": free_mem >= qwen_7b_needs,
+            "whisper_large": free_mem >= whisper_large_needs,
+            "whisper_medium": free_mem >= 4.0,
+            "whisper_small": free_mem >= 2.0,
+            "yolo": True,  # YOLO is always available (~100MB)
+            "clip": free_mem >= 1.0,
         },
     }
 

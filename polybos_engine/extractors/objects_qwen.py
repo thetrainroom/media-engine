@@ -12,7 +12,7 @@ from typing import Any
 
 import torch
 
-from polybos_engine.config import DeviceType, get_device, get_settings
+from polybos_engine.config import DeviceType, get_device, get_free_memory_gb, get_settings
 from polybos_engine.schemas import BoundingBox, ObjectDetection, ObjectsResult
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,7 @@ def _get_qwen_model(
     """Get or create the Qwen model and processor (singleton).
 
     Returns (model, processor, device_str).
+    Raises RuntimeError/MemoryError if model cannot be loaded (e.g., OOM).
     Model stays loaded in memory for subsequent calls.
     """
     global _qwen_model, _qwen_processor, _qwen_model_name, _qwen_device
@@ -80,7 +81,12 @@ def _get_qwen_model(
         logger.info(f"Reusing cached Qwen model: {model_name}")
         return _qwen_model, _qwen_processor, _qwen_device  # type: ignore
 
-    # Need to load new model - first clear any existing GPU memory
+    # Log memory status (informational only - let PyTorch handle OOM)
+    free_memory = get_free_memory_gb()
+    model_memory_gb = 15.0 if "7B" in model_name else 5.0
+    logger.info(f"Free memory: {free_memory:.1f}GB, model needs: ~{model_memory_gb:.0f}GB")
+
+    # Clear existing GPU memory before loading
     import gc
 
     gc.collect()
@@ -275,9 +281,6 @@ def extract_objects_qwen(
     if not path.exists():
         raise FileNotFoundError(f"Video file not found: {file_path}")
 
-    # Get or create singleton model (stays loaded between calls)
-    model, processor, torch_device = _get_qwen_model(model_name, progress_callback)
-
     # Create temp directory for frames
     temp_dir = tempfile.mkdtemp(prefix="polybos_qwen_")
 
@@ -292,7 +295,8 @@ def extract_objects_qwen(
         else:
             logger.info(f"Analyzing {len(timestamps)} provided timestamps")
 
-        # Extract frames at specified timestamps
+        # IMPORTANT: Extract frames BEFORE loading the model!
+        # ffmpeg can crash (SIGABRT) when forked from a process with MPS/Metal loaded.
         if progress_callback:
             progress_callback("Extracting frames...", None, None)
         frame_paths = _extract_frames_at_timestamps(file_path, temp_dir, timestamps)
@@ -303,6 +307,26 @@ def extract_objects_qwen(
                 f"No frames could be extracted from {file_path} at timestamps {timestamps}"
             )
             return ObjectsResult(summary={}, detections=[], descriptions=None)
+
+        # Now load the model (after ffmpeg has finished)
+        # If this fails due to OOM, the exception propagates up
+        try:
+            model, processor, torch_device = _get_qwen_model(model_name, progress_callback)
+        except (RuntimeError, MemoryError, OSError) as e:
+            error_msg = str(e).lower()
+            if "out of memory" in error_msg or "cannot allocate" in error_msg:
+                logger.error(
+                    f"Out of memory loading Qwen model. "
+                    f"Close other apps or use a cloud vision API. Error: {e}"
+                )
+                # Return empty result - frontend can fall back to cloud API if configured
+                return ObjectsResult(
+                    summary={},
+                    detections=[],
+                    descriptions=None,
+                    error="out_of_memory",
+                )
+            raise  # Re-raise other errors
 
         logger.info(f"Processing {total_frames} frames for Qwen analysis")
 

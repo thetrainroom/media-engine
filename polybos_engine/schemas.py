@@ -225,6 +225,7 @@ class ObjectsResult(BaseModel):
     summary: dict[str, int]
     detections: list[ObjectDetection]
     descriptions: list[str] | None = None  # Scene descriptions from VLM
+    error: str | None = None  # Error code if extraction failed (e.g., "out_of_memory")
 
 
 class ClipSegment(BaseModel):
