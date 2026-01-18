@@ -26,6 +26,50 @@ class DetectionMethod(StrEnum):
     CLIP = "clip"
 
 
+class MediaType(StrEnum):
+    """Type of media file."""
+
+    VIDEO = "video"
+    IMAGE = "image"
+    AUDIO = "audio"
+    UNKNOWN = "unknown"
+
+
+# File extension sets for media type detection (matches Rust MediaType::from_extension)
+VIDEO_EXTENSIONS: set[str] = {
+    ".mp4", ".mov", ".mxf", ".avi", ".mkv", ".m4v", ".webm",
+    ".mts", ".m2ts", ".ts", ".vob", ".mpg", ".mpeg", ".wmv", ".flv",
+    # RAW video formats
+    ".braw", ".r3d", ".ari",
+}
+
+IMAGE_EXTENSIONS: set[str] = {
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif",
+    ".tiff", ".tif", ".bmp",
+    # RAW image formats
+    ".arw", ".cr2", ".cr3", ".nef", ".dng", ".raf", ".orf", ".rw2",
+    ".pef", ".srw", ".x3f",
+}
+
+AUDIO_EXTENSIONS: set[str] = {
+    ".wav", ".mp3", ".aac", ".m4a", ".flac", ".ogg", ".aiff",
+    ".wma", ".opus", ".ape", ".wv",
+}
+
+
+def get_media_type(file_path: str) -> MediaType:
+    """Determine media type from file extension."""
+    from pathlib import Path
+    ext = Path(file_path).suffix.lower()
+    if ext in VIDEO_EXTENSIONS:
+        return MediaType.VIDEO
+    elif ext in IMAGE_EXTENSIONS:
+        return MediaType.IMAGE
+    elif ext in AUDIO_EXTENSIONS:
+        return MediaType.AUDIO
+    return MediaType.UNKNOWN
+
+
 # === Request Models ===
 
 

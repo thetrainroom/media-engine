@@ -13,6 +13,7 @@ from typing import Any
 import torch
 
 from polybos_engine.config import DeviceType, get_device, get_free_memory_gb, get_settings
+from polybos_engine.extractors.frames import FrameExtractor
 from polybos_engine.schemas import BoundingBox, ObjectDetection, ObjectsResult
 
 logger = logging.getLogger(__name__)
@@ -130,11 +131,31 @@ def _get_qwen_model(
     # Load model and processor with detailed error handling
     try:
         logger.info("Loading Qwen2VLForConditionalGeneration...")
-        _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
-            model_name,
-            torch_dtype=torch_dtype,
-            device_map=torch_device,
-        )
+
+        # For MPS (Apple Silicon), don't use device_map at all
+        # device_map triggers accelerate's meta tensor handling which fails on MPS
+        if torch_device == "mps":
+            _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+                model_name,
+                torch_dtype=torch_dtype,
+                # No device_map - load directly to CPU without accelerate dispatch
+            )
+            logger.info("Moving model to MPS...")
+            _qwen_model = _qwen_model.to("mps")
+        elif torch_device == "cuda":
+            # CUDA works fine with device_map
+            _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+                model_name,
+                torch_dtype=torch_dtype,
+                device_map="cuda",
+            )
+        else:
+            # CPU - no device_map needed
+            _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
+                model_name,
+                torch_dtype=torch_dtype,
+            )
+
         logger.info("Qwen model loaded, loading processor...")
         _qwen_processor = AutoProcessor.from_pretrained(model_name)
         logger.info("Qwen processor loaded successfully")
@@ -463,68 +484,47 @@ def extract_objects_qwen(
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _get_video_duration(video_path: str) -> float:
-    """Get video duration in seconds."""
-    cmd = [
-        "ffprobe",
-        "-v",
-        "error",  # Show errors (quiet hides them)
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    return float(result.stdout.strip())
+def _get_video_duration(file_path: str) -> float:
+    """Get video/image duration in seconds (0 for images)."""
+    from polybos_engine.extractors.frames import get_video_duration
+
+    return get_video_duration(file_path)
 
 
 def _extract_frames_at_timestamps(
-    video_path: str, output_dir: str, timestamps: list[float], max_width: int = 1280
+    file_path: str, output_dir: str, timestamps: list[float], max_width: int = 1280
 ) -> list[str]:
-    """Extract frames at specific timestamps, resized for VLM inference."""
+    """Extract frames at specific timestamps, resized for VLM inference.
+
+    Uses FrameExtractor which handles both videos (via OpenCV/ffmpeg)
+    and images (via direct loading).
+    """
+    import cv2
+
     frame_paths: list[str] = []
 
     logger.info(
-        f"Extracting {len(timestamps)} frames from {video_path} at timestamps {timestamps}"
+        f"Extracting {len(timestamps)} frames from {file_path} at timestamps {timestamps}"
     )
 
-    for i, ts in enumerate(timestamps):
-        output_path = os.path.join(output_dir, f"frame_{i:04d}.jpg")
-        # Scale to max width while preserving aspect ratio, reduce quality for memory
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-ss",
-            str(ts),
-            "-i",
-            video_path,
-            "-frames:v",
-            "1",
-            "-update",
-            "1",  # Required for ffmpeg 8.x single-image output
-            "-vf",
-            f"scale='min({max_width},iw)':-2",
-            "-q:v",
-            "3",
-            output_path,
-        ]
-        try:
-            subprocess.run(cmd, capture_output=True, check=True, timeout=30)
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                frame_paths.append(output_path)
-                logger.info(f"Extracted frame {i} at {ts:.2f}s: {output_path}")
+    # Use FrameExtractor with max_width scaling
+    with FrameExtractor(file_path, max_dimension=max_width) as extractor:
+        for i, ts in enumerate(timestamps):
+            output_path = os.path.join(output_dir, f"frame_{i:04d}.jpg")
+            frame = extractor.get_frame_at(ts)
+
+            if frame is not None:
+                # Save frame as JPEG with moderate quality for VLM
+                cv2.imwrite(output_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    frame_paths.append(output_path)
+                    logger.info(f"Extracted frame {i} at {ts:.2f}s: {output_path}")
+                else:
+                    logger.warning(f"Frame at {ts:.2f}s: could not save to {output_path}")
+                    frame_paths.append("")
             else:
-                logger.warning(f"Frame at {ts:.2f}s: ffmpeg ran but output is empty/missing")
+                logger.warning(f"Frame at {ts:.2f}s: extraction failed")
                 frame_paths.append("")
-        except subprocess.TimeoutExpired:
-            logger.warning(f"Frame at {ts:.2f}s: ffmpeg timed out after 30s")
-            frame_paths.append("")
-        except subprocess.CalledProcessError as e:
-            logger.warning(
-                f"Failed to extract frame at {ts:.2f}s: returncode={e.returncode}, stderr={e.stderr.decode() if e.stderr else 'no stderr'}"
-            )
-            frame_paths.append("")
 
     successful = sum(1 for p in frame_paths if p)
     logger.info(

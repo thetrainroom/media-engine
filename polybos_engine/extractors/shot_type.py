@@ -8,7 +8,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
+import cv2
+
 from polybos_engine.config import has_cuda, is_apple_silicon
+from polybos_engine.extractors.frames import FrameExtractor
 from polybos_engine.schemas import ShotType
 
 logger = logging.getLogger(__name__)
@@ -71,24 +74,28 @@ def detect_shot_type(file_path: str, sample_count: int = 5) -> ShotType | None:
     """
     path = Path(file_path)
     if not path.exists():
-        raise FileNotFoundError(f"Video file not found: {file_path}")
+        raise FileNotFoundError(f"File not found: {file_path}")
 
     try:
-        # Get video duration
+        # Get video duration (0 for images)
         duration = _get_video_duration(file_path)
-        if duration <= 0:
-            return None
 
-        # Sample frames at regular intervals
+        # Sample frames at regular intervals (or single frame for images)
         temp_dir = tempfile.mkdtemp(prefix="polybos_shot_")
 
         try:
             frames: list[str] = []
-            for i in range(sample_count):
-                timestamp = (i + 0.5) * duration / sample_count
-                frame_path = _extract_frame_at(file_path, temp_dir, timestamp)
+            if duration == 0:
+                # Image or zero-duration: use single frame at timestamp 0
+                frame_path = _extract_frame_at(file_path, temp_dir, 0.0)
                 if frame_path:
                     frames.append(frame_path)
+            else:
+                for i in range(sample_count):
+                    timestamp = (i + 0.5) * duration / sample_count
+                    frame_path = _extract_frame_at(file_path, temp_dir, timestamp)
+                    if frame_path:
+                        frames.append(frame_path)
 
             if not frames:
                 return None
@@ -185,49 +192,31 @@ def _classify_with_mlx(frame_paths: list[str]) -> dict[str, int]:
     return _classify_with_openclip(frame_paths)
 
 
-def _extract_frame_at(video_path: str, output_dir: str, timestamp: float) -> str | None:
-    """Extract a single frame at specified timestamp."""
+def _extract_frame_at(file_path: str, output_dir: str, timestamp: float) -> str | None:
+    """Extract a single frame at specified timestamp.
+
+    Uses FrameExtractor which handles both videos (via OpenCV/ffmpeg)
+    and images (via direct loading).
+    """
     output_path = os.path.join(output_dir, f"frame_{timestamp:.3f}.jpg")
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-ss",
-        str(timestamp),
-        "-i",
-        video_path,
-        "-vframes",
-        "1",
-        "-q:v",
-        "2",
-        output_path,
-    ]
+    with FrameExtractor(file_path) as extractor:
+        frame = extractor.get_frame_at(timestamp)
 
-    try:
-        subprocess.run(cmd, capture_output=True, check=True)
-        if os.path.exists(output_path):
-            return output_path
-    except subprocess.CalledProcessError:
-        pass
+        if frame is not None:
+            cv2.imwrite(output_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                return output_path
+            else:
+                logger.warning(f"Frame at {timestamp}s: could not save to {output_path}")
+        else:
+            logger.warning(f"Frame at {timestamp}s: extraction failed")
 
     return None
 
 
-def _get_video_duration(video_path: str) -> float:
-    """Get video duration in seconds."""
-    cmd = [
-        "ffprobe",
-        "-v",
-        "quiet",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
+def _get_video_duration(file_path: str) -> float:
+    """Get video/image duration in seconds (0 for images)."""
+    from polybos_engine.extractors.frames import get_video_duration
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return float(result.stdout.strip())
-    except (subprocess.CalledProcessError, ValueError):
-        return 0.0
+    return get_video_duration(file_path)

@@ -14,11 +14,14 @@ from typing import TypeAlias
 import numpy as np
 from PIL import Image
 
+from polybos_engine.extractors.frames import FrameExtractor
 from polybos_engine.schemas import (
     BoundingBox,
     FaceDetection,
     FacesResult,
+    MediaType,
     SceneDetection,
+    get_media_type,
 )
 
 Embedding: TypeAlias = list[float]
@@ -134,9 +137,14 @@ def extract_faces(
         else:
             # Get video duration and sample at fixed intervals
             duration = _get_video_duration(file_path)
-            interval = 1.0 / sample_fps
-            sample_timestamps = [float(t) for t in np.arange(0, duration, interval)]
-            logger.info(f"Sampling {len(sample_timestamps)} frames at {sample_fps} fps")
+            if duration == 0:
+                # Image or zero-duration file: use single timestamp at 0
+                sample_timestamps = [0.0]
+                logger.info("Using single timestamp for image/zero-duration file")
+            else:
+                interval = 1.0 / sample_fps
+                sample_timestamps = [float(t) for t in np.arange(0, duration, interval)]
+                logger.info(f"Sampling {len(sample_timestamps)} frames at {sample_fps} fps")
 
         # Extract frames at specific timestamps
         frame_paths = _extract_frames_at_timestamps(
@@ -252,20 +260,11 @@ def extract_faces(
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _get_video_duration(video_path: str) -> float:
-    """Get video duration in seconds using ffprobe."""
-    cmd = [
-        "ffprobe",
-        "-v",
-        "quiet",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    return float(result.stdout.strip())
+def _get_video_duration(file_path: str) -> float:
+    """Get video/image duration in seconds (0 for images)."""
+    from polybos_engine.extractors.frames import get_video_duration
+
+    return get_video_duration(file_path)
 
 
 def _get_sample_timestamps_from_scenes(
@@ -296,43 +295,33 @@ def _get_sample_timestamps_from_scenes(
 
 
 def _extract_frames_at_timestamps(
-    video_path: str, output_dir: str, timestamps: list[float]
+    file_path: str, output_dir: str, timestamps: list[float]
 ) -> list[str]:
-    """Extract frames at specific timestamps."""
+    """Extract frames at specific timestamps.
+
+    Uses FrameExtractor which handles both videos (via OpenCV/ffmpeg)
+    and images (via direct loading).
+    """
+    import cv2
+
     frame_paths: list[str] = []
 
-    for i, ts in enumerate(timestamps):
-        output_path = os.path.join(output_dir, f"frame_{i:06d}.jpg")
+    with FrameExtractor(file_path) as extractor:
+        for i, ts in enumerate(timestamps):
+            output_path = os.path.join(output_dir, f"frame_{i:06d}.jpg")
+            frame = extractor.get_frame_at(ts)
 
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-ss",
-            str(ts),
-            "-i",
-            video_path,
-            "-frames:v",
-            "1",
-            "-update",
-            "1",  # Required for ffmpeg 8.x single-image output
-            "-q:v",
-            "2",
-            output_path,
-        ]
-
-        try:
-            result = subprocess.run(cmd, capture_output=True, check=True, timeout=30)
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                frame_paths.append(output_path)
+            if frame is not None:
+                # Save frame as JPEG
+                cv2.imwrite(output_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                    frame_paths.append(output_path)
+                else:
+                    logger.warning(f"Frame at {ts}s: could not save to {output_path}")
+                    frame_paths.append("")
             else:
-                logger.warning(f"Frame at {ts}s: ffmpeg ran but output is empty/missing")
+                logger.warning(f"Frame at {ts}s: extraction failed")
                 frame_paths.append("")
-        except subprocess.TimeoutExpired:
-            logger.warning(f"Frame at {ts}s: ffmpeg timed out after 30s")
-            frame_paths.append("")
-        except subprocess.CalledProcessError as e:
-            logger.warning(f"Failed to extract frame at {ts}s: returncode={e.returncode}, stderr={e.stderr}")
-            frame_paths.append("")  # Placeholder to maintain index alignment
 
     return frame_paths
 

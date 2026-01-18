@@ -1,6 +1,7 @@
 """Camera motion analysis using optical flow."""
 
 import logging
+import subprocess
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -9,8 +10,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Analysis resolution (scale down 4K for speed)
+# Analysis resolution (scale down for speed)
 ANALYSIS_HEIGHT = 720
+ANALYSIS_WIDTH = 1280  # 720p aspect ratio
 
 # Motion detection thresholds
 MOTION_THRESHOLD = 2.0  # Minimum average flow magnitude for motion
@@ -20,15 +22,20 @@ STATIC_THRESHOLD = 0.5  # Below this = static
 
 
 class MotionType(StrEnum):
-    """Types of camera motion."""
+    """Types of camera motion.
+
+    Note: PUSH_IN/PULL_OUT describe the optical flow pattern (radial expansion/contraction).
+    This could be optical zoom OR physical camera movement (dolly/travel).
+    Frontend can interpret based on metadata (lens type, GPS movement, device type).
+    """
 
     STATIC = "static"
     PAN_LEFT = "pan_left"
     PAN_RIGHT = "pan_right"
     TILT_UP = "tilt_up"
     TILT_DOWN = "tilt_down"
-    ZOOM_IN = "zoom_in"
-    ZOOM_OUT = "zoom_out"
+    PUSH_IN = "push_in"  # Radial expansion (zoom in or dolly forward)
+    PULL_OUT = "pull_out"  # Radial contraction (zoom out or dolly backward)
     HANDHELD = "handheld"  # Random/shaky movement
     COMPLEX = "complex"  # Multiple motions combined
 
@@ -55,11 +62,67 @@ class MotionAnalysis:
     is_stable: bool  # True if mostly static/tripod
 
 
+def _get_video_info(file_path: str) -> tuple[float, float, int, int]:
+    """Get video info using ffprobe.
+
+    Returns:
+        (fps, duration, width, height)
+    """
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,r_frame_rate,duration",
+        "-of",
+        "csv=p=0",
+        file_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    parts = result.stdout.strip().split(",")
+
+    # Output format: width,height,fps,duration
+    width = int(parts[0]) if parts and parts[0] else 1920
+    height = int(parts[1]) if len(parts) > 1 and parts[1] else 1080
+
+    # Parse frame rate (can be "30/1" or "29.97")
+    fps_str = parts[2] if len(parts) > 2 else "30"
+    if "/" in fps_str:
+        num, den = fps_str.split("/")
+        fps = float(num) / float(den) if float(den) > 0 else 30.0
+    else:
+        fps = float(fps_str) if fps_str else 30.0
+
+    # Duration might be in stream or need to get from format
+    duration = float(parts[3]) if len(parts) > 3 and parts[3] else 0
+
+    if duration == 0:
+        # Try getting duration from format
+        cmd2 = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+            file_path,
+        ]
+        result2 = subprocess.run(cmd2, capture_output=True, text=True)
+        duration = float(result2.stdout.strip()) if result2.stdout.strip() else 0
+
+    return fps, duration, width, height
+
+
 def analyze_motion(
     file_path: str,
     sample_fps: float = 5.0,  # Analyze every N frames per second
 ) -> MotionAnalysis:
     """Analyze camera motion in a video using optical flow.
+
+    Uses FFmpeg to decode frames at low resolution for efficiency with high-res video.
 
     Args:
         file_path: Path to video file
@@ -68,50 +131,80 @@ def analyze_motion(
     Returns:
         MotionAnalysis with motion type segments
     """
-    cap = cv2.VideoCapture(file_path)
-    if not cap.isOpened():
-        raise ValueError(f"Could not open video: {file_path}")
+    # Get video info
+    fps, duration, width, height = _get_video_info(file_path)
+    if duration == 0:
+        # Fallback to opencv for duration
+        cap = cv2.VideoCapture(file_path)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        duration = frame_count / fps if fps > 0 else 0
+        cap.release()
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    duration = frame_count / fps if fps > 0 else 0
-
-    # Calculate frame skip for desired sample rate
-    frame_skip = max(1, int(fps / sample_fps))
-    total_samples = frame_count // frame_skip
+    total_samples = int(duration * sample_fps)
 
     logger.info(
         f"Analyzing motion: {duration:.1f}s @ {fps:.1f}fps, ~{total_samples} samples"
     )
 
+    # Use FFmpeg to extract frames at low resolution
+    # This is much faster than decoding at full res and scaling with cv2
+    # Scale to 720p, keeping aspect ratio
+    scale_filter = f"scale={ANALYSIS_WIDTH}:{ANALYSIS_HEIGHT}:force_original_aspect_ratio=decrease"
+
+    cmd = [
+        "ffmpeg",
+        "-i",
+        file_path,
+        "-vf",
+        f"{scale_filter},fps={sample_fps}",  # Scale and sample in one pass
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "gray",  # Output grayscale directly
+        "-",
+    ]
+
+    # Start ffmpeg process
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+
     prev_gray = None
-    frame_motions: list[tuple[float, MotionType, float]] = (
-        []
-    )  # (timestamp, type, intensity)
+    frame_motions: list[tuple[float, MotionType, float]] = []
+    frame_idx = 0
 
-    for sample_idx in range(total_samples):
-        frame_idx = sample_idx * frame_skip
-        timestamp = frame_idx / fps
+    # Calculate actual frame dimensions after scaling
+    if width > height:
+        out_width = ANALYSIS_WIDTH
+        out_height = int(height * ANALYSIS_WIDTH / width)
+    else:
+        out_height = ANALYSIS_HEIGHT
+        out_width = int(width * ANALYSIS_HEIGHT / height)
 
-        # Seek to frame (faster than reading every frame)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        ret, frame = cap.read()
-        if not ret:
+    # Ensure even dimensions for video
+    out_width = out_width - (out_width % 2)
+    out_height = out_height - (out_height % 2)
+
+    frame_size = out_width * out_height
+
+    while True:
+        # Read one grayscale frame
+        raw_frame = process.stdout.read(frame_size)  # type: ignore[union-attr]
+        if len(raw_frame) != frame_size:
             break
 
-        # Scale down if needed
-        if frame.shape[0] > ANALYSIS_HEIGHT:
-            scale = ANALYSIS_HEIGHT / frame.shape[0]
-            frame = cv2.resize(frame, None, fx=scale, fy=scale)
+        timestamp = frame_idx / sample_fps
+        gray = np.frombuffer(raw_frame, dtype=np.uint8).reshape((out_height, out_width))
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        if prev_gray is not None:
+        if prev_gray is not None and prev_gray.shape == gray.shape:
             # Compute optical flow
             flow = cv2.calcOpticalFlowFarneback(
                 prev_gray,
                 gray,
-                None,  # type: ignore[arg-type]  # OpenCV accepts None for output param
+                None,  # type: ignore[arg-type]
                 pyr_scale=0.5,
                 levels=3,
                 winsize=15,
@@ -126,8 +219,9 @@ def analyze_motion(
             frame_motions.append((timestamp, motion_type, intensity))
 
         prev_gray = gray
+        frame_idx += 1
 
-    cap.release()
+    process.wait()
 
     if not frame_motions:
         return MotionAnalysis(
@@ -209,9 +303,9 @@ def _classify_flow(flow: np.ndarray) -> tuple[MotionType, float]:
 
     if abs(divergence) > ZOOM_THRESHOLD * mean_magnitude:
         if divergence > 0:
-            return MotionType.ZOOM_IN, float(mean_magnitude)
+            return MotionType.PUSH_IN, float(mean_magnitude)
         else:
-            return MotionType.ZOOM_OUT, float(mean_magnitude)
+            return MotionType.PULL_OUT, float(mean_magnitude)
 
     # Check for pan/tilt (consistent directional flow)
     abs_mean_x = abs(mean_x)
@@ -384,7 +478,7 @@ def get_sample_timestamps(
             if seg_duration > 1.0:
                 timestamps.append(seg.end - 0.2)
 
-        elif seg.motion_type in (MotionType.ZOOM_IN, MotionType.ZOOM_OUT):
+        elif seg.motion_type in (MotionType.PUSH_IN, MotionType.PULL_OUT):
             # Zoom - sample at different zoom levels
             timestamps.append(seg.start + 0.2)
             if seg_duration > 1.0:
@@ -424,10 +518,16 @@ def get_adaptive_timestamps(
 ) -> list[float]:
     """Get timestamps with adaptive sampling based on motion intensity.
 
-    Higher motion intensity = more frequent sampling.
-    Lower motion intensity = sparser sampling.
+    SMART OPTIMIZATION: For stable/static footage, returns very few samples
+    since the content doesn't change. This dramatically speeds up processing
+    for tripod shots, interviews, static drone hovers, etc.
 
-    Intensity to FPS mapping:
+    Stability-based limits:
+    - Fully stable (is_stable=True, avg_intensity < 1.0): max 3 samples
+    - Mostly stable (is_stable=True): max 5 samples
+    - Some motion: uses intensity-based adaptive sampling
+
+    Intensity to FPS mapping (for non-stable segments):
     - 0-0.5:   min_fps (static, nothing changing)
     - 0.5-2.0: 0.25 fps (stable, minimal change)
     - 2.0-4.0: 0.5 fps (moderate motion)
@@ -443,14 +543,44 @@ def get_adaptive_timestamps(
     Returns:
         List of timestamps to sample
     """
-    if not motion.segments:
-        # No segments - sample based on overall stability
-        if motion.is_stable:
-            return [motion.duration / 2]  # Single sample for stable video
+    # OPTIMIZATION: Very stable footage needs minimal sampling
+    if motion.is_stable and motion.avg_intensity < 1.0:
+        # Extremely stable (tripod, static drone) - just 3 samples
+        if motion.duration < 10:
+            timestamps = [motion.duration / 2]
         else:
-            # Sample at default rate
-            interval = 1.0 / 0.5
-            return [t for t in _frange(0.1, motion.duration - 0.1, interval)]
+            # Start, middle, end
+            timestamps = [
+                motion.duration * 0.15,
+                motion.duration * 0.5,
+                motion.duration * 0.85,
+            ]
+        logger.info(
+            f"Stable video optimization: {len(timestamps)} frames only "
+            f"(avg_intensity={motion.avg_intensity:.1f})"
+        )
+        return timestamps
+
+    if motion.is_stable:
+        # Mostly stable - cap at 5 samples spread across duration
+        num_samples = min(5, max(1, int(motion.duration / 10)))
+        if num_samples == 1:
+            timestamps = [motion.duration / 2]
+        else:
+            step = motion.duration / (num_samples + 1)
+            timestamps = [step * (i + 1) for i in range(num_samples)]
+        logger.info(
+            f"Stable video: {len(timestamps)} frames "
+            f"(avg_intensity={motion.avg_intensity:.1f})"
+        )
+        return timestamps
+
+    if not motion.segments:
+        # No segments but not stable - sample at moderate rate
+        interval = 2.0  # 0.5 fps
+        timestamps = [t for t in _frange(0.1, motion.duration - 0.1, interval)]
+        timestamps = timestamps[:max_samples]
+        return timestamps
 
     timestamps: list[float] = []
 

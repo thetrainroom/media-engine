@@ -204,13 +204,18 @@ def extract_ocr(
         sample_timestamps = [scene.start for scene in scenes.detections]
     else:
         # Fall back to fixed interval
-        logger.info(f"Sampling OCR at {sample_fps} fps")
         duration = get_video_duration(file_path)
-        sample_timestamps = []
-        t = 0.0
-        while t < duration:
-            sample_timestamps.append(t)
-            t += 1.0 / sample_fps
+        if duration == 0:
+            # Image or zero-duration file: use single timestamp at 0
+            logger.info("Using single timestamp for OCR on image/zero-duration file")
+            sample_timestamps = [0.0]
+        else:
+            logger.info(f"Sampling OCR at {sample_fps} fps")
+            sample_timestamps = []
+            t = 0.0
+            while t < duration:
+                sample_timestamps.append(t)
+                t += 1.0 / sample_fps
 
     detections: list[OcrDetection] = []
     seen_texts: set[str] = set()  # For deduplication

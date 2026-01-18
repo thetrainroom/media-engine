@@ -58,9 +58,12 @@ from polybos_engine.extractors import (
 )
 from polybos_engine.schemas import (
     HealthResponse,
+    MediaType,
     SettingsResponse,
     SettingsUpdate,
+    get_media_type,
 )
+from polybos_engine.extractors.vad import AudioContent
 
 logger = logging.getLogger(__name__)
 
@@ -185,10 +188,68 @@ class JobProgress(BaseModel):
     message: str  # e.g., "Loading model...", "Processing frame 2/5"
     current: int | None = None
     total: int | None = None
+    # ETA tracking
+    stage_elapsed_seconds: float | None = None  # Time spent in current stage
+    eta_seconds: float | None = None  # Estimated seconds remaining for stage
 
 
 # Job TTL for automatic cleanup (1 hour)
 JOB_TTL_SECONDS = 3600
+
+
+# Historical timing data for ETA predictions
+# Key: (extractor, resolution_bucket) -> list of processing times in seconds
+_timing_history: dict[tuple[str, str], list[float]] = {}
+_timing_history_lock = threading.Lock()
+
+# Keep last N samples per bucket for rolling average
+_MAX_TIMING_SAMPLES = 20
+
+
+def _get_resolution_bucket(width: int | None, height: int | None) -> str:
+    """Get resolution bucket for timing predictions."""
+    if width is None or height is None:
+        return "unknown"
+    pixels = width * height
+    if pixels <= 921600:  # 1280x720
+        return "720p"
+    elif pixels <= 2073600:  # 1920x1080
+        return "1080p"
+    elif pixels <= 3686400:  # 2560x1440
+        return "1440p"
+    elif pixels <= 8294400:  # 3840x2160
+        return "4k"
+    elif pixels <= 14745600:  # 5120x2880
+        return "5k"
+    else:
+        return "8k+"
+
+
+def _record_timing(extractor: str, resolution_bucket: str, seconds: float) -> None:
+    """Record processing time for future ETA predictions."""
+    key = (extractor, resolution_bucket)
+    with _timing_history_lock:
+        if key not in _timing_history:
+            _timing_history[key] = []
+        _timing_history[key].append(seconds)
+        # Keep only recent samples
+        if len(_timing_history[key]) > _MAX_TIMING_SAMPLES:
+            _timing_history[key] = _timing_history[key][-_MAX_TIMING_SAMPLES:]
+        sample_count = len(_timing_history[key])
+        avg = sum(_timing_history[key]) / sample_count
+        logger.debug(
+            f"Recorded timing: {extractor}@{resolution_bucket} = {seconds:.2f}s "
+            f"(avg: {avg:.2f}s from {sample_count} samples)"
+        )
+
+
+def _get_predicted_time(extractor: str, resolution_bucket: str) -> float | None:
+    """Get predicted processing time based on historical data."""
+    key = (extractor, resolution_bucket)
+    with _timing_history_lock:
+        if key in _timing_history and _timing_history[key]:
+            return sum(_timing_history[key]) / len(_timing_history[key])
+    return None
 
 
 class BatchRequest(BaseModel):
@@ -311,6 +372,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
     batch_start_time = time.time()
     peak_memory = _get_memory_mb()
+    stage_start_times: dict[str, float] = {}  # extractor -> start time
+    file_resolutions: dict[int, str] = {}  # file_idx -> resolution bucket (for timing predictions)
 
     def update_batch_progress(
         extractor: str,
@@ -319,11 +382,43 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         total: int | None = None,
     ) -> None:
         nonlocal peak_memory
+
+        # Track stage start time
+        if extractor not in stage_start_times:
+            stage_start_times[extractor] = time.time()
+
+        # Calculate ETA
+        stage_elapsed: float | None = None
+        eta: float | None = None
+        if extractor in stage_start_times:
+            stage_elapsed = round(time.time() - stage_start_times[extractor], 1)
+            # Calculate ETA if we have progress info
+            if current is not None and total is not None and current > 0:
+                avg_time_per_item = stage_elapsed / current
+                remaining_items = total - current
+                eta = round(avg_time_per_item * remaining_items, 1)
+            elif current == 0 and total is not None and total > 0:
+                # No progress yet - try to use historical timing for prediction
+                # Use the most common resolution in the batch, or "unknown" if none set
+                common_res = "unknown"
+                if file_resolutions:
+                    res_counts: dict[str, int] = {}
+                    for res in file_resolutions.values():
+                        res_counts[res] = res_counts.get(res, 0) + 1
+                    common_res = max(res_counts, key=lambda r: res_counts[r])
+                predicted = _get_predicted_time(extractor, common_res)
+                if predicted is not None:
+                    eta = round(predicted * total, 1)
+
         with batch_jobs_lock:
             if batch_id in batch_jobs:
                 batch_jobs[batch_id].current_extractor = extractor
                 batch_jobs[batch_id].progress = JobProgress(
-                    message=message, current=current, total=total
+                    message=message,
+                    current=current,
+                    total=total,
+                    stage_elapsed_seconds=stage_elapsed,
+                    eta_seconds=eta,
                 )
                 # Update memory and elapsed time
                 current_mem = _get_memory_mb()
@@ -352,6 +447,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
     def start_extractor_timing(extractor: str) -> datetime:
         """Start timing for an extractor stage."""
         started = datetime.now(timezone.utc)
+        # Reset stage start time for ETA calculation
+        stage_start_times[extractor] = time.time()
         with batch_jobs_lock:
             if batch_id in batch_jobs:
                 batch_jobs[batch_id].extractor_timings.append(
@@ -380,6 +477,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 batch_jobs[batch_id].files[file_idx].timings[extractor] = round(
                     duration, 2
                 )
+        # Record to historical timing for future ETA predictions
+        resolution = file_resolutions.get(file_idx, "unknown")
+        _record_timing(extractor, resolution, duration)
 
     try:
         with batch_jobs_lock:
@@ -424,6 +524,11 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 try:
                     metadata = extract_metadata(file_path, probe_data)
                     update_file_status(i, "running", "metadata", metadata.model_dump())
+                    # Store resolution bucket for timing predictions
+                    file_resolutions[i] = _get_resolution_bucket(
+                        metadata.resolution.width,
+                        metadata.resolution.height,
+                    )
                 except Exception as e:
                     logger.warning(f"Metadata failed for {file_path}: {e}")
                     logger.warning(f"Skipping all extractors for {file_path} - file unreadable")
@@ -453,34 +558,81 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             update_file_timing(i, "telemetry", time.time() - file_start)
         end_extractor_timing("telemetry", total_files)
 
-        # Stage 3: Voice Activity Detection (Silero VAD - lightweight)
+        # Stage 3: Voice Activity Detection (WebRTC VAD - lightweight)
+        # Skip for images and files without audio tracks
         if request.enable_vad:
             start_extractor_timing("vad")
-            update_batch_progress("vad", "Loading VAD model...", 0, total_files)
+            update_batch_progress("vad", "Analyzing audio...", 0, total_files)
+            vad_ran = False  # Track if we actually ran VAD on any file
             for i, file_path in enumerate(files):
                 if i in failed_files:
                     continue
                 file_start = time.time()
+
+                # Check media type - skip VAD for images
+                media_type = get_media_type(file_path)
+                if media_type == MediaType.IMAGE:
+                    logger.info(f"Skipping VAD for {file_path} - image file")
+                    no_audio_result = {
+                        "audio_content": str(AudioContent.NO_AUDIO),
+                        "speech_ratio": 0.0,
+                        "speech_segments": [],
+                        "total_duration": 0.0,
+                    }
+                    update_file_status(i, "running", "vad", no_audio_result)
+                    update_file_timing(i, "vad", time.time() - file_start)
+                    continue
+
+                # Check if metadata shows no audio track
+                has_audio_track = True
+                with batch_jobs_lock:
+                    file_results = batch_jobs[batch_id].files[i].results
+                    if file_results and file_results.get("metadata"):
+                        metadata = file_results["metadata"]
+                        if metadata.get("audio") is None:
+                            has_audio_track = False
+
+                if not has_audio_track:
+                    logger.info(f"Skipping VAD for {file_path} - no audio track")
+                    no_audio_result = {
+                        "audio_content": str(AudioContent.NO_AUDIO),
+                        "speech_ratio": 0.0,
+                        "speech_segments": [],
+                        "total_duration": 0.0,
+                    }
+                    update_file_status(i, "running", "vad", no_audio_result)
+                    update_file_timing(i, "vad", time.time() - file_start)
+                    continue
+
+                # Run VAD for files with audio
                 update_batch_progress(
                     "vad", f"Analyzing {Path(file_path).name}", i + 1, total_files
                 )
                 try:
                     vad_result = detect_voice_activity(file_path)
                     update_file_status(i, "running", "vad", vad_result)
+                    vad_ran = True
                 except Exception as e:
                     logger.warning(f"VAD failed for {file_path}: {e}")
                 update_file_timing(i, "vad", time.time() - file_start)
-            # Unload VAD model to free memory
-            update_batch_progress("vad", "Unloading VAD model...", None, None)
-            unload_vad_model()
+
+            # Only unload if we actually loaded the model
+            if vad_ran:
+                update_batch_progress("vad", "Unloading VAD model...", None, None)
+                unload_vad_model()
             end_extractor_timing("vad", total_files)
 
         # Stage 4: Scenes (PySceneDetect - moderate memory)
+        # Skip for images (scene detection is video-only)
         if request.enable_scenes:
             start_extractor_timing("scenes")
             update_batch_progress("scenes", "Detecting scenes...", 0, total_files)
             for i, file_path in enumerate(files):
                 if i in failed_files:
+                    continue
+                # Skip images - scene detection only makes sense for videos
+                media_type = get_media_type(file_path)
+                if media_type == MediaType.IMAGE:
                     continue
                 file_start = time.time()
                 update_batch_progress(
@@ -497,47 +649,76 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             end_extractor_timing("scenes", total_files)
 
         # Stage 5: Transcript (Whisper - heavy model)
+        # Skip for images and files without audio tracks
         if request.enable_transcript:
             start_extractor_timing("transcript")
-            # Clear memory before loading heavy model
-            logger.info("Clearing memory before Whisper...")
-            _clear_memory()
-            update_batch_progress(
-                "transcript", "Loading Whisper model...", 0, total_files
-            )
+            whisper_ran = False  # Track if we actually ran Whisper
+
+            # Check if any files need transcription before loading model
+            files_to_transcribe: list[int] = []
             for i, file_path in enumerate(files):
                 if i in failed_files:
                     continue
-                file_start = time.time()
+                # Skip images
+                media_type = get_media_type(file_path)
+                if media_type == MediaType.IMAGE:
+                    continue
+                # Check for audio track
+                has_audio = True
+                with batch_jobs_lock:
+                    file_results = batch_jobs[batch_id].files[i].results
+                    if file_results and file_results.get("metadata"):
+                        if file_results["metadata"].get("audio") is None:
+                            has_audio = False
+                if has_audio:
+                    files_to_transcribe.append(i)
+
+            if files_to_transcribe:
+                # Clear memory before loading heavy model
+                logger.info("Clearing memory before Whisper...")
+                _clear_memory()
                 update_batch_progress(
-                    "transcript",
-                    f"Transcribing {Path(file_path).name}",
-                    i + 1,
-                    total_files,
+                    "transcript", "Loading Whisper model...", 0, len(files_to_transcribe)
                 )
-                try:
-                    transcript = extract_transcript(
-                        file_path,
-                        model=whisper_model,
-                        language=request.language,
-                        fallback_language=settings.fallback_language,
-                        language_hints=request.language_hints,
-                        context_hint=request.context_hint,
-                    )
-                    update_file_status(
-                        i,
-                        "running",
+
+                for idx, i in enumerate(files_to_transcribe):
+                    file_path = files[i]
+                    file_start = time.time()
+                    update_batch_progress(
                         "transcript",
-                        transcript.model_dump() if transcript else None,
+                        f"Transcribing {Path(file_path).name}",
+                        idx + 1,
+                        len(files_to_transcribe),
                     )
-                except Exception as e:
-                    logger.warning(f"Transcript failed for {file_path}: {e}")
-                update_file_timing(i, "transcript", time.time() - file_start)
-            # Unload Whisper to free memory
-            update_batch_progress(
-                "transcript", "Unloading Whisper model...", None, None
-            )
-            unload_whisper_model()
+                    try:
+                        transcript = extract_transcript(
+                            file_path,
+                            model=whisper_model,
+                            language=request.language,
+                            fallback_language=settings.fallback_language,
+                            language_hints=request.language_hints,
+                            context_hint=request.context_hint,
+                        )
+                        update_file_status(
+                            i,
+                            "running",
+                            "transcript",
+                            transcript.model_dump() if transcript else None,
+                        )
+                        whisper_ran = True
+                    except Exception as e:
+                        logger.warning(f"Transcript failed for {file_path}: {e}")
+                    update_file_timing(i, "transcript", time.time() - file_start)
+
+                # Unload Whisper to free memory
+                if whisper_ran:
+                    update_batch_progress(
+                        "transcript", "Unloading Whisper model...", None, None
+                    )
+                    unload_whisper_model()
+            else:
+                logger.info("Skipping Whisper - no files with audio tracks")
+
             end_extractor_timing("transcript", total_files)
 
         # Stage 6: Motion Analysis (for smart sampling of faces/objects/clip/ocr)
@@ -570,6 +751,13 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             )
             for i, file_path in enumerate(files):
                 if i in failed_files:
+                    continue
+                # Skip images - motion analysis is video-only
+                # Use timestamp 0 for subsequent stages (objects, faces, etc.)
+                media_type = get_media_type(file_path)
+                if media_type == MediaType.IMAGE:
+                    motion_data[i] = None
+                    adaptive_timestamps[i] = [0.0]  # Single timestamp for image
                     continue
                 file_start = time.time()
                 update_batch_progress(

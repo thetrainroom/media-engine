@@ -15,6 +15,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from polybos_engine.config import has_cuda, is_apple_silicon
+from polybos_engine.extractors.frames import FrameExtractor
 from polybos_engine.schemas import ClipResult, ClipSegment, ScenesResult
 
 Embedding: TypeAlias = list[float]
@@ -349,34 +350,52 @@ def extract_clip(
                         logger.warning(f"Failed to encode frame at {mid_time}s: {e}")
         else:
             # Fall back to fixed interval
-            logger.info(f"Extracting CLIP embeddings at {fallback_interval}s intervals")
             duration = _get_video_duration(file_path)
 
-            current_time = 0.0
-            index = 0
-
-            while current_time < duration:
-                end_time = min(current_time + fallback_interval, duration)
-                mid_time = (current_time + end_time) / 2
-
-                frame_path = _extract_frame_at(file_path, temp_dir, mid_time)
-
+            if duration == 0:
+                # Image or zero-duration file: encode single frame
+                logger.info("Extracting CLIP embedding for image/zero-duration file")
+                frame_path = _extract_frame_at(file_path, temp_dir, 0.0)
                 if frame_path:
                     try:
                         embedding = backend.encode_image(frame_path)
                         segments.append(
                             ClipSegment(
-                                start=current_time,
-                                end=end_time,
-                                scene_index=index,
+                                start=0.0,
+                                end=0.0,
+                                scene_index=0,
                                 embedding=embedding,
                             )
                         )
                     except Exception as e:
-                        logger.warning(f"Failed to encode frame at {mid_time}s: {e}")
+                        logger.warning(f"Failed to encode image: {e}")
+            else:
+                logger.info(f"Extracting CLIP embeddings at {fallback_interval}s intervals")
+                current_time = 0.0
+                index = 0
 
-                current_time = end_time
-                index += 1
+                while current_time < duration:
+                    end_time = min(current_time + fallback_interval, duration)
+                    mid_time = (current_time + end_time) / 2
+
+                    frame_path = _extract_frame_at(file_path, temp_dir, mid_time)
+
+                    if frame_path:
+                        try:
+                            embedding = backend.encode_image(frame_path)
+                            segments.append(
+                                ClipSegment(
+                                    start=current_time,
+                                    end=end_time,
+                                    scene_index=index,
+                                    embedding=embedding,
+                                )
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to encode frame at {mid_time}s: {e}")
+
+                    current_time = end_time
+                    index += 1
 
         logger.info(f"Generated {len(segments)} CLIP embeddings")
 
@@ -390,55 +409,31 @@ def extract_clip(
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-def _extract_frame_at(video_path: str, output_dir: str, timestamp: float) -> str | None:
-    """Extract a single frame at specified timestamp."""
+def _extract_frame_at(file_path: str, output_dir: str, timestamp: float) -> str | None:
+    """Extract a single frame at specified timestamp.
+
+    Uses FrameExtractor which handles both videos (via OpenCV/ffmpeg)
+    and images (via direct loading).
+    """
     output_path = os.path.join(output_dir, f"frame_{timestamp:.3f}.jpg")
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-ss",
-        str(timestamp),
-        "-i",
-        video_path,
-        "-vframes",
-        "1",
-        "-update",
-        "1",  # Required for ffmpeg 8.x single-image output
-        "-q:v",
-        "2",
-        output_path,
-    ]
+    with FrameExtractor(file_path) as extractor:
+        frame = extractor.get_frame_at(timestamp)
 
-    try:
-        subprocess.run(cmd, capture_output=True, check=True, timeout=30)
-        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-            return output_path
+        if frame is not None:
+            cv2.imwrite(output_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                return output_path
+            else:
+                logger.warning(f"Frame at {timestamp}s: could not save to {output_path}")
         else:
-            logger.warning(f"Frame at {timestamp}s: ffmpeg ran but output is empty/missing")
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Frame at {timestamp}s: ffmpeg timed out after 30s")
-    except subprocess.CalledProcessError as e:
-        logger.warning(f"Failed to extract frame at {timestamp}s: returncode={e.returncode}, stderr={e.stderr}")
+            logger.warning(f"Frame at {timestamp}s: extraction failed")
 
     return None
 
 
-def _get_video_duration(video_path: str) -> float:
-    """Get video duration in seconds."""
-    cmd = [
-        "ffprobe",
-        "-v",
-        "error",  # Show errors (quiet hides them)
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-        video_path,
-    ]
+def _get_video_duration(file_path: str) -> float:
+    """Get video/image duration in seconds (0 for images)."""
+    from polybos_engine.extractors.frames import get_video_duration
 
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        return float(result.stdout.strip())
-    except (subprocess.CalledProcessError, ValueError):
-        return 0.0
+    return get_video_duration(file_path)

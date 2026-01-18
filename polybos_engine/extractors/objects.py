@@ -134,9 +134,14 @@ def extract_objects(
         )
     else:
         duration = get_video_duration(file_path)
-        interval = 1.0 / sample_fps
-        sample_timestamps = list(_frange(0, duration, interval))
-        logger.info(f"Sampling {len(sample_timestamps)} frames at {sample_fps} fps")
+        if duration == 0:
+            # Image or zero-duration file: use single timestamp at 0
+            sample_timestamps = [0.0]
+            logger.info("Using single timestamp for image/zero-duration file")
+        else:
+            interval = 1.0 / sample_fps
+            sample_timestamps = list(_frange(0, duration, interval))
+            logger.info(f"Sampling {len(sample_timestamps)} frames at {sample_fps} fps")
 
     # Extract frames using OpenCV (much faster than ffmpeg per-frame)
     raw_detections: list[ObjectDetection] = []

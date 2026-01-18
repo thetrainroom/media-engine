@@ -1,7 +1,10 @@
-"""Fast frame extraction using OpenCV.
+"""Fast frame extraction using OpenCV or FFmpeg.
 
-OpenCV's VideoCapture is significantly faster than spawning ffmpeg processes
-for each frame, especially when extracting multiple frames from the same video.
+OpenCV's VideoCapture is fast for normal videos but decodes at full resolution.
+For high-resolution videos (4K+), FFmpeg decoding at target resolution is faster.
+
+Also supports direct image loading - when given an image file, it loads it
+directly instead of trying to use VideoCapture.
 """
 
 import logging
@@ -12,39 +15,69 @@ import tempfile
 import cv2
 import numpy as np
 
+from polybos_engine.schemas import MediaType, get_media_type
+
 logger = logging.getLogger(__name__)
+
+# Resolution threshold for using FFmpeg decode (4K+)
+HIGH_RES_THRESHOLD = 3840 * 2160  # ~8.3M pixels
 
 
 class FrameExtractor:
-    """Extract frames from video using OpenCV.
+    """Extract frames from video or image using OpenCV.
 
-    Uses cv2.VideoCapture for fast seeking and frame extraction.
+    Uses cv2.VideoCapture for fast seeking and frame extraction from videos.
     Falls back to ffmpeg for exotic codecs that OpenCV can't handle.
+    For images, loads directly with cv2.imread (no frame extraction needed).
     """
 
     # Default max dimension - scale down 4K to ~HD for faster processing
     DEFAULT_MAX_DIMENSION = 1920
 
     def __init__(
-        self, video_path: str, max_dimension: int | None = DEFAULT_MAX_DIMENSION
+        self, file_path: str, max_dimension: int | None = DEFAULT_MAX_DIMENSION
     ):
         """Initialize frame extractor.
 
         Args:
-            video_path: Path to video file
+            file_path: Path to video or image file
             max_dimension: Maximum width/height. Frames larger than this are scaled down.
                           Set to None to disable scaling. Default: 1920 (HD)
         """
-        self.video_path = video_path
+        self.video_path = file_path  # Keep name for compatibility
         self.max_dimension = max_dimension
         self.cap: cv2.VideoCapture | None = None
         self._duration: float | None = None
         self._fps: float | None = None
         self._frame_count: int | None = None
+        self._width: int | None = None
+        self._height: int | None = None
         self._use_ffmpeg_fallback = False
+        self._use_ffmpeg_decode = False  # For high-res, decode at lower res with FFmpeg
+        # Image handling
+        self._is_image = False
+        self._image_frame: np.ndarray | None = None
 
     def __enter__(self) -> "FrameExtractor":
-        """Open video file."""
+        """Open video or image file."""
+        # Check if this is an image file
+        media_type = get_media_type(self.video_path)
+        if media_type == MediaType.IMAGE:
+            self._is_image = True
+            self._duration = 0.0
+            self._fps = 1.0
+            self._frame_count = 1
+            # Load the image directly
+            self._image_frame = cv2.imread(self.video_path)
+            if self._image_frame is None:
+                logger.warning(f"Failed to load image: {self.video_path}")
+            else:
+                # Apply scaling
+                self._image_frame = self._scale_frame(self._image_frame)
+                logger.debug(f"Loaded image directly: {self.video_path}")
+            return self
+
+        # Video file - use VideoCapture
         self.cap = cv2.VideoCapture(self.video_path)
 
         if not self.cap.isOpened():
@@ -56,11 +89,28 @@ class FrameExtractor:
         else:
             self._fps = self.cap.get(cv2.CAP_PROP_FPS)
             self._frame_count = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self._width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            self._height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
             if self._fps > 0 and self._frame_count > 0:
                 self._duration = self._frame_count / self._fps
             else:
                 # Seek to estimate duration
                 self._duration = self._get_duration_ffprobe()
+
+            # Check if this is high-res video that needs FFmpeg decode
+            if self._width and self._height and self.max_dimension:
+                pixels = self._width * self._height
+                max_dim = max(self._width, self._height)
+                if pixels > HIGH_RES_THRESHOLD and max_dim > self.max_dimension:
+                    logger.info(
+                        f"High-res video ({self._width}x{self._height}), "
+                        f"using FFmpeg decode at {self.max_dimension}px"
+                    )
+                    self._use_ffmpeg_decode = True
+                    # Release opencv capture - we'll use FFmpeg instead
+                    self.cap.release()
+                    self.cap = None
 
         return self
 
@@ -69,17 +119,24 @@ class FrameExtractor:
         if self.cap is not None:
             self.cap.release()
             self.cap = None
+        # Clear image reference
+        self._image_frame = None
+
+    @property
+    def is_image(self) -> bool:
+        """Check if this extractor is handling an image (not a video)."""
+        return self._is_image
 
     @property
     def duration(self) -> float:
-        """Get video duration in seconds."""
+        """Get video duration in seconds (0 for images)."""
         if self._duration is None:
             self._duration = self._get_duration_ffprobe()
         return self._duration
 
     @property
     def fps(self) -> float:
-        """Get video frame rate."""
+        """Get video frame rate (1 for images)."""
         if self._fps is None:
             self._fps = 30.0  # Default fallback
         return self._fps
@@ -128,11 +185,19 @@ class FrameExtractor:
         """Extract a single frame at the given timestamp.
 
         Args:
-            timestamp: Time in seconds
+            timestamp: Time in seconds (ignored for images)
 
         Returns:
             Frame as BGR numpy array (scaled to max_dimension), or None if extraction failed
         """
+        # For images, always return the loaded image (timestamp is ignored)
+        if self._is_image:
+            return self._image_frame
+
+        # High-res video: use FFmpeg with scale filter (decodes at target res)
+        if self._use_ffmpeg_decode:
+            return self._get_frame_ffmpeg_scaled(timestamp)
+
         if self._use_ffmpeg_fallback:
             frame = self._get_frame_ffmpeg(timestamp)
             return self._scale_frame(frame) if frame is not None else None
@@ -176,7 +241,7 @@ class FrameExtractor:
         return [(ts, results.get(ts)) for ts in timestamps]
 
     def _get_frame_ffmpeg(self, timestamp: float) -> np.ndarray | None:
-        """Extract frame using ffmpeg (fallback)."""
+        """Extract frame using ffmpeg (fallback, no scaling)."""
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             tmp_path = tmp.name
 
@@ -192,6 +257,55 @@ class FrameExtractor:
                 "1",
                 "-update",
                 "1",  # Required for ffmpeg 8.x single-image output
+                "-q:v",
+                "2",
+                tmp_path,
+            ]
+            subprocess.run(cmd, capture_output=True, check=True)
+
+            if os.path.exists(tmp_path):
+                frame = cv2.imread(tmp_path)
+                return frame
+        except subprocess.CalledProcessError:
+            pass
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+        return None
+
+    def _get_frame_ffmpeg_scaled(self, timestamp: float) -> np.ndarray | None:
+        """Extract frame using FFmpeg with scale filter (for high-res videos).
+
+        This is faster than decoding at full resolution and then scaling with cv2.
+        """
+        if self.max_dimension is None:
+            return self._get_frame_ffmpeg(timestamp)
+
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        try:
+            # Scale filter that maintains aspect ratio
+            # scale=W:H:force_original_aspect_ratio=decrease
+            scale_filter = (
+                f"scale={self.max_dimension}:{self.max_dimension}"
+                f":force_original_aspect_ratio=decrease"
+            )
+
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                str(timestamp),
+                "-i",
+                self.video_path,
+                "-vf",
+                scale_filter,
+                "-frames:v",
+                "1",
+                "-update",
+                "1",
                 "-q:v",
                 "2",
                 tmp_path,
@@ -260,17 +374,22 @@ def extract_frames_batch(
         return results
 
 
-def get_video_duration(video_path: str) -> float:
+def get_video_duration(file_path: str) -> float:
     """Get video duration in seconds.
 
     Args:
-        video_path: Path to video file
+        file_path: Path to video or image file
 
     Returns:
-        Duration in seconds, or 0 if unable to determine
+        Duration in seconds, or 0 for images/unknown files
     """
+    # Check if this is an image - images have 0 duration
+    media_type = get_media_type(file_path)
+    if media_type == MediaType.IMAGE:
+        return 0.0
+
     # Try OpenCV first (faster)
-    cap = cv2.VideoCapture(video_path)
+    cap = cv2.VideoCapture(file_path)
     if cap.isOpened():
         fps = cap.get(cv2.CAP_PROP_FPS)
         frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
@@ -289,7 +408,7 @@ def get_video_duration(video_path: str) -> float:
             "format=duration",
             "-of",
             "default=noprint_wrappers=1:nokey=1",
-            video_path,
+            file_path,
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return float(result.stdout.strip())

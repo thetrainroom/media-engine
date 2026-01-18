@@ -17,12 +17,18 @@ logger = logging.getLogger(__name__)
 
 
 class AudioContent(StrEnum):
-    """Classification of audio content."""
+    """Classification of audio content.
 
+    Simplified categories for UI display:
+    - NO_AUDIO: File has no audio track (images, some video files)
+    - SPEECH: Audio with speech detected (should run Whisper)
+    - AUDIO: Audio present but no speech (ambient/music/silent - skip Whisper)
+    - UNKNOWN: Could not determine (extraction failed)
+    """
+
+    NO_AUDIO = "no_audio"
     SPEECH = "speech"
-    AMBIENT = "ambient"
-    MUSIC = "music"
-    SILENT = "silent"
+    AUDIO = "audio"  # Has audio but no speech (ambient, music, or silent)
     UNKNOWN = "unknown"
 
 
@@ -198,7 +204,7 @@ def detect_voice_activity(
         if not frames:
             logger.warning(f"No audio frames extracted from {file_path}")
             return {
-                "audio_content": str(AudioContent.SILENT),
+                "audio_content": str(AudioContent.AUDIO),  # Has audio track but empty/silent
                 "speech_ratio": 0.0,
                 "speech_segments": [],
                 "total_duration": 0.0,
@@ -238,12 +244,9 @@ def detect_voice_activity(
     # Classify audio content
     if total_speech_duration >= min_speech_duration and speech_ratio > 0.1:
         audio_content = AudioContent.SPEECH
-    elif speech_ratio < 0.02:
-        # Very little audio activity - silent or very quiet
-        audio_content = AudioContent.SILENT
     else:
-        # Some audio but not classified as speech - ambient or music
-        audio_content = AudioContent.AMBIENT
+        # Audio present but no speech detected (silent, ambient, or music)
+        audio_content = AudioContent.AUDIO
 
     logger.info(
         f"VAD result for {path.name}: {audio_content} "
