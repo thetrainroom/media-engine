@@ -1,7 +1,9 @@
 """Camera motion analysis using optical flow."""
 
 import logging
+import platform
 import subprocess
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -9,6 +11,9 @@ import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# Cache for hardware acceleration detection
+_hwaccel_cache: str | None = None
 
 # Analysis resolution (scale down for speed)
 ANALYSIS_HEIGHT = 720
@@ -116,17 +121,202 @@ def _get_video_info(file_path: str) -> tuple[float, float, int, int]:
     return fps, duration, width, height
 
 
+# Chunk duration in seconds (2 minutes)
+CHUNK_DURATION = 120.0
+
+
+def _detect_hwaccel() -> str | None:
+    """Detect available hardware acceleration for video decoding.
+
+    Returns:
+        Hardware acceleration method name, or None if not available.
+        - "videotoolbox" for macOS (Apple Silicon or Intel with VideoToolbox)
+        - "cuda" for NVIDIA GPUs
+        - None for software decoding
+    """
+    global _hwaccel_cache
+
+    if _hwaccel_cache is not None:
+        return _hwaccel_cache if _hwaccel_cache != "" else None
+
+    # Check platform
+    system = platform.system()
+
+    if system == "Darwin":
+        # macOS - check for VideoToolbox support
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-hwaccels"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if "videotoolbox" in result.stdout:
+                logger.info("Hardware acceleration: VideoToolbox (macOS)")
+                _hwaccel_cache = "videotoolbox"
+                return "videotoolbox"
+        except Exception:
+            pass
+
+    elif system == "Linux":
+        # Linux - check for CUDA/NVDEC
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-hwaccels"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if "cuda" in result.stdout:
+                # Verify NVIDIA GPU is present
+                nvidia_check = subprocess.run(
+                    ["nvidia-smi", "-L"],
+                    capture_output=True,
+                    timeout=5,
+                )
+                if nvidia_check.returncode == 0:
+                    logger.info("Hardware acceleration: CUDA (NVIDIA)")
+                    _hwaccel_cache = "cuda"
+                    return "cuda"
+        except Exception:
+            pass
+
+    logger.info("Hardware acceleration: None (software decoding)")
+    _hwaccel_cache = ""
+    return None
+
+
+def _load_frames_chunk(
+    file_path: str,
+    start_time: float,
+    chunk_duration: float,
+    sample_fps: float,
+    out_width: int,
+    out_height: int,
+    hwaccel: str | None = None,
+    src_width: int = 0,
+    src_height: int = 0,
+) -> np.ndarray:
+    """Load a chunk of frames into memory using FFmpeg.
+
+    Args:
+        file_path: Path to video file
+        start_time: Start time in seconds
+        chunk_duration: Duration of chunk to load in seconds
+        sample_fps: Frames per second to sample
+        out_width: Output frame width
+        out_height: Output frame height
+        hwaccel: Hardware acceleration method (videotoolbox, cuda, or None)
+        src_width: Source video width (for aspect ratio calculation with hwaccel)
+        src_height: Source video height (for aspect ratio calculation with hwaccel)
+
+    Returns:
+        numpy array of shape (num_frames, height, width) with grayscale frames
+    """
+    # Build command with optional hardware acceleration
+    cmd = ["ffmpeg", "-hide_banner"]
+
+    # For hardware acceleration, calculate output height based on source aspect ratio
+    actual_out_height = out_height
+    if hwaccel and src_width > 0 and src_height > 0:
+        # Calculate height maintaining aspect ratio, rounded to even number
+        actual_out_height = int(out_width * src_height / src_width)
+        actual_out_height = actual_out_height - (actual_out_height % 2)  # Ensure even
+
+    # Use hardware-accelerated decode and scaling if available
+    if hwaccel == "videotoolbox":
+        # Decode on hardware, scale on GPU, then transfer to CPU
+        # p010le is required for VideoToolbox hwdownload (10-bit format)
+        cmd.extend(["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"])
+        vf_filter = f"scale_vt=w={out_width}:h={actual_out_height},hwdownload,format=p010le,fps={sample_fps}"
+    elif hwaccel == "cuda":
+        cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
+        vf_filter = f"scale_cuda={out_width}:{actual_out_height},hwdownload,format=nv12,fps={sample_fps}"
+    else:
+        actual_out_height = out_height  # Use the provided value for software
+        vf_filter = f"scale={out_width}:{out_height}:force_original_aspect_ratio=decrease,fps={sample_fps}"
+
+    cmd.extend([
+        "-ss",
+        str(start_time),
+        "-t",
+        str(chunk_duration),
+        "-i",
+        file_path,
+        "-vf",
+        vf_filter,
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "gray",
+        "-",
+    ])
+
+    logger.debug(f"FFmpeg command: {' '.join(cmd)}")
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    frame_size = out_width * actual_out_height
+    frames: list[np.ndarray] = []
+
+    while True:
+        raw_frame = process.stdout.read(frame_size)  # type: ignore[union-attr]
+        if len(raw_frame) != frame_size:
+            break
+        frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((actual_out_height, out_width))
+        frames.append(frame.copy())
+
+    _, stderr = process.communicate()
+    if stderr and logger.isEnabledFor(logging.DEBUG):
+        # Log first few lines of stderr for debugging
+        stderr_lines = stderr.decode(errors="ignore").strip().split("\n")[:5]
+        for line in stderr_lines:
+            if line:
+                logger.debug(f"FFmpeg: {line}")
+
+    # If hardware acceleration failed (no frames), retry without it
+    if not frames and hwaccel:
+        # Log the stderr to understand why it failed
+        if stderr:
+            logger.warning(f"Hardware acceleration ({hwaccel}) failed: {stderr.decode(errors='ignore')[:500]}")
+        else:
+            logger.warning(f"Hardware acceleration ({hwaccel}) failed, no frames produced")
+        return _load_frames_chunk(
+            file_path,
+            start_time,
+            chunk_duration,
+            sample_fps,
+            out_width,
+            out_height,
+            hwaccel=None,
+            src_width=src_width,
+            src_height=src_height,
+        )
+
+    if not frames:
+        return np.array([], dtype=np.uint8)
+
+    return np.stack(frames)
+
+
 def analyze_motion(
     file_path: str,
     sample_fps: float = 5.0,  # Analyze every N frames per second
+    chunk_duration: float = CHUNK_DURATION,  # Process 2 minutes at a time
 ) -> MotionAnalysis:
     """Analyze camera motion in a video using optical flow.
 
     Uses FFmpeg to decode frames at low resolution for efficiency with high-res video.
+    Processes in 2-minute chunks to balance memory usage and I/O efficiency.
 
     Args:
         file_path: Path to video file
         sample_fps: How many frames per second to analyze (default 5)
+        chunk_duration: Duration of each processing chunk in seconds (default 120)
 
     Returns:
         MotionAnalysis with motion type segments
@@ -143,38 +333,13 @@ def analyze_motion(
 
     total_samples = int(duration * sample_fps)
 
+    # Detect hardware acceleration
+    hwaccel = _detect_hwaccel()
+
     logger.info(
         f"Analyzing motion: {duration:.1f}s @ {fps:.1f}fps, ~{total_samples} samples"
+        + (f" (hwaccel={hwaccel})" if hwaccel else "")
     )
-
-    # Use FFmpeg to extract frames at low resolution
-    # This is much faster than decoding at full res and scaling with cv2
-    # Scale to 720p, keeping aspect ratio
-    scale_filter = f"scale={ANALYSIS_WIDTH}:{ANALYSIS_HEIGHT}:force_original_aspect_ratio=decrease"
-
-    cmd = [
-        "ffmpeg",
-        "-i",
-        file_path,
-        "-vf",
-        f"{scale_filter},fps={sample_fps}",  # Scale and sample in one pass
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "gray",  # Output grayscale directly
-        "-",
-    ]
-
-    # Start ffmpeg process
-    process = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-
-    prev_gray = None
-    frame_motions: list[tuple[float, MotionType, float]] = []
-    frame_idx = 0
 
     # Calculate actual frame dimensions after scaling
     if width > height:
@@ -188,40 +353,85 @@ def analyze_motion(
     out_width = out_width - (out_width % 2)
     out_height = out_height - (out_height % 2)
 
-    frame_size = out_width * out_height
+    frame_motions: list[tuple[float, MotionType, float]] = []
+    prev_gray: np.ndarray | None = None
+    global_frame_idx = 0
 
-    while True:
-        # Read one grayscale frame
-        raw_frame = process.stdout.read(frame_size)  # type: ignore[union-attr]
-        if len(raw_frame) != frame_size:
+    # Timing stats
+    total_load_time = 0.0
+    total_flow_time = 0.0
+
+    # Process video in chunks
+    num_chunks = max(1, int(np.ceil(duration / chunk_duration)))
+    logger.debug(f"Processing in {num_chunks} chunk(s) of {chunk_duration}s each")
+
+    for chunk_idx in range(num_chunks):
+        chunk_start = chunk_idx * chunk_duration
+        actual_chunk_duration = min(chunk_duration, duration - chunk_start)
+
+        if actual_chunk_duration <= 0:
             break
 
-        timestamp = frame_idx / sample_fps
-        gray = np.frombuffer(raw_frame, dtype=np.uint8).reshape((out_height, out_width))
+        logger.debug(
+            f"Loading chunk {chunk_idx + 1}/{num_chunks}: {chunk_start:.1f}s - {chunk_start + actual_chunk_duration:.1f}s"
+        )
 
-        if prev_gray is not None and prev_gray.shape == gray.shape:
-            # Compute optical flow
-            flow = cv2.calcOpticalFlowFarneback(
-                prev_gray,
-                gray,
-                None,  # type: ignore[arg-type]
-                pyr_scale=0.5,
-                levels=3,
-                winsize=15,
-                iterations=3,
-                poly_n=5,
-                poly_sigma=1.2,
-                flags=0,
-            )
+        # Load all frames for this chunk into memory
+        load_start = time.perf_counter()
+        frames = _load_frames_chunk(
+            file_path,
+            chunk_start,
+            actual_chunk_duration,
+            sample_fps,
+            out_width,
+            out_height,
+            hwaccel=hwaccel,
+            src_width=width,
+            src_height=height,
+        )
+        total_load_time += time.perf_counter() - load_start
 
-            # Classify motion
-            motion_type, intensity = _classify_flow(flow)
-            frame_motions.append((timestamp, motion_type, intensity))
+        if frames.size == 0:
+            continue
 
-        prev_gray = gray
-        frame_idx += 1
+        logger.debug(f"Loaded {len(frames)} frames into memory")
 
-    process.wait()
+        # Process optical flow for this chunk
+        flow_start = time.perf_counter()
+        for i in range(len(frames)):
+            gray = frames[i]
+            timestamp = global_frame_idx / sample_fps
+
+            if prev_gray is not None and prev_gray.shape == gray.shape:
+                # Compute optical flow
+                flow = cv2.calcOpticalFlowFarneback(
+                    prev_gray,
+                    gray,
+                    None,  # type: ignore[arg-type]
+                    pyr_scale=0.5,
+                    levels=3,
+                    winsize=15,
+                    iterations=3,
+                    poly_n=5,
+                    poly_sigma=1.2,
+                    flags=0,
+                )
+
+                # Classify motion
+                motion_type, intensity = _classify_flow(flow)
+                frame_motions.append((timestamp, motion_type, intensity))
+
+            prev_gray = gray.copy()
+            global_frame_idx += 1
+        total_flow_time += time.perf_counter() - flow_start
+
+    # Log timing breakdown (always print for diagnostics)
+    import sys
+    print(
+        f"Timing: decode={total_load_time:.2f}s, optical_flow={total_flow_time:.2f}s, "
+        f"frames={global_frame_idx}",
+        file=sys.stderr,
+    )
 
     if not frame_motions:
         return MotionAnalysis(

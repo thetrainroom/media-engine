@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 
 from polybos_engine.extractors import extract_objects, extract_objects_qwen
 
@@ -42,6 +43,7 @@ def main():
         logging.basicConfig(level=logging.WARNING)
 
     try:
+        start_time = time.perf_counter()
         if args.detector == "qwen":
             result = extract_objects_qwen(args.file)
         else:
@@ -50,9 +52,12 @@ def main():
                 sample_fps=args.sample_fps,
                 min_confidence=args.min_confidence,
             )
+        elapsed = time.perf_counter() - start_time
 
         if args.json:
-            print(json.dumps(result.model_dump(), indent=2, default=str))
+            output = result.model_dump()
+            output["elapsed_seconds"] = round(elapsed, 2)
+            print(json.dumps(output, indent=2, default=str))
         else:
             print(f"File: {args.file}")
             print(f"Detector: {args.detector}")
@@ -65,6 +70,8 @@ def main():
                 print(f"  {label}: {count}")
             if len(result.summary) > 15:
                 print(f"  ... and {len(result.summary) - 15} more types")
+            print()
+            print(f"Elapsed: {elapsed:.2f}s")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 
 from polybos_engine.extractors import extract_scenes
 
@@ -29,10 +30,14 @@ def main():
         logging.basicConfig(level=logging.WARNING)
 
     try:
+        start_time = time.perf_counter()
         result = extract_scenes(args.file, threshold=args.threshold)
+        elapsed = time.perf_counter() - start_time
 
         if args.json:
-            print(json.dumps(result.model_dump(), indent=2, default=str))
+            output = result.model_dump()
+            output["elapsed_seconds"] = round(elapsed, 2)
+            print(json.dumps(output, indent=2, default=str))
         else:
             print(f"File: {args.file}")
             print(f"Scenes detected: {result.count}")
@@ -40,6 +45,8 @@ def main():
             for i, scene in enumerate(result.detections, 1):
                 duration = scene.end - scene.start
                 print(f"  Scene {i}: {scene.start:.2f}s - {scene.end:.2f}s ({duration:.2f}s)")
+            print()
+            print(f"Elapsed: {elapsed:.2f}s")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

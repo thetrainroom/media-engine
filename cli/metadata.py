@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 
 from polybos_engine.extractors import extract_metadata
 
@@ -25,10 +26,14 @@ def main():
         logging.basicConfig(level=logging.WARNING)
 
     try:
+        start_time = time.perf_counter()
         result = extract_metadata(args.file)
+        elapsed = time.perf_counter() - start_time
 
         if args.json:
-            print(json.dumps(result.model_dump(), indent=2, default=str))
+            output = result.model_dump()
+            output["elapsed_seconds"] = round(elapsed, 2)
+            print(json.dumps(output, indent=2, default=str))
         else:
             print(f"File: {args.file}")
             print(f"Duration: {result.duration}s")
@@ -42,6 +47,8 @@ def main():
                 print(f"GPS: {result.gps.latitude}, {result.gps.longitude}")
             if result.shot_type:
                 print(f"Shot type: {result.shot_type.primary} ({result.shot_type.confidence:.2f})")
+            print()
+            print(f"Elapsed: {elapsed:.2f}s")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

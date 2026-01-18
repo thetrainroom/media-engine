@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 
 from polybos_engine.extractors import extract_clip
 
@@ -35,14 +36,18 @@ def main():
         logging.basicConfig(level=logging.WARNING)
 
     try:
+        start_time = time.perf_counter()
         result = extract_clip(
             args.file,
             fallback_interval=args.interval,
             model_name=args.model,
         )
+        elapsed = time.perf_counter() - start_time
 
         if args.json:
-            print(json.dumps(result.model_dump(), indent=2, default=str))
+            output = result.model_dump()
+            output["elapsed_seconds"] = round(elapsed, 2)
+            print(json.dumps(output, indent=2, default=str))
         else:
             print(f"File: {args.file}")
             print(f"Model: {result.model}")
@@ -54,6 +59,8 @@ def main():
                 print(f"  {i}: {seg.start:.2f}s-{seg.end:.2f}s embedding[{len(seg.embedding)}]")
             if len(result.segments) > 10:
                 print(f"  ... and {len(result.segments) - 10} more")
+            print()
+            print(f"Elapsed: {elapsed:.2f}s")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

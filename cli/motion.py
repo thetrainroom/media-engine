@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 
 from polybos_engine.extractors import analyze_motion
 
@@ -29,7 +30,9 @@ def main():
         logging.basicConfig(level=logging.WARNING)
 
     try:
+        start_time = time.perf_counter()
         result = analyze_motion(args.file, sample_fps=args.sample_fps)
+        elapsed = time.perf_counter() - start_time
 
         if args.json:
             data = {
@@ -47,6 +50,7 @@ def main():
                     }
                     for s in result.segments
                 ],
+                "elapsed_seconds": round(elapsed, 2),
             }
             print(json.dumps(data, indent=2))
         else:
@@ -64,6 +68,8 @@ def main():
                 )
             if len(result.segments) > 10:
                 print(f"  ... and {len(result.segments) - 10} more")
+            print()
+            print(f"Elapsed: {elapsed:.2f}s")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 
 from polybos_engine.extractors import extract_faces
 
@@ -41,15 +42,19 @@ def main():
         logging.basicConfig(level=logging.WARNING)
 
     try:
+        start_time = time.perf_counter()
         result = extract_faces(
             args.file,
             sample_fps=args.sample_fps,
             min_face_size=args.min_face_size,
             min_confidence=args.min_confidence,
         )
+        elapsed = time.perf_counter() - start_time
 
         if args.json:
-            print(json.dumps(result.model_dump(), indent=2, default=str))
+            output = result.model_dump()
+            output["elapsed_seconds"] = round(elapsed, 2)
+            print(json.dumps(output, indent=2, default=str))
         else:
             print(f"File: {args.file}")
             print(f"Faces detected: {result.count}")
@@ -64,6 +69,8 @@ def main():
                 )
             if result.count > 20:
                 print(f"  ... and {result.count - 20} more")
+            print()
+            print(f"Elapsed: {elapsed:.2f}s")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)

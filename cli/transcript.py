@@ -5,6 +5,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 
 from polybos_engine.extractors import extract_transcript
 
@@ -42,15 +43,19 @@ def main():
         logging.basicConfig(level=logging.WARNING)
 
     try:
+        start_time = time.perf_counter()
         result = extract_transcript(
             args.file,
             model=args.model,
             language=args.language,
             fallback_language=args.fallback_language,
         )
+        elapsed = time.perf_counter() - start_time
 
         if args.json:
-            print(json.dumps(result.model_dump(), indent=2, default=str))
+            output = result.model_dump()
+            output["elapsed_seconds"] = round(elapsed, 2)
+            print(json.dumps(output, indent=2, default=str))
         else:
             print(f"File: {args.file}")
             print(f"Language: {result.language} (confidence: {result.confidence:.2f})")
@@ -59,6 +64,8 @@ def main():
             for seg in result.segments:
                 speaker = f"[{seg.speaker}] " if seg.speaker else ""
                 print(f"  [{seg.start:.2f}s - {seg.end:.2f}s] {speaker}{seg.text}")
+            print()
+            print(f"Elapsed: {elapsed:.2f}s")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
