@@ -36,6 +36,7 @@ from . import (
     gopro,  # noqa: F401
     red,  # noqa: F401
     sony,  # noqa: F401
+    tesla,  # noqa: F401
 )
 from .base import (
     FFPROBE_WORKERS,

@@ -15,6 +15,7 @@ class MediaDeviceType(StrEnum):
     PHONE = "phone"
     ACTION_CAMERA = "action_camera"
     CAMERA_360 = "360_camera"
+    DASHCAM = "dashcam"
     UNKNOWN = "unknown"
 
 
