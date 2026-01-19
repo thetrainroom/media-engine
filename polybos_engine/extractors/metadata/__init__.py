@@ -29,10 +29,10 @@ from . import (
     apple,  # noqa: F401
     arri,  # noqa: F401
     blackmagic,  # noqa: F401
+    camera_360,  # noqa: F401 - Insta360, QooCam, GoPro MAX, etc.
     canon,  # noqa: F401
     dji,  # noqa: F401
     ffmpeg,  # noqa: F401
-    insta360,  # noqa: F401
     red,  # noqa: F401
     sony,  # noqa: F401
 )
