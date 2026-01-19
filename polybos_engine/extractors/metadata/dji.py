@@ -27,6 +27,8 @@ from polybos_engine.schemas import (
     ColorSpace,
     DetectionMethod,
     DeviceInfo,
+    GPSTrack,
+    GPSTrackPoint,
     LensInfo,
     MediaDeviceType,
     Metadata,
@@ -145,6 +147,8 @@ def _parse_srt_sidecar(video_path: str) -> SidecarMetadata | None:
     - SRT:   DJI_0987.SRT
 
     Format: [iso: 400] [shutter: 1/100.0] [fnum: 2.8] [latitude: 61.05121] ...
+
+    Returns SidecarMetadata with first GPS point and full GPS track.
     """
     path = Path(video_path)
 
@@ -167,26 +171,55 @@ def _parse_srt_sidecar(video_path: str) -> SidecarMetadata | None:
             content = f.read()
 
         gps: GPS | None = None
+        gps_track: GPSTrack | None = None
         color_space: ColorSpace | None = None
         lens: LensInfo | None = None
 
-        # GPS coordinates
-        lat_match = re.search(r"\[latitude:\s*([-\d.]+)\]", content)
-        lon_match = re.search(r"\[longitude:\s*([-\d.]+)\]", content)
-        abs_alt_match = re.search(r"abs_alt:\s*([-\d.]+)", content)
-        rel_alt_match = re.search(r"rel_alt:\s*([-\d.]+)", content)
+        # Extract ALL GPS coordinates for track
+        lat_matches = re.findall(r"\[latitude:\s*([-\d.]+)\]", content)
+        lon_matches = re.findall(r"\[longitude:\s*([-\d.]+)\]", content)
+        abs_alt_matches = re.findall(r"abs_alt:\s*([-\d.]+)", content)
 
-        if lat_match and lon_match:
-            lat = float(lat_match.group(1))
-            lon = float(lon_match.group(1))
-            alt = None
-            if abs_alt_match:
-                alt = float(abs_alt_match.group(1))
-            elif rel_alt_match:
-                alt = float(rel_alt_match.group(1))
+        if lat_matches and lon_matches and len(lat_matches) == len(lon_matches):
+            gps_points: list[GPSTrackPoint] = []
+            last_lat: float | None = None
+            last_lon: float | None = None
 
-            if lat != 0 and lon != 0:  # Skip invalid 0,0 coordinates
-                gps = GPS(latitude=lat, longitude=lon, altitude=alt)
+            for i, (lat_str, lon_str) in enumerate(zip(lat_matches, lon_matches)):
+                lat = float(lat_str)
+                lon = float(lon_str)
+
+                # Skip invalid 0,0 coordinates
+                if lat == 0 and lon == 0:
+                    continue
+
+                # Get altitude if available
+                alt: float | None = None
+                if i < len(abs_alt_matches):
+                    alt = float(abs_alt_matches[i])
+
+                # Dedupe consecutive identical points
+                if lat != last_lat or lon != last_lon:
+                    gps_points.append(GPSTrackPoint(
+                        latitude=round(lat, 6),
+                        longitude=round(lon, 6),
+                        altitude=round(alt, 1) if alt is not None else None,
+                    ))
+                    last_lat = lat
+                    last_lon = lon
+
+            # First valid point becomes the GPS location
+            if gps_points:
+                gps = GPS(
+                    latitude=gps_points[0].latitude,
+                    longitude=gps_points[0].longitude,
+                    altitude=gps_points[0].altitude,
+                )
+
+                # Create track if we have multiple unique points
+                if len(gps_points) > 1:
+                    gps_track = GPSTrack(points=gps_points, source="srt_sidecar")
+                    logger.info(f"Extracted {len(gps_points)} GPS points from SRT")
 
         # Color mode (d_log, d_cinelike, etc.)
         color_match = re.search(r"\[color_md\s*:\s*(\w+)\]", content)
@@ -208,8 +241,10 @@ def _parse_srt_sidecar(video_path: str) -> SidecarMetadata | None:
                 detection_method=DetectionMethod.METADATA,
             )
 
-        if gps or color_space or lens:
-            return SidecarMetadata(gps=gps, color_space=color_space, lens=lens)
+        if gps or gps_track or color_space or lens:
+            return SidecarMetadata(
+                gps=gps, gps_track=gps_track, color_space=color_space, lens=lens
+            )
         return None
 
     except Exception as e:
@@ -282,8 +317,9 @@ class DJIExtractor:
         # Parse SRT sidecar for additional metadata (drones have these)
         sidecar = _parse_srt_sidecar(file_path)
 
-        # Get GPS - from sidecar (drone) or base metadata
+        # Get GPS and track - from sidecar (drone) or base metadata
         gps = sidecar.gps if sidecar and sidecar.gps else base_metadata.gps
+        gps_track = sidecar.gps_track if sidecar and sidecar.gps_track else base_metadata.gps_track
 
         # Determine device type using model and GPS presence as hints
         has_gps = gps is not None
@@ -327,6 +363,7 @@ class DJIExtractor:
             created_at=base_metadata.created_at,
             device=device,
             gps=gps,
+            gps_track=gps_track,
             color_space=color_space,
             lens=lens,
         )
