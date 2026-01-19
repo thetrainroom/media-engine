@@ -159,6 +159,20 @@ class ShotType(BaseModel):
     detection_method: str = "clip"
 
 
+class KeyframeInfo(BaseModel):
+    """Keyframe (I-frame) information from video stream.
+
+    Useful for detecting scene cuts: irregular keyframe intervals
+    often indicate actual cuts, while fixed intervals (e.g., every 2s)
+    indicate standard GOP compression.
+    """
+
+    timestamps: list[float]  # Keyframe timestamps in seconds
+    count: int  # Number of keyframes
+    is_fixed_interval: bool  # True if keyframes are at regular intervals (GOP)
+    avg_interval: float | None = None  # Average interval between keyframes
+
+
 class Metadata(BaseModel):
     """Video metadata."""
 
@@ -177,6 +191,7 @@ class Metadata(BaseModel):
     color_space: ColorSpace | None = None
     lens: LensInfo | None = None
     shot_type: ShotType | None = None
+    keyframes: KeyframeInfo | None = None
 
 
 class TranscriptSegment(BaseModel):

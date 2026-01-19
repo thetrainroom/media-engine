@@ -1,7 +1,13 @@
 """Video feature extractors."""
 
-from .clip import extract_clip, unload_clip_model
+from .clip import extract_clip, extract_clip_image, unload_clip_model
 from .faces import extract_faces, unload_face_model
+from .frame_buffer import (
+    SharedFrame,
+    SharedFrameBuffer,
+    decode_frames,
+    get_extractor_timestamps,
+)
 from .frames import FrameExtractor, extract_frames_batch, get_video_duration
 from .metadata import (
     FFPROBE_WORKERS,
@@ -37,6 +43,7 @@ __all__ = [
     "extract_objects",
     "extract_objects_qwen",
     "extract_clip",
+    "extract_clip_image",
     "extract_ocr",
     "extract_telemetry",
     "analyze_motion",
@@ -59,4 +66,9 @@ __all__ = [
     "FrameExtractor",
     "extract_frames_batch",
     "get_video_duration",
+    # Shared frame buffer
+    "SharedFrame",
+    "SharedFrameBuffer",
+    "decode_frames",
+    "get_extractor_timestamps",
 ]

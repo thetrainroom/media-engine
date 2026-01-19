@@ -16,6 +16,7 @@ from polybos_engine.schemas import (
     Codec,
     ColorSpace,
     DetectionMethod,
+    KeyframeInfo,
     LensInfo,
     Metadata,
     Resolution,
@@ -136,6 +137,105 @@ def run_ffprobe_batch(
             results[path] = e
 
     return results
+
+
+def extract_keyframes(file_path: str, timeout: int = 60) -> KeyframeInfo | None:
+    """Extract keyframe (I-frame) timestamps from video.
+
+    Uses ffprobe with -skip_frame nokey for fast keyframe-only extraction.
+
+    Args:
+        file_path: Path to video file
+        timeout: Timeout in seconds (keyframe extraction can be slow for long videos)
+
+    Returns:
+        KeyframeInfo with timestamps and analysis, or None if extraction fails
+    """
+    cmd = [
+        "ffprobe",
+        "-v", "error",
+        "-select_streams", "v:0",
+        "-skip_frame", "nokey",
+        "-show_entries", "frame=pts_time",
+        "-of", "csv=p=0",
+        file_path,
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=True, timeout=timeout
+        )
+
+        # Parse timestamps from output (one per line)
+        timestamps: list[float] = []
+        for line in result.stdout.strip().split("\n"):
+            line = line.strip()
+            if line:
+                try:
+                    timestamps.append(float(line))
+                except ValueError:
+                    continue
+
+        if not timestamps:
+            return None
+
+        # Analyze interval pattern
+        is_fixed, avg_interval = _analyze_keyframe_intervals(timestamps)
+
+        return KeyframeInfo(
+            timestamps=timestamps,
+            count=len(timestamps),
+            is_fixed_interval=is_fixed,
+            avg_interval=avg_interval,
+        )
+
+    except subprocess.TimeoutExpired:
+        logger.warning(f"Keyframe extraction timed out for {file_path}")
+        return None
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Keyframe extraction failed for {file_path}: {e.stderr}")
+        return None
+    except Exception as e:
+        logger.warning(f"Keyframe extraction error for {file_path}: {e}")
+        return None
+
+
+def _analyze_keyframe_intervals(timestamps: list[float]) -> tuple[bool, float | None]:
+    """Analyze keyframe intervals to detect fixed GOP vs scene cuts.
+
+    Args:
+        timestamps: List of keyframe timestamps in seconds
+
+    Returns:
+        Tuple of (is_fixed_interval, average_interval)
+        is_fixed_interval is True if keyframes appear at regular intervals (GOP)
+    """
+    if len(timestamps) < 2:
+        return False, None
+
+    # Calculate intervals between keyframes
+    intervals = [
+        timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)
+    ]
+
+    avg_interval = sum(intervals) / len(intervals)
+
+    if avg_interval == 0:
+        return False, 0.0
+
+    # Check if intervals are consistent (within 20% of average)
+    # Fixed GOP will have very consistent intervals
+    # Scene cuts will have irregular intervals
+    variance_threshold = 0.2  # 20% variance allowed for "fixed"
+    consistent_count = sum(
+        1 for interval in intervals
+        if abs(interval - avg_interval) / avg_interval < variance_threshold
+    )
+
+    # If 80%+ of intervals are consistent, consider it fixed GOP
+    is_fixed = consistent_count / len(intervals) >= 0.8
+
+    return is_fixed, round(avg_interval, 3)
 
 
 def parse_fps(video_stream: dict[str, Any]) -> float | None:

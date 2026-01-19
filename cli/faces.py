@@ -7,7 +7,12 @@ import logging
 import sys
 import time
 
-from polybos_engine.extractors import extract_faces
+from polybos_engine.extractors import (
+    analyze_motion,
+    decode_frames,
+    extract_faces,
+    get_adaptive_timestamps,
+)
 
 
 def main():
@@ -43,9 +48,18 @@ def main():
 
     try:
         start_time = time.perf_counter()
+
+        # Run motion analysis to get adaptive timestamps
+        motion = analyze_motion(args.file)
+        timestamps = get_adaptive_timestamps(motion)
+
+        # Decode frames once using shared buffer
+        frame_buffer = decode_frames(args.file, timestamps=timestamps)
+
+        # Extract faces using shared frame buffer
         result = extract_faces(
             args.file,
-            sample_fps=args.sample_fps,
+            frame_buffer=frame_buffer,
             min_face_size=args.min_face_size,
             min_confidence=args.min_confidence,
         )

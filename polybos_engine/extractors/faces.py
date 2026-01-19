@@ -4,9 +4,7 @@ import base64
 import gc
 import io
 import logging
-import os
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import TypeAlias
@@ -14,14 +12,11 @@ from typing import TypeAlias
 import numpy as np
 from PIL import Image
 
-from polybos_engine.extractors.frames import FrameExtractor
+from polybos_engine.extractors.frame_buffer import SharedFrameBuffer
 from polybos_engine.schemas import (
     BoundingBox,
     FaceDetection,
     FacesResult,
-    MediaType,
-    SceneDetection,
-    get_media_type,
 )
 
 Embedding: TypeAlias = list[float]
@@ -83,28 +78,17 @@ def unload_face_model() -> None:
 
 def extract_faces(
     file_path: str,
-    scenes: list[SceneDetection] | None = None,
-    sample_fps: float = 0.5,  # Default: every 2 seconds
-    timestamps: (
-        list[float] | None
-    ) = None,  # Direct timestamp list (e.g., from YOLO persons)
+    frame_buffer: SharedFrameBuffer,
     min_face_size: int = 80,
     min_confidence: float = 0.5,  # Lowered from 0.9 - user can discard false positives
     extract_images: bool = True,
     face_image_size: int = 160,  # Output face thumbnail size
 ) -> FacesResult:
-    """Extract faces from video file.
-
-    Sampling strategy (in priority order):
-    1. If timestamps provided: use those directly (e.g., from YOLO person detections)
-    2. If scenes provided: sample at scene boundaries + every sample_interval within scenes
-    3. Otherwise: sample at fixed fps
+    """Extract faces from video frames using DeepFace.
 
     Args:
-        file_path: Path to video file
-        scenes: Optional scene boundaries for smarter sampling
-        sample_fps: Frame sampling rate (e.g., 0.5 = every 2 seconds)
-        timestamps: Optional list of specific timestamps to sample (overrides scenes/fps)
+        file_path: Path to video file (used for logging)
+        frame_buffer: Pre-decoded frames from SharedFrameBuffer
         min_face_size: Minimum face size in pixels
         min_confidence: Minimum detection confidence
         extract_images: Whether to extract face thumbnail images
@@ -119,52 +103,27 @@ def extract_faces(
     if not path.exists():
         raise FileNotFoundError(f"Video file not found: {file_path}")
 
-    # Create temp directory for frames
+    # Create temp directory for face crops (needed for embedding generation)
     temp_dir = tempfile.mkdtemp(prefix="polybos_faces_")
 
     try:
-        # Determine sample timestamps (priority: explicit > scenes > fixed fps)
-        if timestamps is not None:
-            sample_timestamps = sorted(set(timestamps))
-            logger.info(
-                f"Using {len(sample_timestamps)} provided timestamps for face detection"
-            )
-        elif scenes:
-            sample_timestamps = _get_sample_timestamps_from_scenes(scenes, sample_fps)
-            logger.info(
-                f"Sampling {len(sample_timestamps)} frames from {len(scenes)} scenes"
-            )
-        else:
-            # Get video duration and sample at fixed intervals
-            duration = _get_video_duration(file_path)
-            if duration == 0:
-                # Image or zero-duration file: use single timestamp at 0
-                sample_timestamps = [0.0]
-                logger.info("Using single timestamp for image/zero-duration file")
-            else:
-                interval = 1.0 / sample_fps
-                sample_timestamps = [float(t) for t in np.arange(0, duration, interval)]
-                logger.info(f"Sampling {len(sample_timestamps)} frames at {sample_fps} fps")
-
-        # Extract frames at specific timestamps
-        frame_paths = _extract_frames_at_timestamps(
-            file_path, temp_dir, sample_timestamps
-        )
-
         detections: list[FaceDetection] = []
         all_embeddings: list[Embedding] = []
+        frame_size: tuple[int, int] | None = None
 
-        for frame_path, timestamp in zip(frame_paths, sample_timestamps):
-            if not os.path.exists(frame_path):
-                continue
+        def process_frame(
+            frame_rgb: np.ndarray, frame_pil: Image.Image, timestamp: float
+        ) -> None:
+            """Process a single frame for face detection."""
+            nonlocal frame_size
+
+            if frame_size is None:
+                frame_size = (frame_rgb.shape[1], frame_rgb.shape[0])  # (width, height)
 
             try:
-                # Load frame for cropping
-                frame_img = Image.open(frame_path)
-
-                # Detect faces in frame
+                # Detect faces in frame (DeepFace accepts numpy arrays)
                 faces = DeepFace.extract_faces(
-                    img_path=frame_path,
+                    img_path=frame_rgb,
                     detector_backend="retinaface",
                     enforce_detection=False,
                     align=True,
@@ -187,18 +146,17 @@ def extract_faces(
 
                     # Crop face with padding for better embedding
                     face_crop = _crop_face_with_padding(
-                        frame_img, x, y, w, h, padding=0.3
+                        frame_pil, x, y, w, h, padding=0.3
                     )
 
                     # Generate embedding from cropped face
                     embedding: Embedding = []
                     try:
-                        # Save crop temporarily for DeepFace
-                        crop_path = os.path.join(temp_dir, "temp_crop.jpg")
-                        face_crop.save(crop_path, "JPEG", quality=95)
+                        # Convert to numpy array for DeepFace.represent
+                        crop_array = np.array(face_crop)
 
                         embedding_result = DeepFace.represent(
-                            img_path=crop_path,
+                            img_path=crop_array,
                             model_name="Facenet512",
                             detector_backend="skip",  # Already cropped
                             enforce_detection=False,
@@ -229,14 +187,13 @@ def extract_faces(
                         all_embeddings.append(embedding)
 
             except Exception as e:
-                logger.warning(f"Failed to process frame {frame_path}: {e}")
-                continue
+                logger.warning(f"Failed to process frame at {timestamp}s: {e}")
 
-        # Get frame size for edge detection
-        frame_size: tuple[int, int] | None = None
-        if frame_paths and os.path.exists(frame_paths[0]):
-            with Image.open(frame_paths[0]) as img:
-                frame_size = img.size  # (width, height)
+        # Process frames from shared buffer
+        logger.info(f"Processing {len(frame_buffer.frames)} frames for face detection")
+        for ts in sorted(frame_buffer.frames.keys()):
+            shared_frame = frame_buffer.frames[ts]
+            process_frame(shared_frame.rgb, shared_frame.pil, ts)
 
         # Cluster faces and keep best per person
         unique_faces, unique_estimate = _deduplicate_faces(
@@ -258,72 +215,6 @@ def extract_faces(
     finally:
         # Clean up temp directory
         shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-def _get_video_duration(file_path: str) -> float:
-    """Get video/image duration in seconds (0 for images)."""
-    from polybos_engine.extractors.frames import get_video_duration
-
-    return get_video_duration(file_path)
-
-
-def _get_sample_timestamps_from_scenes(
-    scenes: list[SceneDetection], sample_fps: float
-) -> list[float]:
-    """Generate sample timestamps from scenes.
-
-    Samples at:
-    - Start of each scene (scene boundary)
-    - Every 1/sample_fps seconds within each scene
-    """
-    timestamps: list[float] = []
-    interval = 1.0 / sample_fps  # e.g., 0.5 fps = every 2 seconds
-
-    for scene in scenes:
-        # Always sample at scene start
-        timestamps.append(scene.start)
-
-        # Sample within scene at regular intervals
-        t = scene.start + interval
-        while t < scene.end - 0.5:  # Stop 0.5s before scene end
-            timestamps.append(t)
-            t += interval
-
-    # Remove duplicates and sort
-    timestamps = sorted(set(timestamps))
-    return timestamps
-
-
-def _extract_frames_at_timestamps(
-    file_path: str, output_dir: str, timestamps: list[float]
-) -> list[str]:
-    """Extract frames at specific timestamps.
-
-    Uses FrameExtractor which handles both videos (via OpenCV/ffmpeg)
-    and images (via direct loading).
-    """
-    import cv2
-
-    frame_paths: list[str] = []
-
-    with FrameExtractor(file_path) as extractor:
-        for i, ts in enumerate(timestamps):
-            output_path = os.path.join(output_dir, f"frame_{i:06d}.jpg")
-            frame = extractor.get_frame_at(ts)
-
-            if frame is not None:
-                # Save frame as JPEG
-                cv2.imwrite(output_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                    frame_paths.append(output_path)
-                else:
-                    logger.warning(f"Frame at {ts}s: could not save to {output_path}")
-                    frame_paths.append("")
-            else:
-                logger.warning(f"Frame at {ts}s: extraction failed")
-                frame_paths.append("")
-
-    return frame_paths
 
 
 def _crop_face_with_padding(

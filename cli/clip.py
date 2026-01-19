@@ -7,18 +7,17 @@ import logging
 import sys
 import time
 
-from polybos_engine.extractors import extract_clip
+from polybos_engine.extractors import (
+    analyze_motion,
+    decode_frames,
+    extract_clip,
+    get_adaptive_timestamps,
+)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Extract CLIP embeddings from video")
     parser.add_argument("file", help="Path to video file")
-    parser.add_argument(
-        "--interval",
-        type=float,
-        default=10.0,
-        help="Fallback sample interval in seconds (default: 10.0)",
-    )
     parser.add_argument(
         "--model",
         type=str,
@@ -37,9 +36,18 @@ def main():
 
     try:
         start_time = time.perf_counter()
+
+        # Run motion analysis to get adaptive timestamps
+        motion = analyze_motion(args.file)
+        timestamps = get_adaptive_timestamps(motion)
+
+        # Decode frames once using shared buffer
+        frame_buffer = decode_frames(args.file, timestamps=timestamps)
+
+        # Extract CLIP embeddings using shared frame buffer
         result = extract_clip(
             args.file,
-            fallback_interval=args.interval,
+            frame_buffer=frame_buffer,
             model_name=args.model,
         )
         elapsed = time.perf_counter() - start_time

@@ -1,5 +1,7 @@
 """OCR extraction using EasyOCR with fast MSER pre-filtering."""
 
+from __future__ import annotations
+
 import gc
 import logging
 from typing import Any
@@ -8,8 +10,8 @@ import cv2
 import numpy as np
 
 from polybos_engine.config import DeviceType, get_device, get_settings
-from polybos_engine.extractors.frames import FrameExtractor, get_video_duration
-from polybos_engine.schemas import BoundingBox, OcrDetection, OcrResult, ScenesResult
+from polybos_engine.extractors.frame_buffer import SharedFrameBuffer
+from polybos_engine.schemas import BoundingBox, OcrDetection, OcrResult
 
 logger = logging.getLogger(__name__)
 
@@ -160,12 +162,8 @@ def _get_ocr_reader(languages: list[str] | None = None) -> Any:
 
 def extract_ocr(
     file_path: str,
-    scenes: ScenesResult | None = None,
+    frame_buffer: SharedFrameBuffer,
     min_confidence: float = 0.5,
-    sample_fps: float = 0.5,
-    timestamps: (
-        list[float] | None
-    ) = None,  # Direct timestamp list (e.g., from motion analysis)
     languages: list[str] | None = None,
     skip_prefilter: bool = False,
 ) -> OcrResult:
@@ -176,47 +174,16 @@ def extract_ocr(
 
     This typically skips 80-90% of frames, providing major speedup.
 
-    Sampling strategy (in priority order):
-    1. If timestamps provided: use those directly (e.g., from motion-adaptive sampling)
-    2. If scenes provided: sample at scene boundaries
-    3. Otherwise: sample at fixed fps
-
     Args:
-        file_path: Path to video file
-        scenes: Optional scene detection results (sample at scene changes)
+        file_path: Path to video file (used for logging)
+        frame_buffer: Pre-decoded frames from SharedFrameBuffer
         min_confidence: Minimum detection confidence
-        sample_fps: Fallback sample rate if no scenes
-        timestamps: Optional list of specific timestamps to sample (overrides scenes/fps)
-        languages: OCR languages (default: ["en", "no"])
+        languages: OCR languages (default from settings)
         skip_prefilter: If True, skip MSER pre-filter and run OCR on all frames
 
     Returns:
         OcrResult with detected text
     """
-    # Determine which frames to sample (priority: explicit > scenes > fixed fps)
-    sample_timestamps: list[float]
-    if timestamps is not None:
-        sample_timestamps = sorted(set(timestamps))
-        logger.info(f"Using {len(sample_timestamps)} provided timestamps for OCR")
-    elif scenes and scenes.detections:
-        # Sample at scene changes (start of each scene)
-        logger.info(f"Sampling OCR at {len(scenes.detections)} scene boundaries")
-        sample_timestamps = [scene.start for scene in scenes.detections]
-    else:
-        # Fall back to fixed interval
-        duration = get_video_duration(file_path)
-        if duration == 0:
-            # Image or zero-duration file: use single timestamp at 0
-            logger.info("Using single timestamp for OCR on image/zero-duration file")
-            sample_timestamps = [0.0]
-        else:
-            logger.info(f"Sampling OCR at {sample_fps} fps")
-            sample_timestamps = []
-            t = 0.0
-            while t < duration:
-                sample_timestamps.append(t)
-                t += 1.0 / sample_fps
-
     detections: list[OcrDetection] = []
     seen_texts: set[str] = set()  # For deduplication
 
@@ -228,61 +195,63 @@ def extract_ocr(
     # Lazy-load OCR reader only if we find frames with text
     reader: Any = None
 
-    # Use OpenCV for fast frame extraction
-    with FrameExtractor(file_path) as extractor:
-        for timestamp in sample_timestamps:
-            frame = extractor.get_frame_at(timestamp)
-            if frame is None:
-                continue
+    def process_frame(frame: np.ndarray, timestamp: float) -> None:
+        """Process a single frame for OCR."""
+        nonlocal frames_checked, frames_with_text, frames_skipped, reader
 
-            frames_checked += 1
+        frames_checked += 1
 
-            # Phase 1: Fast MSER pre-filter
-            if not skip_prefilter:
-                if not has_text_regions(frame):
-                    frames_skipped += 1
+        # Phase 1: Fast MSER pre-filter
+        if not skip_prefilter:
+            if not has_text_regions(frame):
+                frames_skipped += 1
+                return
+
+        frames_with_text += 1
+
+        # Phase 2: Deep learning OCR (only on frames that passed pre-filter)
+        try:
+            # Lazy load OCR reader on first use
+            if reader is None:
+                reader = _get_ocr_reader(languages)
+
+            results = reader.readtext(frame)
+
+            for bbox_points, text, confidence in results:
+                if confidence < min_confidence:
                     continue
 
-            frames_with_text += 1
+                # Skip if we've seen this exact text recently
+                text_key = text.strip().lower()
+                if text_key in seen_texts:
+                    continue
+                seen_texts.add(text_key)
 
-            # Phase 2: Deep learning OCR (only on frames that passed pre-filter)
-            try:
-                # Lazy load OCR reader on first use
-                if reader is None:
-                    reader = _get_ocr_reader(languages)
+                # Convert polygon to bounding box
+                # bbox_points is [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                x_coords = [p[0] for p in bbox_points]
+                y_coords = [p[1] for p in bbox_points]
+                x = int(min(x_coords))
+                y = int(min(y_coords))
+                width = int(max(x_coords) - x)
+                height = int(max(y_coords) - y)
 
-                results = reader.readtext(frame)
+                detection = OcrDetection(
+                    timestamp=timestamp,
+                    text=text.strip(),
+                    confidence=round(float(confidence), 3),
+                    bbox=BoundingBox(x=x, y=y, width=width, height=height),
+                )
+                detections.append(detection)
 
-                for bbox_points, text, confidence in results:
-                    if confidence < min_confidence:
-                        continue
+        except Exception as e:
+            logger.warning(f"Failed to process frame at {timestamp}s: {e}")
 
-                    # Skip if we've seen this exact text recently
-                    text_key = text.strip().lower()
-                    if text_key in seen_texts:
-                        continue
-                    seen_texts.add(text_key)
-
-                    # Convert polygon to bounding box
-                    # bbox_points is [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-                    x_coords = [p[0] for p in bbox_points]
-                    y_coords = [p[1] for p in bbox_points]
-                    x = int(min(x_coords))
-                    y = int(min(y_coords))
-                    width = int(max(x_coords) - x)
-                    height = int(max(y_coords) - y)
-
-                    detection = OcrDetection(
-                        timestamp=timestamp,
-                        text=text.strip(),
-                        confidence=round(float(confidence), 3),
-                        bbox=BoundingBox(x=x, y=y, width=width, height=height),
-                    )
-                    detections.append(detection)
-
-            except Exception as e:
-                logger.warning(f"Failed to process frame at {timestamp}s: {e}")
-                continue
+    # Process frames from shared buffer
+    logger.info(f"Processing {len(frame_buffer.frames)} frames for OCR")
+    for ts in sorted(frame_buffer.frames.keys()):
+        shared_frame = frame_buffer.frames[ts]
+        process_frame(shared_frame.bgr, ts)
 
     # Log stats
     if frames_checked > 0:

@@ -7,18 +7,17 @@ import logging
 import sys
 import time
 
-from polybos_engine.extractors import extract_ocr
+from polybos_engine.extractors import (
+    analyze_motion,
+    decode_frames,
+    extract_ocr,
+    get_adaptive_timestamps,
+)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Extract text (OCR) from video file")
     parser.add_argument("file", help="Path to video file")
-    parser.add_argument(
-        "--sample-fps",
-        type=float,
-        default=0.5,
-        help="Sample rate for OCR (default: 0.5)",
-    )
     parser.add_argument(
         "--min-confidence",
         type=float,
@@ -52,9 +51,18 @@ def main():
 
     try:
         start_time = time.perf_counter()
+
+        # Run motion analysis to get adaptive timestamps
+        motion = analyze_motion(args.file)
+        timestamps = get_adaptive_timestamps(motion)
+
+        # Decode frames once using shared buffer
+        frame_buffer = decode_frames(args.file, timestamps=timestamps)
+
+        # Extract OCR using shared frame buffer
         result = extract_ocr(
             args.file,
-            sample_fps=args.sample_fps,
+            frame_buffer=frame_buffer,
             min_confidence=args.min_confidence,
             skip_prefilter=args.skip_prefilter,
             languages=languages,

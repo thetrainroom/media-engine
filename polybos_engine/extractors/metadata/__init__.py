@@ -39,6 +39,7 @@ from . import (
 from .base import (
     FFPROBE_WORKERS,
     build_base_metadata,
+    extract_keyframes,
     run_ffprobe,
     run_ffprobe_batch,
     shutdown_ffprobe_pool,
@@ -94,11 +95,19 @@ def extract_metadata(file_path: str, probe_data: dict | None = None) -> Metadata
         name, extractor = match
         logger.info(f"Using {name} extractor for {path.name}")
         try:
-            return extractor.extract(probe_data, file_path, base_metadata)
+            result = extractor.extract(probe_data, file_path, base_metadata)
         except Exception as e:
             logger.warning(f"Extractor {name} failed: {e}, using base metadata")
-            return base_metadata
+            result = base_metadata
     else:
         # This shouldn't happen since generic always matches
         logger.warning(f"No extractor matched for {path.name}")
-        return base_metadata
+        result = base_metadata
+
+    # Extract keyframes (separate ffprobe call, fast with -skip_frame nokey)
+    # Done after extractor so it's not lost when extractor returns new Metadata
+    keyframes = extract_keyframes(file_path)
+    if keyframes:
+        result.keyframes = keyframes
+
+    return result

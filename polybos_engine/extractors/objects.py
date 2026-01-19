@@ -6,12 +6,11 @@ from pathlib import Path
 from typing import Any
 
 from polybos_engine.config import DeviceType, get_device
-from polybos_engine.extractors.frames import FrameExtractor, get_video_duration
+from polybos_engine.extractors.frame_buffer import SharedFrameBuffer
 from polybos_engine.schemas import (
     BoundingBox,
     ObjectDetection,
     ObjectsResult,
-    SceneDetection,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,27 +77,16 @@ def _get_yolo_model(model_name: str) -> Any:
 
 def extract_objects(
     file_path: str,
-    scenes: list[SceneDetection] | None = None,
-    sample_fps: float = 0.5,
-    timestamps: (
-        list[float] | None
-    ) = None,  # Direct timestamp list (e.g., from motion analysis)
+    frame_buffer: SharedFrameBuffer,
     min_confidence: float = 0.6,
     min_size: int = 50,
     model_name: str = "yolov8m.pt",
 ) -> ObjectsResult:
-    """Extract objects from video file.
-
-    Sampling strategy (in priority order):
-    1. If timestamps provided: use those directly (e.g., from motion-adaptive sampling)
-    2. If scenes provided: sample at scene boundaries + intervals within scenes
-    3. Otherwise: sample at fixed fps
+    """Extract objects from video frames using YOLO.
 
     Args:
-        file_path: Path to video file
-        scenes: Optional scene boundaries for smarter sampling
-        sample_fps: Frame sampling rate (0.5 = every 2 seconds)
-        timestamps: Optional list of specific timestamps to sample (overrides scenes/fps)
+        file_path: Path to video file (used for logging)
+        frame_buffer: Pre-decoded frames from SharedFrameBuffer
         min_confidence: Minimum detection confidence (0.6 recommended)
         min_size: Minimum object size in pixels (filters noise)
         model_name: YOLO model (yolov8m.pt recommended for accuracy)
@@ -121,80 +109,54 @@ def extract_objects(
     # Load model (singleton)
     model = _get_yolo_model(model_name)
 
-    # Determine timestamps to sample (priority: explicit > scenes > fixed fps)
-    if timestamps is not None:
-        sample_timestamps = sorted(set(timestamps))
-        logger.info(
-            f"Using {len(sample_timestamps)} provided timestamps for object detection"
-        )
-    elif scenes:
-        sample_timestamps = _get_timestamps_from_scenes(scenes, sample_fps)
-        logger.info(
-            f"Sampling {len(sample_timestamps)} frames from {len(scenes)} scenes"
-        )
-    else:
-        duration = get_video_duration(file_path)
-        if duration == 0:
-            # Image or zero-duration file: use single timestamp at 0
-            sample_timestamps = [0.0]
-            logger.info("Using single timestamp for image/zero-duration file")
-        else:
-            interval = 1.0 / sample_fps
-            sample_timestamps = list(_frange(0, duration, interval))
-            logger.info(f"Sampling {len(sample_timestamps)} frames at {sample_fps} fps")
-
-    # Extract frames using OpenCV (much faster than ffmpeg per-frame)
+    # Process frames from shared buffer
     raw_detections: list[ObjectDetection] = []
 
-    with FrameExtractor(file_path) as extractor:
-        for timestamp in sample_timestamps:
-            frame = extractor.get_frame_at(timestamp)
-            if frame is None:
-                continue
+    logger.info(f"Processing {len(frame_buffer.frames)} frames for object detection")
+    for ts in sorted(frame_buffer.frames.keys()):
+        shared_frame = frame_buffer.frames[ts]
+        try:
+            results = model(shared_frame.bgr, verbose=False, device=device_str)
 
-            # Run YOLO on frame (with GPU if available)
-            try:
-                results = model(frame, verbose=False, device=device_str)
+            for result in results:
+                boxes = result.boxes
+                if boxes is None:
+                    continue
 
-                for result in results:
-                    boxes = result.boxes
-                    if boxes is None:
+                for i in range(len(boxes)):
+                    confidence = float(boxes.conf[i])
+                    if confidence < min_confidence:
                         continue
 
-                    for i in range(len(boxes)):
-                        confidence = float(boxes.conf[i])
-                        if confidence < min_confidence:
-                            continue
+                    # Get bounding box
+                    x1, y1, x2, y2 = boxes.xyxy[i].tolist()
+                    width = int(x2 - x1)
+                    height = int(y2 - y1)
 
-                        # Get bounding box
-                        x1, y1, x2, y2 = boxes.xyxy[i].tolist()
-                        width = int(x2 - x1)
-                        height = int(y2 - y1)
+                    # Filter small detections
+                    if width < min_size or height < min_size:
+                        continue
 
-                        # Filter small detections
-                        if width < min_size or height < min_size:
-                            continue
+                    # Get class label
+                    class_id = int(boxes.cls[i])
+                    label = model.names[class_id] if model.names else str(class_id)
 
-                        # Get class label
-                        class_id = int(boxes.cls[i])
-                        label = model.names[class_id] if model.names else str(class_id)
-
-                        raw_detections.append(
-                            ObjectDetection(
-                                timestamp=round(timestamp, 2),
-                                label=label,
-                                confidence=round(confidence, 3),
-                                bbox=BoundingBox(
-                                    x=int(x1),
-                                    y=int(y1),
-                                    width=width,
-                                    height=height,
-                                ),
-                            )
+                    raw_detections.append(
+                        ObjectDetection(
+                            timestamp=round(ts, 2),
+                            label=label,
+                            confidence=round(confidence, 3),
+                            bbox=BoundingBox(
+                                x=int(x1),
+                                y=int(y1),
+                                width=width,
+                                height=height,
+                            ),
                         )
+                    )
 
-            except Exception as e:
-                logger.warning(f"Failed to process frame at {timestamp}s: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to process frame at {ts}s: {e}")
 
     # Deduplicate - track unique objects
     unique_detections, summary = _deduplicate_objects(raw_detections)
@@ -208,30 +170,6 @@ def extract_objects(
         summary=summary,
         detections=unique_detections,
     )
-
-
-def _frange(start: float, stop: float, step: float):
-    """Float range generator."""
-    while start < stop:
-        yield start
-        start += step
-
-
-def _get_timestamps_from_scenes(
-    scenes: list[SceneDetection], sample_fps: float
-) -> list[float]:
-    """Generate sample timestamps from scenes."""
-    timestamps: list[float] = []
-    interval = 1.0 / sample_fps
-
-    for scene in scenes:
-        timestamps.append(scene.start)
-        t = scene.start + interval
-        while t < scene.end - 0.5:
-            timestamps.append(t)
-            t += interval
-
-    return sorted(set(timestamps))
 
 
 def _bbox_iou(box1: BoundingBox, box2: BoundingBox) -> float:

@@ -47,6 +47,10 @@ def main():
                 print(f"GPS: {result.gps.latitude}, {result.gps.longitude}")
             if result.shot_type:
                 print(f"Shot type: {result.shot_type.primary} ({result.shot_type.confidence:.2f})")
+            if result.keyframes:
+                kf = result.keyframes
+                interval_type = "fixed GOP" if kf.is_fixed_interval else "irregular (likely cuts)"
+                print(f"Keyframes: {kf.count} ({interval_type}, avg {kf.avg_interval}s)")
             print()
             print(f"Elapsed: {elapsed:.2f}s")
 

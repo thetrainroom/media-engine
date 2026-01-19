@@ -7,7 +7,13 @@ import logging
 import sys
 import time
 
-from polybos_engine.extractors import extract_objects, extract_objects_qwen
+from polybos_engine.extractors import (
+    analyze_motion,
+    decode_frames,
+    extract_objects,
+    extract_objects_qwen,
+    get_adaptive_timestamps,
+)
 
 
 def main():
@@ -47,9 +53,17 @@ def main():
         if args.detector == "qwen":
             result = extract_objects_qwen(args.file)
         else:
+            # Run motion analysis to get adaptive timestamps
+            motion = analyze_motion(args.file)
+            timestamps = get_adaptive_timestamps(motion)
+
+            # Decode frames once using shared buffer
+            frame_buffer = decode_frames(args.file, timestamps=timestamps)
+
+            # Extract objects using shared frame buffer
             result = extract_objects(
                 args.file,
-                sample_fps=args.sample_fps,
+                frame_buffer=frame_buffer,
                 min_confidence=args.min_confidence,
             )
         elapsed = time.perf_counter() - start_time

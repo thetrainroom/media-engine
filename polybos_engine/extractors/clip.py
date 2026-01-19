@@ -1,11 +1,9 @@
 """CLIP embedding extraction with platform-specific backends."""
 
+from __future__ import annotations
+
 import gc
 import logging
-import os
-import shutil
-import subprocess
-import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -15,8 +13,8 @@ import numpy as np
 from numpy.typing import NDArray
 
 from polybos_engine.config import has_cuda, is_apple_silicon
-from polybos_engine.extractors.frames import FrameExtractor
-from polybos_engine.schemas import ClipResult, ClipSegment, ScenesResult
+from polybos_engine.extractors.frame_buffer import SharedFrameBuffer
+from polybos_engine.schemas import ClipResult, ClipSegment
 
 Embedding: TypeAlias = list[float]
 
@@ -54,6 +52,18 @@ class CLIPBackend(ABC):
         pass
 
     @abstractmethod
+    def encode_image_from_array(self, rgb_array: NDArray[np.uint8]) -> Embedding:
+        """Encode image from RGB numpy array to embedding vector.
+
+        Args:
+            rgb_array: RGB image as numpy array (H, W, 3)
+
+        Returns:
+            List of floats representing the embedding
+        """
+        pass
+
+    @abstractmethod
     def get_model_name(self) -> str:
         """Get the model name."""
         pass
@@ -75,11 +85,13 @@ class OpenCLIPBackend(CLIPBackend):
         logger.info(f"Loaded OpenCLIP model: {model_name} on {self.device}")
 
     def encode_image(self, image_path: str) -> Embedding:
+        rgb_array = _load_image_rgb(image_path)
+        return self.encode_image_from_array(rgb_array)
+
+    def encode_image_from_array(self, rgb_array: NDArray[np.uint8]) -> Embedding:
         import torch
         from PIL import Image
 
-        # Load with OpenCV and convert to PIL for preprocessing
-        rgb_array = _load_image_rgb(image_path)
         image = Image.fromarray(rgb_array)
         image_tensor = self.preprocess(image).unsqueeze(0).to(self.device)
 
@@ -120,12 +132,14 @@ class MLXCLIPBackend(CLIPBackend):
                 logger.info(f"Loaded transformers CLIP model: {self._model_name}")
 
     def encode_image(self, image_path: str) -> Embedding:
+        rgb_array = _load_image_rgb(image_path)
+        return self.encode_image_from_array(rgb_array)
+
+    def encode_image_from_array(self, rgb_array: NDArray[np.uint8]) -> Embedding:
         from PIL import Image
 
         self._load_model()
 
-        # Load with OpenCV and convert to PIL for preprocessing
-        rgb_array = _load_image_rgb(image_path)
         image = Image.fromarray(rgb_array)
 
         if self._processor is not None:
@@ -247,193 +261,79 @@ IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif", "
 
 def extract_clip(
     file_path: str,
-    scenes: ScenesResult | None = None,
-    fallback_interval: float = 10.0,
-    timestamps: (
-        list[float] | None
-    ) = None,  # Direct timestamp list (e.g., from motion analysis)
+    frame_buffer: SharedFrameBuffer,
     model_name: str | None = None,  # CLIP model name (e.g., "ViT-B-32", "ViT-L-14")
 ) -> ClipResult:
-    """Extract CLIP embeddings from video or image.
+    """Extract CLIP embeddings from video frames.
 
-    For images: returns single embedding directly (no frame extraction).
-    For videos, sampling strategy (in priority order):
-    1. If timestamps provided: use those directly (e.g., from motion-adaptive sampling)
-    2. If scenes provided: one embedding per scene (middle of scene)
-    3. Otherwise: sample at fixed interval
+    For images, use extract_clip_image() instead.
 
     Args:
-        file_path: Path to video or image file
-        scenes: Optional scene detection results (one embedding per scene)
-        fallback_interval: Interval in seconds if no scenes provided
-        timestamps: Optional list of specific timestamps to sample (overrides scenes/interval)
+        file_path: Path to video file (used for logging)
+        frame_buffer: Pre-decoded frames from SharedFrameBuffer
         model_name: CLIP model name (e.g., "ViT-B-32", "ViT-L-14"). If None, uses default.
 
     Returns:
         ClipResult with embeddings per segment
     """
-    path = Path(file_path)
-    if not path.exists():
-        raise FileNotFoundError(f"File not found: {file_path}")
-
     backend = get_clip_backend(model_name)
 
-    # Check if this is an image - encode directly without frame extraction
-    if path.suffix.lower() in IMAGE_EXTENSIONS:
-        logger.info(f"Encoding image directly: {file_path}")
+    # Process frames from shared buffer
+    logger.info(f"Extracting CLIP embeddings from {len(frame_buffer.frames)} frames")
+    segments: list[ClipSegment] = []
+
+    for i, ts in enumerate(sorted(frame_buffer.frames.keys())):
+        shared_frame = frame_buffer.frames[ts]
         try:
-            embedding = backend.encode_image(file_path)
-            return ClipResult(
-                model=backend.get_model_name(),
-                segments=[
-                    ClipSegment(
-                        start=0.0,
-                        end=0.0,
-                        scene_index=0,
-                        embedding=embedding,
-                    )
-                ],
+            embedding = backend.encode_image_from_array(shared_frame.rgb)
+            segments.append(
+                ClipSegment(
+                    start=ts,
+                    end=ts,
+                    scene_index=i,
+                    embedding=embedding,
+                )
             )
         except Exception as e:
-            logger.error(f"Failed to encode image {file_path}: {e}")
-            raise
+            logger.warning(f"Failed to encode frame at {ts}s: {e}")
 
-    # For videos, extract frames at timestamps
-    # Create temp directory for frames
-    temp_dir = tempfile.mkdtemp(prefix="polybos_clip_")
+    logger.info(f"Generated {len(segments)} CLIP embeddings")
 
-    try:
-        segments: list[ClipSegment] = []
-
-        if timestamps is not None:
-            # Use provided timestamps directly
-            logger.info(
-                f"Extracting CLIP embeddings at {len(timestamps)} provided timestamps"
-            )
-
-            for i, ts in enumerate(sorted(set(timestamps))):
-                frame_path = _extract_frame_at(file_path, temp_dir, ts)
-
-                if frame_path:
-                    try:
-                        embedding = backend.encode_image(frame_path)
-                        segments.append(
-                            ClipSegment(
-                                start=ts,
-                                end=ts,  # Single point in time
-                                scene_index=i,
-                                embedding=embedding,
-                            )
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to encode frame at {ts}s: {e}")
-        elif scenes and scenes.detections:
-            # Extract one frame per scene (middle of scene)
-            logger.info(f"Extracting CLIP embeddings for {scenes.count} scenes")
-
-            for scene in scenes.detections:
-                mid_time = (scene.start + scene.end) / 2
-                frame_path = _extract_frame_at(file_path, temp_dir, mid_time)
-
-                if frame_path:
-                    try:
-                        embedding = backend.encode_image(frame_path)
-                        segments.append(
-                            ClipSegment(
-                                start=scene.start,
-                                end=scene.end,
-                                scene_index=scene.index,
-                                embedding=embedding,
-                            )
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to encode frame at {mid_time}s: {e}")
-        else:
-            # Fall back to fixed interval
-            duration = _get_video_duration(file_path)
-
-            if duration == 0:
-                # Image or zero-duration file: encode single frame
-                logger.info("Extracting CLIP embedding for image/zero-duration file")
-                frame_path = _extract_frame_at(file_path, temp_dir, 0.0)
-                if frame_path:
-                    try:
-                        embedding = backend.encode_image(frame_path)
-                        segments.append(
-                            ClipSegment(
-                                start=0.0,
-                                end=0.0,
-                                scene_index=0,
-                                embedding=embedding,
-                            )
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to encode image: {e}")
-            else:
-                logger.info(f"Extracting CLIP embeddings at {fallback_interval}s intervals")
-                current_time = 0.0
-                index = 0
-
-                while current_time < duration:
-                    end_time = min(current_time + fallback_interval, duration)
-                    mid_time = (current_time + end_time) / 2
-
-                    frame_path = _extract_frame_at(file_path, temp_dir, mid_time)
-
-                    if frame_path:
-                        try:
-                            embedding = backend.encode_image(frame_path)
-                            segments.append(
-                                ClipSegment(
-                                    start=current_time,
-                                    end=end_time,
-                                    scene_index=index,
-                                    embedding=embedding,
-                                )
-                            )
-                        except Exception as e:
-                            logger.warning(f"Failed to encode frame at {mid_time}s: {e}")
-
-                    current_time = end_time
-                    index += 1
-
-        logger.info(f"Generated {len(segments)} CLIP embeddings")
-
-        return ClipResult(
-            model=backend.get_model_name(),
-            segments=segments,
-        )
-
-    finally:
-        # Clean up temp directory
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    return ClipResult(
+        model=backend.get_model_name(),
+        segments=segments,
+    )
 
 
-def _extract_frame_at(file_path: str, output_dir: str, timestamp: float) -> str | None:
-    """Extract a single frame at specified timestamp.
+def extract_clip_image(
+    file_path: str,
+    model_name: str | None = None,
+) -> ClipResult:
+    """Extract CLIP embedding from a single image file.
 
-    Uses FrameExtractor which handles both videos (via OpenCV/ffmpeg)
-    and images (via direct loading).
+    Args:
+        file_path: Path to image file
+        model_name: CLIP model name (e.g., "ViT-B-32", "ViT-L-14"). If None, uses default.
+
+    Returns:
+        ClipResult with single embedding
     """
-    output_path = os.path.join(output_dir, f"frame_{timestamp:.3f}.jpg")
+    path = Path(file_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Image not found: {file_path}")
 
-    with FrameExtractor(file_path) as extractor:
-        frame = extractor.get_frame_at(timestamp)
+    backend = get_clip_backend(model_name)
+    logger.info(f"Encoding image directly: {file_path}")
 
-        if frame is not None:
-            cv2.imwrite(output_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
-                return output_path
-            else:
-                logger.warning(f"Frame at {timestamp}s: could not save to {output_path}")
-        else:
-            logger.warning(f"Frame at {timestamp}s: extraction failed")
-
-    return None
-
-
-def _get_video_duration(file_path: str) -> float:
-    """Get video/image duration in seconds (0 for images)."""
-    from polybos_engine.extractors.frames import get_video_duration
-
-    return get_video_duration(file_path)
+    embedding = backend.encode_image(file_path)
+    return ClipResult(
+        model=backend.get_model_name(),
+        segments=[
+            ClipSegment(
+                start=0.0,
+                end=0.0,
+                scene_index=0,
+                embedding=embedding,
+            )
+        ],
+    )

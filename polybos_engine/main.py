@@ -33,7 +33,9 @@ from polybos_engine.config import (
 )
 from polybos_engine.extractors import (
     FFPROBE_WORKERS,
+    SharedFrameBuffer,
     analyze_motion,
+    decode_frames,
     detect_voice_activity,
     extract_clip,
     extract_faces,
@@ -45,6 +47,7 @@ from polybos_engine.extractors import (
     extract_telemetry,
     extract_transcript,
     get_adaptive_timestamps,
+    get_extractor_timestamps,
     get_sample_timestamps,
     run_ffprobe_batch,
     shutdown_ffprobe_pool,
@@ -800,6 +803,68 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 update_file_timing(i, "motion", time.time() - file_start)
             end_extractor_timing("motion", total_files)
 
+        # Stage 6b: Decode shared frames for visual extractors
+        # Decode video frames once and share across Objects, Faces, OCR, CLIP
+        frame_buffers: dict[int, SharedFrameBuffer] = {}
+
+        visual_extractors_enabled = any(
+            [
+                request.enable_objects,
+                request.enable_faces,
+                request.enable_ocr,
+                request.enable_clip,
+            ]
+        )
+
+        if visual_extractors_enabled and needs_motion:
+            start_extractor_timing("frame_decode")
+            update_batch_progress(
+                "frame_decode", "Decoding video frames...", 0, total_files
+            )
+
+            for i, file_path in enumerate(files):
+                if i in failed_files:
+                    continue
+
+                # Get timestamps for this file (use motion-adaptive if available)
+                motion = motion_data.get(i)
+                timestamps = adaptive_timestamps.get(i, [])
+
+                # Apply motion-based filtering for more stable footage
+                if motion and motion.is_stable:
+                    timestamps = get_extractor_timestamps(
+                        motion.is_stable, motion.avg_intensity, timestamps
+                    )
+
+                if not timestamps:
+                    continue
+
+                file_start = time.time()
+                update_batch_progress(
+                    "frame_decode",
+                    f"Decoding {Path(file_path).name} ({len(timestamps)} frames)",
+                    i + 1,
+                    total_files,
+                )
+
+                try:
+                    buffer = decode_frames(
+                        file_path,
+                        timestamps=timestamps,
+                        max_dimension=1920,
+                    )
+                    frame_buffers[i] = buffer
+                    logger.info(
+                        f"Decoded {len(buffer.frames)}/{len(timestamps)} frames "
+                        f"for {Path(file_path).name}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Frame decode failed for {file_path}: {e}")
+
+                update_file_timing(i, "frame_decode", time.time() - file_start)
+
+            end_extractor_timing("frame_decode", len(frame_buffers))
+
         # Stage 7: Objects (YOLO - fast object detection with bounding boxes)
         # Store person timestamps for face detection
         person_timestamps: dict[int, list[float]] = (
@@ -823,14 +888,17 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     total_files,
                 )
                 try:
-                    # Use motion-adaptive timestamps if available
-                    timestamps = (
-                        adaptive_timestamps.get(i)
-                        if adaptive_timestamps.get(i)
-                        else None
-                    )
+                    # Use shared frame buffer (required)
+                    buffer = frame_buffers.get(i)
+                    if buffer is None:
+                        logger.warning(f"No frame buffer for {file_path}, skipping objects")
+                        person_timestamps[i] = []
+                        continue
+
                     objects = extract_objects(
-                        file_path, timestamps=timestamps, model_name=yolo_model
+                        file_path,
+                        frame_buffer=buffer,
+                        model_name=yolo_model,
                     )
 
                     if objects:
@@ -939,10 +1007,12 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 try:
                     # Smart sampling: use person timestamps from YOLO if available
                     person_ts = person_timestamps.get(i, [])
+                    buffer = frame_buffers.get(i)
 
                     if request.enable_objects and person_ts:
-                        # YOLO-triggered: only detect faces where persons were found
-                        faces = extract_faces(file_path, timestamps=person_ts)
+                        # YOLO-triggered: decode frames specifically for person timestamps
+                        person_buffer = decode_frames(file_path, timestamps=person_ts)
+                        faces = extract_faces(file_path, frame_buffer=person_buffer)
                         logger.info(
                             f"Face detection on {len(person_ts)} person frames for {Path(file_path).name}"
                         )
@@ -952,14 +1022,12 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             f"Skipping face detection for {Path(file_path).name} - no persons detected by YOLO"
                         )
                         faces = None
+                    elif buffer is None:
+                        logger.warning(f"No frame buffer for {file_path}, skipping faces")
+                        faces = None
                     else:
-                        # Objects disabled - fall back to motion-adaptive sampling
-                        timestamps = (
-                            adaptive_timestamps.get(i)
-                            if adaptive_timestamps.get(i)
-                            else None
-                        )
-                        faces = extract_faces(file_path, timestamps=timestamps)
+                        # Objects disabled - use shared frame buffer
+                        faces = extract_faces(file_path, frame_buffer=buffer)
 
                     if faces:
                         faces_data = {
@@ -1007,13 +1075,12 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     "ocr", f"Processing {Path(file_path).name}", i + 1, total_files
                 )
                 try:
-                    # Use motion-adaptive timestamps if available
-                    timestamps = (
-                        adaptive_timestamps.get(i)
-                        if adaptive_timestamps.get(i)
-                        else None
-                    )
-                    ocr = extract_ocr(file_path, timestamps=timestamps)
+                    buffer = frame_buffers.get(i)
+                    if buffer is None:
+                        logger.warning(f"No frame buffer for {file_path}, skipping OCR")
+                        ocr = None
+                    else:
+                        ocr = extract_ocr(file_path, frame_buffer=buffer)
                     update_file_status(
                         i, "running", "ocr", ocr.model_dump() if ocr else None
                     )
@@ -1039,15 +1106,16 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     "clip", f"Processing {Path(file_path).name}", i + 1, total_files
                 )
                 try:
-                    # Use motion-adaptive timestamps if available
-                    timestamps = (
-                        adaptive_timestamps.get(i)
-                        if adaptive_timestamps.get(i)
-                        else None
-                    )
-                    clip = extract_clip(
-                        file_path, timestamps=timestamps, model_name=clip_model
-                    )
+                    buffer = frame_buffers.get(i)
+                    if buffer is None:
+                        logger.warning(f"No frame buffer for {file_path}, skipping CLIP")
+                        clip = None
+                    else:
+                        clip = extract_clip(
+                            file_path,
+                            frame_buffer=buffer,
+                            model_name=clip_model,
+                        )
                     if clip:
                         update_file_status(
                             i,
@@ -1064,6 +1132,14 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             update_batch_progress("clip", "Unloading CLIP model...", None, None)
             unload_clip_model()
             end_extractor_timing("clip", total_files)
+
+        # Release shared frame buffers to free memory
+        if frame_buffers:
+            logger.info(f"Releasing {len(frame_buffers)} shared frame buffers")
+            for buf in frame_buffers.values():
+                del buf
+            frame_buffers.clear()
+            gc.collect()
 
         # Mark files as completed (skip failed files - they stay "failed")
         with batch_jobs_lock:
