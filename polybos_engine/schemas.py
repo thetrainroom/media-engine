@@ -117,6 +117,41 @@ class GPS(BaseModel):
     altitude: float | None = None
 
 
+class GPSTrackPoint(BaseModel):
+    """Single point in a GPS track."""
+
+    latitude: float
+    longitude: float
+    altitude: float | None = None
+    timestamp: float | None = None  # Video timestamp in seconds
+
+
+class GPSTrack(BaseModel):
+    """GPS track extracted from video."""
+
+    points: list[GPSTrackPoint]
+    source: str  # Source of track data (e.g., "avchd_sei", "srt_sidecar")
+
+    @property
+    def count(self) -> int:
+        """Number of points in track."""
+        return len(self.points)
+
+    @property
+    def bounds(self) -> dict[str, float] | None:
+        """Bounding box of track (min/max lat/lon)."""
+        if not self.points:
+            return None
+        lats = [p.latitude for p in self.points]
+        lons = [p.longitude for p in self.points]
+        return {
+            "min_lat": min(lats),
+            "max_lat": max(lats),
+            "min_lon": min(lons),
+            "max_lon": max(lons),
+        }
+
+
 class ColorSpace(BaseModel):
     """Color space information for LOG/HDR footage."""
 
@@ -188,6 +223,7 @@ class Metadata(BaseModel):
     created_at: datetime | None = None
     device: DeviceInfo | None = None
     gps: GPS | None = None
+    gps_track: GPSTrack | None = None  # Full GPS track if available
     color_space: ColorSpace | None = None
     lens: LensInfo | None = None
     shot_type: ShotType | None = None

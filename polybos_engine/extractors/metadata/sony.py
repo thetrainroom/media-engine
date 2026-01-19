@@ -4,11 +4,13 @@ Handles Sony cameras:
 - Professional: FX6, FX3, FX9, Venice
 - Alpha series: A7S, A7R, A1, etc.
 - Consumer: ZV-1, ZV-E1, etc.
+- AVCHD camcorders: HXR-NX5, HDR-CX series, etc.
 
 Detection methods:
 - make tag: "Sony"
 - major_brand: "XAVC"
 - XML sidecar files (M01.XML pattern)
+- AVCHD structure with embedded GPS in H.264 SEI
 
 Sony XML sidecar files contain:
 - Device info (manufacturer, modelName)
@@ -32,6 +34,7 @@ from polybos_engine.schemas import (
     Metadata,
 )
 
+from .avchd_gps import extract_avchd_gps, extract_avchd_gps_track
 from .base import SidecarMetadata, parse_dms_coordinate
 from .registry import get_tags_lower, register_extractor
 
@@ -228,8 +231,19 @@ class SonyExtractor:
         if major_brand.upper() == "XAVC":
             return True
 
-        # Check for Sony XML sidecar
+        # Check for AVCHD structure (common for Sony camcorders)
+        # Path pattern: .../PRIVATE/AVCHD/BDMV/STREAM/*.MTS
         path = Path(file_path)
+        if path.suffix.upper() in (".MTS", ".M2TS"):
+            # Check if in AVCHD folder structure
+            parts = path.parts
+            for i, part in enumerate(parts):
+                if part.upper() == "AVCHD" and i > 0:
+                    # Check parent is PRIVATE (Sony convention)
+                    if parts[i - 1].upper() == "PRIVATE":
+                        return True
+
+        # Check for Sony XML sidecar
         xml_patterns = [
             path.with_suffix(".XML"),
             path.parent / f"{path.stem}M01.XML",
@@ -289,6 +303,14 @@ class SonyExtractor:
         )
         lens = sidecar.lens if sidecar and sidecar.lens else base_metadata.lens
 
+        # Try to extract GPS from AVCHD SEI if not already found
+        gps_track = None
+        if gps is None:
+            gps = extract_avchd_gps(file_path)
+            # Also extract full track if GPS was found
+            if gps is not None:
+                gps_track = extract_avchd_gps_track(file_path)
+
         return Metadata(
             duration=base_metadata.duration,
             resolution=base_metadata.resolution,
@@ -302,6 +324,7 @@ class SonyExtractor:
             created_at=base_metadata.created_at,
             device=device,
             gps=gps,
+            gps_track=gps_track,
             color_space=color_space,
             lens=lens,
         )

@@ -45,6 +45,13 @@ def main():
                 print(f"Device: {result.device.make} {result.device.model}")
             if result.gps:
                 print(f"GPS: {result.gps.latitude}, {result.gps.longitude}")
+            if result.gps_track:
+                track = result.gps_track
+                bounds = track.bounds
+                if bounds:
+                    lat_range = bounds["max_lat"] - bounds["min_lat"]
+                    lon_range = bounds["max_lon"] - bounds["min_lon"]
+                    print(f"GPS Track: {track.count} points (lat range: {lat_range:.6f}, lon range: {lon_range:.6f})")
             if result.shot_type:
                 print(f"Shot type: {result.shot_type.primary} ({result.shot_type.confidence:.2f})")
             if result.keyframes:
