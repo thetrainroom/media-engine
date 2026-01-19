@@ -33,6 +33,7 @@ from . import (
     canon,  # noqa: F401
     dji,  # noqa: F401
     ffmpeg,  # noqa: F401
+    gopro,  # noqa: F401
     red,  # noqa: F401
     sony,  # noqa: F401
 )
