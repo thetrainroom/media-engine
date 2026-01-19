@@ -81,9 +81,18 @@ def extract_metadata(file_path: str, probe_data: dict | None = None) -> Metadata
     if not path.exists():
         raise FileNotFoundError(f"Video file not found: {file_path}")
 
-    # Run ffprobe if not provided
+    # Handle files that ffprobe cannot read (e.g., RED R3D)
+    # These formats require direct header parsing
+    ffprobe_unsupported = path.suffix.upper() in (".R3D",)
+
+    # Run ffprobe if not provided (and file format is supported)
     if probe_data is None:
-        probe_data = run_ffprobe(file_path)
+        if ffprobe_unsupported:
+            # Create minimal probe_data for formats ffprobe can't read
+            probe_data = {"streams": [], "format": {"filename": file_path}}
+            logger.info(f"Skipping ffprobe for unsupported format: {path.suffix}")
+        else:
+            probe_data = run_ffprobe(file_path)
 
     # Build base metadata (device-agnostic)
     base_metadata = build_base_metadata(probe_data, file_path)
