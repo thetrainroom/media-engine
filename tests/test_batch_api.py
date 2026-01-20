@@ -6,12 +6,14 @@ These tests verify the full batch processing flow through the API:
 - Verifying results
 - Model loading/unloading between stages
 
-Requires videos in /Volumes/Backup/drone/ or TEST_VIDEO_PATH environment variable.
+Uses test_data/video/ folder (see ../media-archive/docs/TEST_DATA.md).
+Override with TEST_VIDEO_PATH environment variable.
 """
 
 import glob
 import os
 import time
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -19,11 +21,14 @@ from fastapi.testclient import TestClient
 from polybos_engine.main import app
 
 
+# Get project root (parent of tests/)
+_PROJECT_ROOT = Path(__file__).parent.parent
+
 # Video directories to search (in order of preference)
 VIDEO_SEARCH_PATHS = [
-    "/Volumes/Backup/drone/20251015_vindhella_borgund",
+    str(_PROJECT_ROOT / "test_data" / "video"),  # Standard test data location
+    "/Volumes/Media",
     "/Volumes/Backup/drone",
-    "/Volumes/Backup",
 ]
 
 
@@ -38,26 +43,32 @@ def get_test_videos(count: int = 3) -> list[str]:
     """
     # Check environment variable first
     custom_path = os.environ.get("TEST_VIDEO_PATH")
-    if custom_path and os.path.isfile(custom_path):
-        return [custom_path]
-
-    search_paths = VIDEO_SEARCH_PATHS
+    if custom_path:
+        if os.path.isfile(custom_path):
+            return [custom_path]
+        elif os.path.isdir(custom_path):
+            # Use as search directory
+            search_paths = [custom_path]
+        else:
+            search_paths = VIDEO_SEARCH_PATHS
+    else:
+        search_paths = VIDEO_SEARCH_PATHS
 
     videos: list[str] = []
     for search_path in search_paths:
         if not os.path.isdir(search_path):
             continue
 
-        # Find video files (MP4, MOV)
+        # Find video files (MP4, MOV) - search recursively
         patterns = [
-            os.path.join(search_path, "*.mp4"),
-            os.path.join(search_path, "*.MP4"),
-            os.path.join(search_path, "*.mov"),
-            os.path.join(search_path, "*.MOV"),
+            os.path.join(search_path, "**", "*.mp4"),
+            os.path.join(search_path, "**", "*.MP4"),
+            os.path.join(search_path, "**", "*.mov"),
+            os.path.join(search_path, "**", "*.MOV"),
         ]
 
         for pattern in patterns:
-            videos.extend(glob.glob(pattern))
+            videos.extend(glob.glob(pattern, recursive=True))
             if len(videos) >= count:
                 break
 
@@ -101,6 +112,10 @@ def wait_for_batch(client: TestClient, batch_id: str, timeout: int = 300) -> dic
         status = response.json()
         if status["status"] in ("completed", "failed"):
             return status
+
+        # Log queue position if queued
+        if status["status"] == "queued":
+            print(f"Batch {batch_id} queued at position {status.get('queue_position')}")
 
         time.sleep(1)
 
@@ -371,7 +386,7 @@ class TestBatchLifecycle:
 
             status = response.json()
             assert status["batch_id"] == batch_id
-            assert status["status"] in ("pending", "running", "completed", "failed")
+            assert status["status"] in ("queued", "pending", "running", "completed", "failed")
 
             if status["status"] == "completed":
                 break
@@ -590,6 +605,180 @@ class TestBatchMultipleExtractors:
         # Cleanup
         for batch_id in batch_ids:
             api_client.delete(f"/batch/{batch_id}")
+
+
+class TestBatchQueue:
+    """Test batch queue functionality - only one batch runs at a time."""
+
+    def test_second_batch_gets_queued(self, api_client, test_videos):
+        """Test that submitting a batch while another is running queues it."""
+        # Start first batch with scenes (takes a few seconds)
+        response1 = api_client.post(
+            "/batch",
+            json={
+                "files": test_videos[:1],
+                "enable_metadata": True,
+                "enable_scenes": True,
+            },
+        )
+        assert response1.status_code == 200
+        batch1_id = response1.json()["batch_id"]
+
+        # Check first batch is pending or running
+        status1 = api_client.get(f"/batch/{batch1_id}").json()
+        assert status1["status"] in ("pending", "running")
+        assert status1["queue_position"] is None
+
+        # Submit second batch while first is still processing
+        response2 = api_client.post(
+            "/batch",
+            json={
+                "files": test_videos[:1],
+                "enable_metadata": True,
+            },
+        )
+        assert response2.status_code == 200
+        batch2_id = response2.json()["batch_id"]
+
+        # Check second batch is queued
+        status2 = api_client.get(f"/batch/{batch2_id}").json()
+        assert status2["status"] == "queued"
+        assert status2["queue_position"] == 1
+
+        # Submit third batch
+        response3 = api_client.post(
+            "/batch",
+            json={
+                "files": test_videos[:1],
+                "enable_metadata": True,
+            },
+        )
+        assert response3.status_code == 200
+        batch3_id = response3.json()["batch_id"]
+
+        # Check third batch is queued at position 2
+        status3 = api_client.get(f"/batch/{batch3_id}").json()
+        assert status3["status"] == "queued"
+        assert status3["queue_position"] == 2
+
+        # Wait for all to complete
+        wait_for_batch(api_client, batch1_id, timeout=120)
+        wait_for_batch(api_client, batch2_id, timeout=120)
+        wait_for_batch(api_client, batch3_id, timeout=120)
+
+        # Verify all completed
+        assert api_client.get(f"/batch/{batch1_id}").json()["status"] == "completed"
+        assert api_client.get(f"/batch/{batch2_id}").json()["status"] == "completed"
+        assert api_client.get(f"/batch/{batch3_id}").json()["status"] == "completed"
+
+        # Cleanup
+        api_client.delete(f"/batch/{batch1_id}")
+        api_client.delete(f"/batch/{batch2_id}")
+        api_client.delete(f"/batch/{batch3_id}")
+
+    def test_queued_batch_starts_after_current_completes(self, api_client, test_videos):
+        """Test that queued batch automatically starts when current batch finishes."""
+        # Start first batch (metadata only - fast)
+        response1 = api_client.post(
+            "/batch",
+            json={
+                "files": test_videos[:1],
+                "enable_metadata": True,
+            },
+        )
+        batch1_id = response1.json()["batch_id"]
+
+        # Submit second batch
+        response2 = api_client.post(
+            "/batch",
+            json={
+                "files": test_videos[:1],
+                "enable_metadata": True,
+            },
+        )
+        batch2_id = response2.json()["batch_id"]
+
+        # Wait for first to complete
+        wait_for_batch(api_client, batch1_id, timeout=60)
+
+        # Second batch should now be running or completed (not queued)
+        status2 = api_client.get(f"/batch/{batch2_id}").json()
+        assert status2["status"] in ("pending", "running", "completed")
+        assert status2["queue_position"] is None
+
+        # Wait for second to complete
+        wait_for_batch(api_client, batch2_id, timeout=60)
+
+        # Cleanup
+        api_client.delete(f"/batch/{batch1_id}")
+        api_client.delete(f"/batch/{batch2_id}")
+
+    def test_delete_queued_batch(self, api_client, test_videos):
+        """Test that deleting a queued batch removes it from queue."""
+        # Start first batch with scenes (slower)
+        response1 = api_client.post(
+            "/batch",
+            json={
+                "files": test_videos[:1],
+                "enable_metadata": True,
+                "enable_scenes": True,
+            },
+        )
+        batch1_id = response1.json()["batch_id"]
+
+        # Queue second and third batches
+        response2 = api_client.post(
+            "/batch",
+            json={"files": test_videos[:1], "enable_metadata": True},
+        )
+        batch2_id = response2.json()["batch_id"]
+
+        response3 = api_client.post(
+            "/batch",
+            json={"files": test_videos[:1], "enable_metadata": True},
+        )
+        batch3_id = response3.json()["batch_id"]
+
+        # Verify queue positions
+        assert api_client.get(f"/batch/{batch2_id}").json()["queue_position"] == 1
+        assert api_client.get(f"/batch/{batch3_id}").json()["queue_position"] == 2
+
+        # Delete batch2 from queue
+        response = api_client.delete(f"/batch/{batch2_id}")
+        assert response.status_code == 200
+
+        # Batch3 should now be at position 1
+        status3 = api_client.get(f"/batch/{batch3_id}").json()
+        assert status3["queue_position"] == 1
+
+        # Wait for remaining batches
+        wait_for_batch(api_client, batch1_id, timeout=120)
+        wait_for_batch(api_client, batch3_id, timeout=60)
+
+        # Cleanup
+        api_client.delete(f"/batch/{batch1_id}")
+        api_client.delete(f"/batch/{batch3_id}")
+
+    def test_first_batch_starts_immediately(self, api_client, test_videos):
+        """Test that first batch starts immediately when no batch is running."""
+        response = api_client.post(
+            "/batch",
+            json={
+                "files": test_videos[:1],
+                "enable_metadata": True,
+            },
+        )
+        assert response.status_code == 200
+        batch_id = response.json()["batch_id"]
+
+        # Should be pending or running immediately, not queued
+        status = api_client.get(f"/batch/{batch_id}").json()
+        assert status["status"] in ("pending", "running")
+        assert status["queue_position"] is None
+
+        # Wait and cleanup
+        wait_for_batch(api_client, batch_id, timeout=30)
+        api_client.delete(f"/batch/{batch_id}")
 
 
 class TestHardwareEndpoint:

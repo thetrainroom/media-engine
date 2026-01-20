@@ -19,6 +19,7 @@ logging.basicConfig(
     handlers=[logging.FileHandler("/tmp/polybos_engine.log"), logging.StreamHandler()],
 )
 
+# ruff: noqa: E402 (imports after logging.basicConfig is intentional)
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -59,6 +60,7 @@ from polybos_engine.extractors import (
     unload_whisper_model,
     unload_yolo_model,
 )
+from polybos_engine.extractors.vad import AudioContent
 from polybos_engine.schemas import (
     HealthResponse,
     MediaType,
@@ -66,7 +68,6 @@ from polybos_engine.schemas import (
     SettingsUpdate,
     get_media_type,
 )
-from polybos_engine.extractors.vad import AudioContent
 
 logger = logging.getLogger(__name__)
 
@@ -137,13 +138,8 @@ def _cleanup_resources():
     """Clean up all resources.
 
     Note: This runs during Python shutdown via atexit, so we must be careful
-    not to import new modules or use logging that may fail.
+    not to import new modules or use logging (file handlers may be closed).
     """
-    try:
-        logger.info("Cleaning up resources...")
-    except Exception:
-        pass  # Logging may fail during shutdown
-
     try:
         shutdown_ffprobe_pool()
         unload_whisper_model()
@@ -309,7 +305,8 @@ class BatchJobStatus(BaseModel):
     """Status of a batch extraction job."""
 
     batch_id: str
-    status: str  # pending, running, completed, failed
+    status: str  # queued, pending, running, completed, failed
+    queue_position: int | None = None  # Position in queue (1 = next to run), None if not queued
     current_extractor: str | None = None
     progress: JobProgress | None = None
     files: list[BatchFileStatus] = []
@@ -325,6 +322,11 @@ class BatchJobStatus(BaseModel):
 # In-memory batch store
 batch_jobs: dict[str, BatchJobStatus] = {}
 batch_jobs_lock = threading.Lock()
+
+# Batch queue - only one batch runs at a time, others wait in queue
+batch_queue: list[tuple[str, BatchRequest]] = []  # (batch_id, request) tuples
+batch_queue_lock = threading.Lock()
+batch_running: bool = False  # True if a batch is currently running
 
 
 def _cleanup_expired_batch_jobs() -> int:
@@ -352,6 +354,47 @@ def _cleanup_expired_batch_jobs() -> int:
         logger.info(f"Cleaned up {removed} expired batch jobs")
 
     return removed
+
+
+def _update_queue_positions() -> None:
+    """Update queue_position for all queued batches."""
+    with batch_queue_lock:
+        with batch_jobs_lock:
+            for i, (bid, _) in enumerate(batch_queue):
+                if bid in batch_jobs:
+                    batch_jobs[bid].queue_position = i + 1  # 1-indexed
+
+
+def _start_next_batch() -> None:
+    """Start the next batch from the queue if one exists.
+
+    Called when a batch completes or fails. Sets batch_running = False
+    if no more batches in queue.
+    """
+    global batch_running
+
+    with batch_queue_lock:
+        if not batch_queue:
+            batch_running = False
+            logger.info("Batch queue empty, no more batches to run")
+            return
+
+        # Pop the next batch from queue
+        next_batch_id, next_request = batch_queue.pop(0)
+        logger.info(f"Starting next batch from queue: {next_batch_id}")
+
+    # Update queue positions for remaining batches
+    _update_queue_positions()
+
+    # Update batch status from queued to pending
+    with batch_jobs_lock:
+        if next_batch_id in batch_jobs:
+            batch_jobs[next_batch_id].status = "pending"
+            batch_jobs[next_batch_id].queue_position = None
+
+    # Start the batch in a new thread
+    thread = threading.Thread(target=run_batch_job, args=(next_batch_id, next_request))
+    thread.start()
 
 
 def run_batch_job(batch_id: str, request: BatchRequest) -> None:
@@ -1186,10 +1229,20 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 batch_jobs[batch_id].memory_mb = _get_memory_mb()
                 batch_jobs[batch_id].peak_memory_mb = peak_memory
 
+    finally:
+        # Always start the next batch from queue (or set batch_running = False)
+        _start_next_batch()
+
 
 @app.post("/batch")
 async def create_batch(request: BatchRequest) -> dict[str, str]:
-    """Create a new batch extraction job (memory-efficient extractor-first processing)."""
+    """Create a new batch extraction job (memory-efficient extractor-first processing).
+
+    Only one batch runs at a time. If a batch is already running, new batches
+    are queued and will start automatically when the current batch finishes.
+    """
+    global batch_running
+
     # Cleanup expired batch jobs on new batch creation (lazy cleanup)
     _cleanup_expired_batch_jobs()
 
@@ -1199,9 +1252,26 @@ async def create_batch(request: BatchRequest) -> dict[str, str]:
             raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
 
     batch_id = str(uuid.uuid4())[:8]
+
+    # Check if we should start immediately or queue
+    with batch_queue_lock:
+        should_start = not batch_running
+        if should_start:
+            batch_running = True
+            queue_position = None
+            status = "pending"
+            logger.info(f"Starting batch {batch_id} immediately (no batch running)")
+        else:
+            # Add to queue
+            batch_queue.append((batch_id, request))
+            queue_position = len(batch_queue)
+            status = "queued"
+            logger.info(f"Queued batch {batch_id} at position {queue_position}")
+
     batch = BatchJobStatus(
         batch_id=batch_id,
-        status="pending",
+        status=status,
+        queue_position=queue_position,
         files=[
             BatchFileStatus(file=f, filename=Path(f).name, status="pending")
             for f in request.files
@@ -1212,9 +1282,10 @@ async def create_batch(request: BatchRequest) -> dict[str, str]:
     with batch_jobs_lock:
         batch_jobs[batch_id] = batch
 
-    # Start background thread
-    thread = threading.Thread(target=run_batch_job, args=(batch_id, request))
-    thread.start()
+    # Start immediately if no batch running
+    if should_start:
+        thread = threading.Thread(target=run_batch_job, args=(batch_id, request))
+        thread.start()
 
     return {"batch_id": batch_id}
 
@@ -1232,13 +1303,21 @@ async def get_batch(batch_id: str) -> BatchJobStatus:
 async def delete_batch(batch_id: str) -> dict[str, str]:
     """Delete a batch job and free its memory.
 
-    Jobs can be deleted at any time, but deleting a running batch
-    will not stop its processing - it will just remove the status.
+    Jobs can be deleted at any time. If the batch is queued, it will be
+    removed from the queue. If running, deletion will not stop processing
+    - it will just remove the status tracking.
     """
     with batch_jobs_lock:
         if batch_id not in batch_jobs:
             raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
+        was_queued = batch_jobs[batch_id].status == "queued"
         del batch_jobs[batch_id]
+
+    # If it was queued, remove from queue and update positions
+    if was_queued:
+        with batch_queue_lock:
+            batch_queue[:] = [(bid, req) for bid, req in batch_queue if bid != batch_id]
+        _update_queue_positions()
 
     logger.info(f"Deleted batch job {batch_id}")
     return {"status": "deleted", "batch_id": batch_id}

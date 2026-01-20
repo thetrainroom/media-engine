@@ -2,7 +2,6 @@
 
 import logging
 import os
-import subprocess
 import tempfile
 from enum import StrEnum
 from pathlib import Path

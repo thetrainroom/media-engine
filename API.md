@@ -61,6 +61,8 @@ Create a new batch extraction job.
 
 **Note:** Telemetry (GPS/flight path) is always extracted automatically when available. No flag needed - it's lightweight and included in results.
 
+**Note:** Only one batch runs at a time. If a batch is already running, new batches are queued and start automatically when the current batch finishes.
+
 **Response:**
 ```json
 {
@@ -79,6 +81,7 @@ Get batch job status and results.
 {
   "batch_id": "abc12345",
   "status": "running",
+  "queue_position": null,
   "current_extractor": "scenes",
   "progress": {
     "message": "Processing video1.mp4",
@@ -118,16 +121,21 @@ Get batch job status and results.
 
 | Status | Description |
 |--------|-------------|
-| `pending` | Job created, waiting to start |
+| `queued` | Waiting in queue (another batch is running) |
+| `pending` | Job created, about to start processing |
 | `running` | Processing in progress |
 | `completed` | All files processed successfully |
 | `failed` | Job failed with error |
+
+| Field | Description |
+|-------|-------------|
+| `queue_position` | Position in queue (1 = next to run). `null` if not queued. |
 
 ---
 
 ### DELETE /batch/{batch_id}
 
-Delete a batch job and free memory.
+Delete a batch job and free memory. If the batch is queued, it will be removed from the queue. If the batch is running, deletion removes the status tracking but does not stop processing.
 
 **Response:**
 ```json
@@ -287,6 +295,139 @@ All model fields support `"auto"` for automatic selection based on available VRA
 | 4-8GB | small | yolov8s | ViT-B-32 | yolo |
 | 8-16GB | medium | yolov8m | ViT-L-14 | qwen |
 | 16GB+ | large-v3 | yolov8l | ViT-L-14 | qwen |
+
+---
+
+## Metadata Response Schema
+
+The metadata extraction returns detailed information about the video file.
+
+```json
+{
+  "duration": 120.5,
+  "resolution": {"width": 1920, "height": 1080},
+  "codec": {"video": "hevc", "audio": "aac"},
+  "video_codec": {
+    "name": "hevc",
+    "profile": "Main 10",
+    "bit_depth": 10,
+    "pixel_format": "yuv420p10le"
+  },
+  "audio": {
+    "codec": "aac",
+    "sample_rate": 48000,
+    "channels": 2,
+    "bit_depth": null,
+    "bitrate": 256000
+  },
+  "fps": 25.0,
+  "bitrate": 50000000,
+  "file_size": 750000000,
+  "timecode": "01:15:07:17",
+  "created_at": "2024-01-15T10:00:00Z",
+  "device": {
+    "make": "Sony",
+    "model": "PXW-FS7",
+    "serial_number": "0034075",
+    "software": null,
+    "type": "camera",
+    "detection_method": "xml_sidecar",
+    "confidence": 1.0
+  },
+  "gps": {
+    "latitude": 59.9139,
+    "longitude": 10.7522,
+    "altitude": 100.5
+  },
+  "gps_track": {
+    "points": [
+      {"latitude": 59.9139, "longitude": 10.7522, "altitude": 100.5, "timestamp": 0.0},
+      {"latitude": 59.9140, "longitude": 10.7523, "altitude": 101.0, "timestamp": 1.0}
+    ],
+    "source": "srt_sidecar"
+  },
+  "color_space": {
+    "transfer": "slog3",
+    "primaries": "sgamut3",
+    "matrix": "bt709",
+    "lut_file": null,
+    "detection_method": "xml_sidecar"
+  },
+  "lens": {
+    "model": "XT14X5.8",
+    "focal_length": 14.0,
+    "focal_length_35mm": 28.0,
+    "aperture": 2.8,
+    "focus_distance": null,
+    "iris": "F2.8",
+    "detection_method": "metadata"
+  },
+  "shot_type": {
+    "primary": "interview",
+    "confidence": 0.85,
+    "detection_method": "clip"
+  },
+  "keyframes": {
+    "timestamps": [0.0, 2.0, 4.0],
+    "count": 60,
+    "is_fixed_interval": true,
+    "avg_interval": 2.0
+  },
+  "spanned_recording": {
+    "is_continuation": false,
+    "sibling_files": ["00001.MTS"],
+    "total_duration": 969.8,
+    "file_index": 0
+  },
+  "stereo_3d": {
+    "mode": "mvc",
+    "eye_count": 2,
+    "has_left_eye": true,
+    "has_right_eye": true,
+    "detection_method": "metadata"
+  }
+}
+```
+
+### Device Types
+
+| Type | Description |
+|------|-------------|
+| `camera` | Professional or consumer camera |
+| `phone` | Smartphone (iPhone, Android) |
+| `drone` | Aerial drone (DJI, etc.) |
+| `action_camera` | Action camera (GoPro, Insta360) |
+| `dashcam` | Vehicle dashcam (Tesla, etc.) |
+| `unknown` | Unknown device type |
+
+### Stereo 3D Modes
+
+| Mode | Description |
+|------|-------------|
+| `mvc` | H.264 Multiview Video Coding (3D Blu-ray, consumer 3D camcorders) |
+| `side_by_side` | Left/right frames side by side (half width each) |
+| `side_by_side_full` | Full width side-by-side (doubled width) |
+| `top_bottom` | Left/right frames stacked (half height each) |
+| `top_bottom_full` | Full height top-bottom (doubled height) |
+| `frame_sequential` | Alternating L/R frames |
+| `dual_stream` | Separate files for each eye |
+
+### Spanned Recording
+
+AVCHD cameras split long recordings at ~2GB boundaries (FAT32 limit). When detected:
+
+- `is_continuation`: `true` if this file is NOT the first of the recording
+- `sibling_files`: Other files belonging to the same recording
+- `total_duration`: Combined duration of all files in the recording
+- `file_index`: Position of this file (0-based)
+
+### Detection Methods
+
+| Method | Description |
+|--------|-------------|
+| `metadata` | Extracted from embedded metadata tags |
+| `xml_sidecar` | Parsed from XML sidecar file (Sony M01.XML, etc.) |
+| `clip` | Detected using CLIP model |
 
 ---
 
