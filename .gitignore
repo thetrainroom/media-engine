@@ -39,6 +39,7 @@ env/
 htmlcov/
 .tox/
 .nox/
+test_data/
 
 # Temp files
 *.log
