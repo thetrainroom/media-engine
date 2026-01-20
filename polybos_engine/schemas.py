@@ -165,6 +165,28 @@ class ColorSpace(BaseModel):
     detection_method: DetectionMethod = DetectionMethod.METADATA
 
 
+class Stereo3DMode(StrEnum):
+    """3D video format/layout."""
+
+    MVC = "mvc"  # H.264 Multiview Video Coding (3D Blu-ray, consumer 3D camcorders)
+    SIDE_BY_SIDE = "side_by_side"  # Left/right frames side by side (half width each)
+    SIDE_BY_SIDE_FULL = "side_by_side_full"  # Full width SBS (doubled width)
+    TOP_BOTTOM = "top_bottom"  # Left/right frames stacked (half height each)
+    TOP_BOTTOM_FULL = "top_bottom_full"  # Full height TAB (doubled height)
+    FRAME_SEQUENTIAL = "frame_sequential"  # Alternating L/R frames
+    DUAL_STREAM = "dual_stream"  # Separate files for each eye
+
+
+class Stereo3D(BaseModel):
+    """Stereoscopic 3D video information."""
+
+    mode: Stereo3DMode
+    eye_count: int = 2  # Number of views (usually 2)
+    has_left_eye: bool = True
+    has_right_eye: bool = True
+    detection_method: DetectionMethod = DetectionMethod.METADATA
+
+
 class LensInfo(BaseModel):
     """Lens and camera settings."""
 
@@ -245,6 +267,7 @@ class Metadata(BaseModel):
     shot_type: ShotType | None = None
     keyframes: KeyframeInfo | None = None
     spanned_recording: SpannedRecording | None = None  # For split recordings (AVCHD)
+    stereo_3d: Stereo3D | None = None  # Stereoscopic 3D video info
 
 
 class TranscriptSegment(BaseModel):

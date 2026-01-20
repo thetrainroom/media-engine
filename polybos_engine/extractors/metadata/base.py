@@ -20,6 +20,8 @@ from polybos_engine.schemas import (
     LensInfo,
     Metadata,
     Resolution,
+    Stereo3D,
+    Stereo3DMode,
     VideoCodec,
 )
 
@@ -480,6 +482,66 @@ def extract_color_space_from_stream(
     )
 
 
+def detect_stereo_3d(probe_data: dict[str, Any]) -> Stereo3D | None:
+    """Detect stereoscopic 3D video format.
+
+    Detection methods:
+    - MVC: Two H.264 video streams (base view + dependent view)
+    - Metadata tags: stereo_mode, stereo3d tags
+
+    Returns:
+        Stereo3D info if 3D is detected, None otherwise.
+    """
+    streams = probe_data.get("streams", [])
+
+    # Count video streams
+    video_streams = [s for s in streams if s.get("codec_type") == "video"]
+
+    # MVC detection: Two H.264 video streams where second has 0x0 dimensions
+    # (dependent view references base view)
+    if len(video_streams) >= 2:
+        first_video = video_streams[0]
+        second_video = video_streams[1]
+
+        if (
+            first_video.get("codec_name") == "h264"
+            and second_video.get("codec_name") == "h264"
+        ):
+            first_width = first_video.get("width", 0)
+            second_width = second_video.get("width", 0)
+
+            # MVC dependent view typically has 0x0 dimensions
+            if first_width > 0 and second_width == 0:
+                logger.info("Detected MVC stereoscopic 3D (two H.264 streams)")
+                return Stereo3D(
+                    mode=Stereo3DMode.MVC,
+                    eye_count=2,
+                    has_left_eye=True,
+                    has_right_eye=True,
+                    detection_method=DetectionMethod.METADATA,
+                )
+
+    # Check for stereo_mode metadata tag (used by some 360 cameras and encoders)
+    tags = probe_data.get("format", {}).get("tags", {})
+    tags_lower = {k.lower(): v for k, v in tags.items()}
+
+    stereo_mode = tags_lower.get("stereo_mode") or tags_lower.get("stereo3d")
+    if stereo_mode:
+        mode_lower = stereo_mode.lower()
+        if "side" in mode_lower or "sbs" in mode_lower:
+            return Stereo3D(
+                mode=Stereo3DMode.SIDE_BY_SIDE,
+                detection_method=DetectionMethod.METADATA,
+            )
+        elif "top" in mode_lower or "over" in mode_lower or "tab" in mode_lower:
+            return Stereo3D(
+                mode=Stereo3DMode.TOP_BOTTOM,
+                detection_method=DetectionMethod.METADATA,
+            )
+
+    return None
+
+
 def build_base_metadata(
     probe_data: dict[str, Any],
     file_path: str,
@@ -540,6 +602,9 @@ def build_base_metadata(
     gps = extract_gps_from_tags(tags)
     color_space = extract_color_space_from_stream(video_stream, tags)
 
+    # Detect stereoscopic 3D
+    stereo_3d = detect_stereo_3d(probe_data)
+
     return Metadata(
         duration=duration,
         resolution=resolution,
@@ -555,4 +620,5 @@ def build_base_metadata(
         gps=gps,
         color_space=color_space,
         lens=None,
+        stereo_3d=stereo_3d,
     )
