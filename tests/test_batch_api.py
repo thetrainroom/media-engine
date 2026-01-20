@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from polybos_engine import main
 from polybos_engine.main import app
 
 
@@ -32,11 +33,12 @@ VIDEO_SEARCH_PATHS = [
 ]
 
 
-def get_test_videos(count: int = 3) -> list[str]:
-    """Find test videos from backup directory.
+def get_test_videos(count: int = 3, max_size_mb: int = 100) -> list[str]:
+    """Find test videos from test_data directory.
 
     Args:
         count: Number of videos to return
+        max_size_mb: Maximum file size in MB (skip larger files for faster tests)
 
     Returns:
         List of video paths, or empty list if none found
@@ -54,7 +56,7 @@ def get_test_videos(count: int = 3) -> list[str]:
     else:
         search_paths = VIDEO_SEARCH_PATHS
 
-    videos: list[str] = []
+    all_videos: list[str] = []
     for search_path in search_paths:
         if not os.path.isdir(search_path):
             continue
@@ -68,14 +70,53 @@ def get_test_videos(count: int = 3) -> list[str]:
         ]
 
         for pattern in patterns:
-            videos.extend(glob.glob(pattern, recursive=True))
-            if len(videos) >= count:
-                break
+            all_videos.extend(glob.glob(pattern, recursive=True))
 
-        if len(videos) >= count:
-            break
+        if all_videos:
+            break  # Found videos in this search path, stop looking
+
+    # Filter out large files and sort by size (smallest first)
+    max_size_bytes = max_size_mb * 1024 * 1024
+    videos = [v for v in all_videos if os.path.getsize(v) <= max_size_bytes]
+    videos.sort(key=os.path.getsize)
 
     return videos[:count]
+
+
+@pytest.fixture(autouse=True)
+def reset_batch_queue():
+    """Reset batch queue state before each test.
+
+    This ensures tests don't queue behind each other, which would cause timeouts.
+    """
+    # Wait for any running batch to complete (max 2 minutes)
+    # This is important because extractors like scenes/objects can take a while
+    for _ in range(1200):  # 120 seconds
+        with main.batch_queue_lock:
+            if not main.batch_running:
+                break
+        time.sleep(0.1)
+
+    # Clear queue and reset state
+    with main.batch_queue_lock:
+        main.batch_queue.clear()
+        main.batch_running = False
+
+    with main.batch_jobs_lock:
+        main.batch_jobs.clear()
+
+    yield
+
+    # Cleanup after test - wait for batch to finish before next test
+    for _ in range(1200):  # 120 seconds
+        with main.batch_queue_lock:
+            if not main.batch_running:
+                break
+        time.sleep(0.1)
+
+    with main.batch_queue_lock:
+        main.batch_queue.clear()
+        main.batch_running = False
 
 
 @pytest.fixture
