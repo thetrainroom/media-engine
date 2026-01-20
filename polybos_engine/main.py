@@ -678,33 +678,360 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 unload_vad_model()
             end_extractor_timing("vad", total_files)
 
-        # Stage 4: Scenes (PySceneDetect - moderate memory)
-        # Skip for images (scene detection is video-only)
-        if request.enable_scenes:
-            start_extractor_timing("scenes")
-            update_batch_progress("scenes", "Detecting scenes...", 0, total_files)
+        # Stage 4: Per-file visual processing
+        # Process each file completely before moving to next (memory efficient)
+        # Order: Motion → Scenes → Decode frames → Objects → Faces → OCR → CLIP → Release buffer
+        #
+        # This approach:
+        # - Decodes frames once per file
+        # - Runs all visual extractors on those frames
+        # - Releases buffer before processing next file
+        # - Keeps only one file's frames in memory at a time
+
+        needs_visual_processing = any(
+            [
+                request.enable_motion,
+                request.enable_scenes,
+                request.enable_objects,
+                request.enable_faces,
+                request.enable_ocr,
+                request.enable_clip,
+            ]
+        )
+
+        # Track motion data for adaptive timestamps
+        motion_data: dict[int, Any] = {}
+        adaptive_timestamps: dict[int, list[float]] = {}
+
+        # Track person timestamps for smart face detection
+        person_timestamps: dict[int, list[float]] = {}
+
+        # Skip motion analysis if timestamps are already provided
+        has_precomputed_timestamps = bool(request.qwen_timestamps)
+
+        if needs_visual_processing:
+            start_extractor_timing("visual_processing")
+            update_batch_progress(
+                "visual_processing",
+                "Processing video frames...",
+                0,
+                total_files,
+            )
+
             for i, file_path in enumerate(files):
                 if i in failed_files:
                     continue
-                # Skip images - scene detection only makes sense for videos
+
+                fname = Path(file_path).name
                 media_type = get_media_type(file_path)
-                if media_type == MediaType.IMAGE:
+                file_start = time.time()
+
+                update_batch_progress(
+                    "visual_processing",
+                    f"Processing {fname}",
+                    i + 1,
+                    total_files,
+                )
+
+                # --- Motion Analysis ---
+                if request.enable_motion or (
+                    (
+                        request.enable_objects
+                        or request.enable_faces
+                        or request.enable_clip
+                        or request.enable_ocr
+                    )
+                    and not has_precomputed_timestamps
+                    and media_type != MediaType.IMAGE
+                ):
+                    motion_start = time.time()
+                    try:
+                        if media_type == MediaType.IMAGE:
+                            motion_data[i] = None
+                            adaptive_timestamps[i] = [0.0]
+                        else:
+                            motion = analyze_motion(file_path)
+                            motion_data[i] = motion
+                            adaptive_timestamps[i] = get_adaptive_timestamps(motion)
+
+                            if request.enable_motion:
+                                motion_result = {
+                                    "duration": motion.duration,
+                                    "fps": motion.fps,
+                                    "primary_motion": motion.primary_motion.value,
+                                    "avg_intensity": float(motion.avg_intensity),
+                                    "is_stable": bool(motion.is_stable),
+                                    "segments": [
+                                        {
+                                            "start": seg.start,
+                                            "end": seg.end,
+                                            "motion_type": seg.motion_type.value,
+                                            "intensity": float(seg.intensity),
+                                        }
+                                        for seg in motion.segments
+                                    ],
+                                }
+                                update_file_status(
+                                    i, "running", "motion", motion_result
+                                )
+                            logger.info(
+                                f"Motion for {fname}: stable={motion.is_stable}, "
+                                f"timestamps={len(adaptive_timestamps[i])}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"Motion analysis failed for {file_path}: {e}")
+                        motion_data[i] = None
+                        adaptive_timestamps[i] = []
+                    update_file_timing(i, "motion", time.time() - motion_start)
+
+                # --- Scene Detection ---
+                if request.enable_scenes and media_type != MediaType.IMAGE:
+                    scenes_start = time.time()
+                    try:
+                        scenes = extract_scenes(file_path)
+                        update_file_status(
+                            i,
+                            "running",
+                            "scenes",
+                            scenes.model_dump() if scenes else None,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Scenes failed for {file_path}: {e}")
+                    update_file_timing(i, "scenes", time.time() - scenes_start)
+
+                # --- Decode Frames (for Objects, Faces, OCR, CLIP) ---
+                buffer: SharedFrameBuffer | None = None
+                visual_extractors_needed = any(
+                    [
+                        request.enable_objects,
+                        request.enable_faces,
+                        request.enable_ocr,
+                        request.enable_clip,
+                    ]
+                )
+
+                if visual_extractors_needed:
+                    decode_start = time.time()
+                    motion = motion_data.get(i)
+                    timestamps = adaptive_timestamps.get(i, [])
+
+                    # Use precomputed timestamps if provided
+                    if has_precomputed_timestamps and request.qwen_timestamps:
+                        timestamps = request.qwen_timestamps
+
+                    # Apply motion-based filtering for stable footage
+                    if motion and motion.is_stable and timestamps:
+                        timestamps = get_extractor_timestamps(
+                            motion.is_stable, motion.avg_intensity, timestamps
+                        )
+
+                    # For images, use timestamp 0
+                    if media_type == MediaType.IMAGE:
+                        timestamps = [0.0]
+
+                    if timestamps:
+                        try:
+                            buffer = decode_frames(
+                                file_path,
+                                timestamps=timestamps,
+                                max_dimension=1920,
+                            )
+                            logger.info(
+                                f"Decoded {len(buffer.frames)}/{len(timestamps)} frames for {fname}"
+                            )
+                        except Exception as e:
+                            logger.warning(f"Frame decode failed for {file_path}: {e}")
+                    update_file_timing(i, "frame_decode", time.time() - decode_start)
+
+                # --- Objects (YOLO) ---
+                if request.enable_objects and buffer is not None:
+                    objects_start = time.time()
+                    try:
+                        objects = extract_objects(
+                            file_path,
+                            frame_buffer=buffer,
+                            model_name=yolo_model,
+                        )
+                        if objects:
+                            update_file_status(
+                                i, "running", "objects", {"summary": objects.summary}
+                            )
+                            # Collect person timestamps for smart face sampling
+                            person_ts = list(
+                                set(
+                                    d.timestamp
+                                    for d in objects.detections
+                                    if d.label == "person"
+                                )
+                            )
+                            person_timestamps[i] = sorted(person_ts)
+                            if person_ts:
+                                logger.info(
+                                    f"Found {len(person_ts)} person frames in {fname}"
+                                )
+                        else:
+                            person_timestamps[i] = []
+                    except Exception as e:
+                        logger.warning(f"Objects failed for {file_path}: {e}")
+                        person_timestamps[i] = []
+                    update_file_timing(i, "objects", time.time() - objects_start)
+
+                # --- Faces ---
+                if request.enable_faces:
+                    faces_start = time.time()
+                    try:
+                        person_ts = person_timestamps.get(i, [])
+
+                        if request.enable_objects and person_ts:
+                            # YOLO-triggered: decode frames for person timestamps
+                            person_buffer = decode_frames(
+                                file_path, timestamps=person_ts
+                            )
+                            faces = extract_faces(file_path, frame_buffer=person_buffer)
+                            logger.info(
+                                f"Face detection on {len(person_ts)} person frames for {fname}"
+                            )
+                        elif request.enable_objects and not person_ts:
+                            # YOLO ran but found no persons - skip
+                            logger.info(
+                                f"Skipping faces for {fname} - no persons detected"
+                            )
+                            faces = None
+                        elif buffer is not None:
+                            faces = extract_faces(file_path, frame_buffer=buffer)
+                        else:
+                            faces = None
+
+                        if faces:
+                            faces_data = {
+                                "count": faces.count,
+                                "unique_estimate": faces.unique_estimate,
+                                "detections": [
+                                    {
+                                        "timestamp": d.timestamp,
+                                        "bbox": d.bbox.model_dump(),
+                                        "confidence": d.confidence,
+                                        "embedding": d.embedding,
+                                        "image_base64": d.image_base64,
+                                        "needs_review": d.needs_review,
+                                        "review_reason": d.review_reason,
+                                    }
+                                    for d in faces.detections
+                                ],
+                            }
+                            update_file_status(i, "running", "faces", faces_data)
+                        else:
+                            update_file_status(
+                                i,
+                                "running",
+                                "faces",
+                                {"count": 0, "unique_estimate": 0, "detections": []},
+                            )
+                    except Exception as e:
+                        logger.warning(f"Faces failed for {file_path}: {e}")
+                    update_file_timing(i, "faces", time.time() - faces_start)
+
+                # --- OCR ---
+                if request.enable_ocr and buffer is not None:
+                    ocr_start = time.time()
+                    try:
+                        ocr = extract_ocr(file_path, frame_buffer=buffer)
+                        update_file_status(
+                            i, "running", "ocr", ocr.model_dump() if ocr else None
+                        )
+                    except Exception as e:
+                        logger.warning(f"OCR failed for {file_path}: {e}")
+                    update_file_timing(i, "ocr", time.time() - ocr_start)
+
+                # --- CLIP ---
+                if request.enable_clip and buffer is not None:
+                    clip_start = time.time()
+                    try:
+                        clip = extract_clip(
+                            file_path,
+                            frame_buffer=buffer,
+                            model_name=clip_model,
+                        )
+                        if clip:
+                            update_file_status(i, "running", "clip", clip.model_dump())
+                        else:
+                            update_file_status(i, "running", "clip", None)
+                    except Exception as e:
+                        logger.warning(f"CLIP failed for {file_path}: {e}")
+                    update_file_timing(i, "clip", time.time() - clip_start)
+
+                # --- Release buffer for this file ---
+                if buffer is not None:
+                    logger.info(f"Releasing frame buffer for {fname}")
+                    del buffer
+                    gc.collect()
+
+                # Update peak memory after each file
+                peak_memory = max(peak_memory, _get_memory_mb())
+
+            # Unload all visual models after processing all files
+            update_batch_progress(
+                "visual_processing", "Unloading models...", None, None
+            )
+            if request.enable_objects:
+                unload_yolo_model()
+            if request.enable_faces:
+                unload_face_model()
+            if request.enable_ocr:
+                unload_ocr_model()
+            if request.enable_clip:
+                unload_clip_model()
+
+            end_extractor_timing("visual_processing", total_files)
+
+        # Stage 5: Visual (Qwen VLM - scene descriptions)
+        # Separate stage because Qwen is very heavy and has its own frame handling
+        if request.enable_visual:
+            start_extractor_timing("visual")
+            logger.info("Visual enabled (Qwen VLM)")
+            _clear_memory()
+            update_batch_progress("visual", "Loading Qwen model...", 0, total_files)
+            logger.info(f"Qwen batch contexts: {request.contexts}")
+
+            for i, file_path in enumerate(files):
+                if i in failed_files:
                     continue
                 file_start = time.time()
+                fname = Path(file_path).name
                 update_batch_progress(
-                    "scenes", f"Processing {Path(file_path).name}", i + 1, total_files
+                    "visual", f"Analyzing: {fname}", i + 1, total_files
                 )
                 try:
-                    scenes = extract_scenes(file_path)
-                    update_file_status(
-                        i, "running", "scenes", scenes.model_dump() if scenes else None
-                    )
-                except Exception as e:
-                    logger.warning(f"Scenes failed for {file_path}: {e}")
-                update_file_timing(i, "scenes", time.time() - file_start)
-            end_extractor_timing("scenes", total_files)
+                    motion = motion_data.get(i)
+                    timestamps = request.qwen_timestamps
+                    if timestamps is None and motion:
+                        timestamps = get_sample_timestamps(motion, max_samples=5)
 
-        # Stage 5: Transcript (Whisper - heavy model)
+                    file_context = (
+                        request.contexts.get(file_path) if request.contexts else None
+                    )
+                    logger.info(
+                        f"Calling Qwen with context for {fname}: {file_context}"
+                    )
+                    visual_result = extract_objects_qwen(
+                        file_path,
+                        timestamps=timestamps,
+                        model_name=qwen_model,
+                        context=file_context,
+                    )
+                    visual_data: dict[str, Any] = {"summary": visual_result.summary}
+                    if visual_result.descriptions:
+                        visual_data["descriptions"] = visual_result.descriptions
+                    update_file_status(i, "running", "visual", visual_data)
+                except Exception as e:
+                    logger.warning(f"Visual failed for {file_path}: {e}", exc_info=True)
+                update_file_timing(i, "visual", time.time() - file_start)
+
+            update_batch_progress("visual", "Unloading Qwen model...", None, None)
+            unload_qwen_model()
+            end_extractor_timing("visual", total_files)
+
+        # Stage 6: Transcript (Whisper - heavy model)
         # Skip for images and files without audio tracks
         if request.enable_transcript:
             start_extractor_timing("transcript")
@@ -779,423 +1106,6 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 logger.info("Skipping Whisper - no files with audio tracks")
 
             end_extractor_timing("transcript", total_files)
-
-        # Stage 6: Motion Analysis (for smart sampling of faces/objects/clip/ocr)
-        # Store motion data per file for later use
-        motion_data: dict[int, Any] = {}  # file_idx -> MotionAnalysis
-        adaptive_timestamps: dict[int, list[float]] = {}  # file_idx -> timestamps
-
-        # Skip motion analysis if timestamps are already provided (e.g., Pass 2 reusing Pass 1 data)
-        has_precomputed_timestamps = bool(request.qwen_timestamps)
-        needs_motion = request.enable_motion or (
-            (
-                request.enable_objects
-                or request.enable_visual
-                or request.enable_faces
-                or request.enable_clip
-                or request.enable_ocr
-            )
-            and not has_precomputed_timestamps
-        )
-
-        if has_precomputed_timestamps and request.qwen_timestamps:
-            logger.info(
-                f"Using {len(request.qwen_timestamps)} pre-computed timestamps, skipping motion analysis"
-            )
-
-        if needs_motion:
-            start_extractor_timing("motion")
-            update_batch_progress(
-                "motion", "Analyzing camera motion...", 0, total_files
-            )
-            for i, file_path in enumerate(files):
-                if i in failed_files:
-                    continue
-                # Skip images - motion analysis is video-only
-                # Use timestamp 0 for subsequent stages (objects, faces, etc.)
-                media_type = get_media_type(file_path)
-                if media_type == MediaType.IMAGE:
-                    motion_data[i] = None
-                    adaptive_timestamps[i] = [0.0]  # Single timestamp for image
-                    continue
-                file_start = time.time()
-                update_batch_progress(
-                    "motion", f"Analyzing {Path(file_path).name}", i + 1, total_files
-                )
-                try:
-                    motion = analyze_motion(file_path)
-                    motion_data[i] = motion
-                    adaptive_timestamps[i] = get_adaptive_timestamps(motion)
-
-                    # Store motion results for client use (editing tools)
-                    motion_result = {
-                        "duration": motion.duration,
-                        "fps": motion.fps,
-                        "primary_motion": motion.primary_motion.value,
-                        "avg_intensity": float(motion.avg_intensity),
-                        "is_stable": bool(motion.is_stable),
-                        "segments": [
-                            {
-                                "start": seg.start,
-                                "end": seg.end,
-                                "motion_type": seg.motion_type.value,
-                                "intensity": float(seg.intensity),
-                            }
-                            for seg in motion.segments
-                        ],
-                    }
-                    update_file_status(i, "running", "motion", motion_result)
-                    logger.info(
-                        f"Motion for {Path(file_path).name}: "
-                        f"avg_intensity={motion.avg_intensity:.1f}, "
-                        f"stable={motion.is_stable}, "
-                        f"adaptive_timestamps={len(adaptive_timestamps[i])}"
-                    )
-                except Exception as e:
-                    logger.warning(f"Motion analysis failed for {file_path}: {e}")
-                    # Fall back to None (will use default sampling)
-                    motion_data[i] = None
-                    adaptive_timestamps[i] = []
-                update_file_timing(i, "motion", time.time() - file_start)
-            end_extractor_timing("motion", total_files)
-
-        # Stage 6b: Decode shared frames for visual extractors
-        # Decode video frames once and share across Objects, Faces, OCR, CLIP
-        frame_buffers: dict[int, SharedFrameBuffer] = {}
-
-        visual_extractors_enabled = any(
-            [
-                request.enable_objects,
-                request.enable_faces,
-                request.enable_ocr,
-                request.enable_clip,
-            ]
-        )
-
-        if visual_extractors_enabled and needs_motion:
-            start_extractor_timing("frame_decode")
-            update_batch_progress(
-                "frame_decode", "Decoding video frames...", 0, total_files
-            )
-
-            for i, file_path in enumerate(files):
-                if i in failed_files:
-                    continue
-
-                # Get timestamps for this file (use motion-adaptive if available)
-                motion = motion_data.get(i)
-                timestamps = adaptive_timestamps.get(i, [])
-
-                # Apply motion-based filtering for more stable footage
-                if motion and motion.is_stable:
-                    timestamps = get_extractor_timestamps(
-                        motion.is_stable, motion.avg_intensity, timestamps
-                    )
-
-                if not timestamps:
-                    continue
-
-                file_start = time.time()
-                update_batch_progress(
-                    "frame_decode",
-                    f"Decoding {Path(file_path).name} ({len(timestamps)} frames)",
-                    i + 1,
-                    total_files,
-                )
-
-                try:
-                    buffer = decode_frames(
-                        file_path,
-                        timestamps=timestamps,
-                        max_dimension=1920,
-                    )
-                    frame_buffers[i] = buffer
-                    logger.info(
-                        f"Decoded {len(buffer.frames)}/{len(timestamps)} frames "
-                        f"for {Path(file_path).name}"
-                    )
-                except Exception as e:
-                    logger.warning(f"Frame decode failed for {file_path}: {e}")
-
-                update_file_timing(i, "frame_decode", time.time() - file_start)
-
-            end_extractor_timing("frame_decode", len(frame_buffers))
-
-        # Stage 7: Objects (YOLO - fast object detection with bounding boxes)
-        # Store person timestamps for face detection
-        person_timestamps: dict[int, list[float]] = (
-            {}
-        )  # file_idx -> timestamps where persons detected
-
-        if request.enable_objects:
-            start_extractor_timing("objects")
-            logger.info("Objects enabled (YOLO)")
-            update_batch_progress(
-                "objects", "Detecting objects with YOLO...", 0, total_files
-            )
-            for i, file_path in enumerate(files):
-                if i in failed_files:
-                    continue
-                file_start = time.time()
-                update_batch_progress(
-                    "objects",
-                    f"Processing {Path(file_path).name}",
-                    i + 1,
-                    total_files,
-                )
-                try:
-                    # Use shared frame buffer (required)
-                    buffer = frame_buffers.get(i)
-                    if buffer is None:
-                        logger.warning(
-                            f"No frame buffer for {file_path}, skipping objects"
-                        )
-                        person_timestamps[i] = []
-                        continue
-
-                    objects = extract_objects(
-                        file_path,
-                        frame_buffer=buffer,
-                        model_name=yolo_model,
-                    )
-
-                    if objects:
-                        update_file_status(
-                            i, "running", "objects", {"summary": objects.summary}
-                        )
-
-                        # Collect timestamps where persons were detected (for smart face sampling)
-                        person_ts = list(
-                            set(
-                                d.timestamp
-                                for d in objects.detections
-                                if d.label == "person"
-                            )
-                        )
-                        person_timestamps[i] = sorted(person_ts)
-                        if person_ts:
-                            logger.info(
-                                f"Found {len(person_ts)} person frames in {Path(file_path).name}"
-                            )
-                    else:
-                        person_timestamps[i] = []
-                except Exception as e:
-                    logger.warning(f"Objects failed for {file_path}: {e}")
-                    person_timestamps[i] = []
-                update_file_timing(i, "objects", time.time() - file_start)
-            # Unload YOLO to free memory
-            update_batch_progress("objects", "Unloading YOLO model...", None, None)
-            unload_yolo_model()
-            end_extractor_timing("objects", total_files)
-
-        # Stage 7b: Visual (Qwen VLM - scene descriptions)
-        if request.enable_visual:
-            start_extractor_timing("visual")
-            logger.info("Visual enabled (Qwen VLM)")
-            # Clear memory before loading heavy model
-            logger.info("Clearing memory before Qwen...")
-            _clear_memory()
-            update_batch_progress("visual", "Loading Qwen model...", 0, total_files)
-            # Log contexts for debugging
-            logger.info(f"Qwen batch contexts: {request.contexts}")
-
-            for i, file_path in enumerate(files):
-                if i in failed_files:
-                    continue
-                file_start = time.time()
-                fname = Path(file_path).name
-                update_batch_progress(
-                    "visual", f"Analyzing: {fname}", i + 1, total_files
-                )
-                try:
-                    # Use motion-based timestamps for Qwen (fewer samples for VLM)
-                    motion = motion_data.get(i)
-                    timestamps = (
-                        request.qwen_timestamps
-                    )  # Use provided timestamps first
-                    if timestamps is None and motion:
-                        timestamps = get_sample_timestamps(motion, max_samples=5)
-
-                    # Get per-file context
-                    file_context = (
-                        request.contexts.get(file_path) if request.contexts else None
-                    )
-                    logger.info(
-                        f"Calling Qwen with context for {fname}: {file_context}"
-                    )
-                    visual_result = extract_objects_qwen(
-                        file_path,
-                        timestamps=timestamps,
-                        model_name=qwen_model,
-                        context=file_context,
-                    )
-                    visual_data: dict[str, Any] = {"summary": visual_result.summary}
-                    if visual_result.descriptions:
-                        visual_data["descriptions"] = visual_result.descriptions
-                    logger.info(
-                        f"Qwen result for file {i}: summary={visual_result.summary}, descriptions={visual_result.descriptions}"
-                    )
-                    update_file_status(i, "running", "visual", visual_data)
-                    logger.info(f"Stored visual_data for file {i}: {visual_data}")
-                except Exception as e:
-                    logger.warning(f"Visual failed for {file_path}: {e}", exc_info=True)
-                update_file_timing(i, "visual", time.time() - file_start)
-            # Unload Qwen to free memory
-            update_batch_progress("visual", "Unloading Qwen model...", None, None)
-            unload_qwen_model()
-            end_extractor_timing("visual", total_files)
-
-        # Stage 8: Faces (YOLO-triggered - only where persons detected)
-        if request.enable_faces:
-            start_extractor_timing("faces")
-            update_batch_progress("faces", "Detecting faces...", 0, total_files)
-            for i, file_path in enumerate(files):
-                if i in failed_files:
-                    continue
-                file_start = time.time()
-                update_batch_progress(
-                    "faces", f"Processing {Path(file_path).name}", i + 1, total_files
-                )
-                try:
-                    # Smart sampling: use person timestamps from YOLO if available
-                    person_ts = person_timestamps.get(i, [])
-                    buffer = frame_buffers.get(i)
-
-                    if request.enable_objects and person_ts:
-                        # YOLO-triggered: decode frames specifically for person timestamps
-                        person_buffer = decode_frames(file_path, timestamps=person_ts)
-                        faces = extract_faces(file_path, frame_buffer=person_buffer)
-                        logger.info(
-                            f"Face detection on {len(person_ts)} person frames for {Path(file_path).name}"
-                        )
-                    elif request.enable_objects and not person_ts:
-                        # YOLO ran but found no persons - skip face detection
-                        logger.info(
-                            f"Skipping face detection for {Path(file_path).name} - no persons detected by YOLO"
-                        )
-                        faces = None
-                    elif buffer is None:
-                        logger.warning(
-                            f"No frame buffer for {file_path}, skipping faces"
-                        )
-                        faces = None
-                    else:
-                        # Objects disabled - use shared frame buffer
-                        faces = extract_faces(file_path, frame_buffer=buffer)
-
-                    if faces:
-                        faces_data = {
-                            "count": faces.count,
-                            "unique_estimate": faces.unique_estimate,
-                            "detections": [
-                                {
-                                    "timestamp": d.timestamp,
-                                    "bbox": d.bbox.model_dump(),
-                                    "confidence": d.confidence,
-                                    "embedding": d.embedding,  # Include for face matching
-                                    "image_base64": d.image_base64,
-                                    "needs_review": d.needs_review,
-                                    "review_reason": d.review_reason,
-                                }
-                                for d in faces.detections
-                            ],
-                        }
-                        update_file_status(i, "running", "faces", faces_data)
-                    else:
-                        # No faces - store empty result
-                        update_file_status(
-                            i,
-                            "running",
-                            "faces",
-                            {"count": 0, "unique_estimate": 0, "detections": []},
-                        )
-                except Exception as e:
-                    logger.warning(f"Faces failed for {file_path}: {e}")
-                update_file_timing(i, "faces", time.time() - file_start)
-            # Unload face detection models to free memory
-            update_batch_progress("faces", "Unloading face models...", None, None)
-            unload_face_model()
-            end_extractor_timing("faces", total_files)
-
-        # Stage 9: OCR (EasyOCR - moderate model) with motion-adaptive timestamps
-        if request.enable_ocr:
-            start_extractor_timing("ocr")
-            update_batch_progress("ocr", "Extracting text...", 0, total_files)
-            for i, file_path in enumerate(files):
-                if i in failed_files:
-                    continue
-                file_start = time.time()
-                update_batch_progress(
-                    "ocr", f"Processing {Path(file_path).name}", i + 1, total_files
-                )
-                try:
-                    buffer = frame_buffers.get(i)
-                    if buffer is None:
-                        logger.warning(f"No frame buffer for {file_path}, skipping OCR")
-                        ocr = None
-                    else:
-                        ocr = extract_ocr(file_path, frame_buffer=buffer)
-                    update_file_status(
-                        i, "running", "ocr", ocr.model_dump() if ocr else None
-                    )
-                except Exception as e:
-                    logger.warning(f"OCR failed for {file_path}: {e}")
-                update_file_timing(i, "ocr", time.time() - file_start)
-            # Unload OCR model to free memory
-            update_batch_progress("ocr", "Unloading OCR model...", None, None)
-            unload_ocr_model()
-            end_extractor_timing("ocr", total_files)
-
-        # Stage 10: CLIP embeddings with motion-adaptive timestamps
-        if request.enable_clip:
-            start_extractor_timing("clip")
-            update_batch_progress(
-                "clip", "Extracting CLIP embeddings...", 0, total_files
-            )
-            for i, file_path in enumerate(files):
-                if i in failed_files:
-                    continue
-                file_start = time.time()
-                update_batch_progress(
-                    "clip", f"Processing {Path(file_path).name}", i + 1, total_files
-                )
-                try:
-                    buffer = frame_buffers.get(i)
-                    if buffer is None:
-                        logger.warning(
-                            f"No frame buffer for {file_path}, skipping CLIP"
-                        )
-                        clip = None
-                    else:
-                        clip = extract_clip(
-                            file_path,
-                            frame_buffer=buffer,
-                            model_name=clip_model,
-                        )
-                    if clip:
-                        update_file_status(
-                            i,
-                            "running",
-                            "clip",
-                            clip.model_dump(),  # Store full result with embeddings
-                        )
-                    else:
-                        update_file_status(i, "running", "clip", None)
-                except Exception as e:
-                    logger.warning(f"CLIP failed for {file_path}: {e}")
-                update_file_timing(i, "clip", time.time() - file_start)
-            # Unload CLIP model to free memory
-            update_batch_progress("clip", "Unloading CLIP model...", None, None)
-            unload_clip_model()
-            end_extractor_timing("clip", total_files)
-
-        # Release shared frame buffers to free memory
-        if frame_buffers:
-            logger.info(f"Releasing {len(frame_buffers)} shared frame buffers")
-            for buf in frame_buffers.values():
-                del buf
-            frame_buffers.clear()
-            gc.collect()
 
         # Mark files as completed (skip failed files - they stay "failed")
         with batch_jobs_lock:
