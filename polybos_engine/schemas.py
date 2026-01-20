@@ -168,6 +168,7 @@ class ColorSpace(BaseModel):
 class LensInfo(BaseModel):
     """Lens and camera settings."""
 
+    model: str | None = None  # Lens model name (e.g., "XT14X5.8")
     focal_length: float | None = None  # Focal length in mm
     focal_length_35mm: float | None = None  # 35mm equivalent focal length
     aperture: float | None = None  # f-number (e.g., 2.8)
@@ -181,6 +182,7 @@ class DeviceInfo(BaseModel):
 
     make: str | None = None
     model: str | None = None
+    serial_number: str | None = None
     software: str | None = None
     type: MediaDeviceType | None = None
     detection_method: DetectionMethod = DetectionMethod.METADATA

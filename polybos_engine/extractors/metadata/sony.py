@@ -5,11 +5,13 @@ Handles Sony cameras:
 - Alpha series: A7S, A7R, A1, etc.
 - Consumer: ZV-1, ZV-E1, etc.
 - AVCHD camcorders: HXR-NX5, HDR-CX series, etc.
+- XDCAM: PMW-EX1, PMW-EX3, PMW-200, etc.
 
 Detection methods:
 - make tag: "Sony"
 - major_brand: "XAVC"
 - XML sidecar files (M01.XML pattern)
+- Embedded XML in com.sony.bprl.mxf.nrtmetadata tag (XDCAM)
 - AVCHD structure with embedded GPS in H.264 SEI
 
 Sony XML sidecar files contain:
@@ -214,6 +216,76 @@ def _parse_xml_sidecar(video_path: str) -> SidecarMetadata | None:
         return None
 
 
+def _parse_embedded_xml(probe_data: dict[str, Any]) -> SidecarMetadata | None:
+    """Parse embedded XML from Sony XDCAM com.sony.bprl.mxf.nrtmetadata tag.
+
+    XDCAM cameras (PMW-EX1, PMW-EX3, etc.) embed metadata as XML in the
+    format tags. Example:
+        <Device manufacturer="Sony" modelName="PMW-EX1" serialNo="0404626"/>
+        <Lens modelName="XT14X5.8"/>
+    """
+    format_tags = probe_data.get("format", {}).get("tags", {})
+
+    # Check for Sony XDCAM embedded metadata tag
+    nrt_metadata = format_tags.get("com.sony.bprl.mxf.nrtmetadata")
+    if not nrt_metadata:
+        return None
+
+    try:
+        # The metadata may be a fragment without root element, wrap it
+        xml_content = nrt_metadata.strip()
+        if not xml_content.startswith("<?xml"):
+            xml_content = f"<root>{xml_content}</root>"
+
+        root = ET.fromstring(xml_content)
+
+        device: DeviceInfo | None = None
+        lens: LensInfo | None = None
+
+        # Extract device info (use {*} wildcard for namespace handling)
+        device_elem = root.find(".//{*}Device")
+        if device_elem is not None:
+            manufacturer = device_elem.get("manufacturer")
+            model_name = device_elem.get("modelName")
+            serial_no = device_elem.get("serialNo")
+
+            if manufacturer or model_name:
+                device = DeviceInfo(
+                    make=manufacturer,
+                    model=model_name,
+                    serial_number=serial_no,
+                    type=MediaDeviceType.CAMERA,
+                    detection_method=DetectionMethod.METADATA,
+                    confidence=1.0,
+                )
+                logger.info(
+                    f"Extracted XDCAM device from embedded XML: {manufacturer} {model_name}"
+                )
+
+        # Extract lens info (use {*} wildcard for namespace handling)
+        lens_elem = root.find(".//{*}Lens")
+        if lens_elem is not None:
+            lens_model = lens_elem.get("modelName")
+            if lens_model:
+                lens = LensInfo(
+                    model=lens_model,
+                    detection_method=DetectionMethod.METADATA,
+                )
+                logger.info(f"Extracted lens from embedded XML: {lens_model}")
+
+        if device or lens:
+            return SidecarMetadata(device=device, lens=lens)
+
+        return None
+
+    except ET.ParseError as e:
+        logger.warning(f"Failed to parse embedded XDCAM XML: {e}")
+        return None
+    except Exception as e:
+        logger.warning(f"Error parsing embedded XDCAM XML: {e}")
+        return None
+
+
 class SonyExtractor:
     """Metadata extractor for Sony cameras."""
 
@@ -229,6 +301,11 @@ class SonyExtractor:
         # Check major_brand for XAVC
         major_brand = tags.get("major_brand", "")
         if major_brand.upper() == "XAVC":
+            return True
+
+        # Check for embedded XDCAM metadata tag
+        format_tags = probe_data.get("format", {}).get("tags", {})
+        if "com.sony.bprl.mxf.nrtmetadata" in format_tags:
             return True
 
         # Check for AVCHD structure (common for Sony camcorders)
@@ -281,9 +358,16 @@ class SonyExtractor:
         # Parse XML sidecar for detailed metadata
         sidecar = _parse_xml_sidecar(file_path)
 
-        # Build device info (prefer sidecar)
+        # Try embedded XML if no sidecar (XDCAM format)
+        embedded = None
+        if sidecar is None:
+            embedded = _parse_embedded_xml(probe_data)
+
+        # Build device info (prefer sidecar > embedded > basic tags)
         if sidecar and sidecar.device:
             device = sidecar.device
+        elif embedded and embedded.device:
+            device = embedded.device
         else:
             device = DeviceInfo(
                 make=make if make else "Sony",
@@ -294,14 +378,21 @@ class SonyExtractor:
                 confidence=1.0,
             )
 
-        # Merge metadata (prefer sidecar values)
+        # Merge metadata (prefer sidecar > embedded > base)
         gps = sidecar.gps if sidecar and sidecar.gps else base_metadata.gps
         color_space = (
             sidecar.color_space
             if sidecar and sidecar.color_space
             else base_metadata.color_space
         )
-        lens = sidecar.lens if sidecar and sidecar.lens else base_metadata.lens
+
+        # Get lens info (prefer sidecar > embedded > base)
+        if sidecar and sidecar.lens:
+            lens = sidecar.lens
+        elif embedded and embedded.lens:
+            lens = embedded.lens
+        else:
+            lens = base_metadata.lens
 
         # Try to extract GPS from AVCHD SEI if not already found
         gps_track = None
