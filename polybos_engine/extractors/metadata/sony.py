@@ -34,8 +34,10 @@ from polybos_engine.schemas import (
     LensInfo,
     MediaDeviceType,
     Metadata,
+    SpannedRecording,
 )
 
+from .avchd import get_recording_for_file
 from .avchd_gps import extract_avchd_gps, extract_avchd_gps_track
 from .base import SidecarMetadata, parse_dms_coordinate
 from .registry import get_tags_lower, register_extractor
@@ -311,16 +313,15 @@ class SonyExtractor:
             return True
 
         # Check for AVCHD structure (common for Sony camcorders)
-        # Path pattern: .../PRIVATE/AVCHD/BDMV/STREAM/*.MTS
+        # Path patterns:
+        #   - .../PRIVATE/AVCHD/BDMV/STREAM/*.MTS (consumer Sony)
+        #   - .../AVCHD/BDMV/STREAM/*.MTS (NX-CAM and other pro Sony)
         path = Path(file_path)
         if path.suffix.upper() in (".MTS", ".M2TS"):
-            # Check if in AVCHD folder structure
-            parts = path.parts
-            for i, part in enumerate(parts):
-                if part.upper() == "AVCHD" and i > 0:
-                    # Check parent is PRIVATE (Sony convention)
-                    if parts[i - 1].upper() == "PRIVATE":
-                        return True
+            # Check if in AVCHD/BDMV/STREAM folder structure
+            parts = [p.upper() for p in path.parts]
+            if "AVCHD" in parts and "BDMV" in parts and "STREAM" in parts:
+                return True
 
         # Check for Sony XML sidecar
         xml_patterns = [
@@ -404,6 +405,34 @@ class SonyExtractor:
             if gps is not None:
                 gps_track = extract_avchd_gps_track(file_path)
 
+        # Check for spanned recordings (AVCHD files split at 2GB)
+        spanned_recording = None
+        path = Path(file_path)
+        if path.suffix.upper() in (".MTS", ".M2TS"):
+            recording = get_recording_for_file(file_path)
+            if recording and recording.is_spanned:
+                # Find this file's position in the recording
+                file_resolved = str(path.resolve())
+                file_index = 0
+                sibling_files = []
+                for i, clip in enumerate(recording.clips):
+                    clip_resolved = str(Path(clip.file_path).resolve())
+                    if clip_resolved == file_resolved:
+                        file_index = i
+                    else:
+                        sibling_files.append(Path(clip.file_path).name)
+
+                spanned_recording = SpannedRecording(
+                    is_continuation=(file_index > 0),
+                    sibling_files=sibling_files,
+                    total_duration=recording.total_duration,
+                    file_index=file_index,
+                )
+                logger.info(
+                    f"Detected spanned recording: file {file_index + 1} of {len(recording.clips)}, "
+                    f"total duration {recording.total_duration:.1f}s"
+                )
+
         return Metadata(
             duration=base_metadata.duration,
             resolution=base_metadata.resolution,
@@ -420,6 +449,7 @@ class SonyExtractor:
             gps_track=gps_track,
             color_space=color_space,
             lens=lens,
+            spanned_recording=spanned_recording,
         )
 
 

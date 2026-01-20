@@ -211,6 +211,19 @@ class KeyframeInfo(BaseModel):
     avg_interval: float | None = None  # Average interval between keyframes
 
 
+class SpannedRecording(BaseModel):
+    """Information about spanned recordings (e.g., AVCHD files split at 2GB).
+
+    When a camera splits a long recording across multiple files, this tracks
+    which files belong together and the total recording duration.
+    """
+
+    is_continuation: bool  # True if this file is NOT the first of the recording
+    sibling_files: list[str]  # Other files in this recording (filenames only)
+    total_duration: float  # Total duration of the complete recording in seconds
+    file_index: int  # Position of this file in the recording (0-based)
+
+
 class Metadata(BaseModel):
     """Video metadata."""
 
@@ -231,6 +244,7 @@ class Metadata(BaseModel):
     lens: LensInfo | None = None
     shot_type: ShotType | None = None
     keyframes: KeyframeInfo | None = None
+    spanned_recording: SpannedRecording | None = None  # For split recordings (AVCHD)
 
 
 class TranscriptSegment(BaseModel):

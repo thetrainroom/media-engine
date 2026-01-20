@@ -86,7 +86,9 @@ def _get_video_info(file_path: str) -> tuple[float, float, int, int]:
         file_path,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
-    parts = result.stdout.strip().split(",")
+    # Take only first line (some files have multiple video streams)
+    first_line = result.stdout.strip().split("\n")[0]
+    parts = first_line.split(",")
 
     # Output format: width,height,fps,duration
     width = int(parts[0]) if parts and parts[0] else 1920
