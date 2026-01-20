@@ -32,6 +32,7 @@ from . import (
     camera_360,  # noqa: F401 - Insta360, QooCam, GoPro MAX, etc.
     canon,  # noqa: F401
     dji,  # noqa: F401
+    dv,  # noqa: F401 - DV/HDV tape formats
     ffmpeg,  # noqa: F401
     gopro,  # noqa: F401
     red,  # noqa: F401
