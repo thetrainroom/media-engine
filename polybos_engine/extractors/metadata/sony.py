@@ -94,8 +94,10 @@ def _parse_xml_sidecar(video_path: str) -> SidecarMetadata | None:
                     confidence=1.0,
                 )
 
-        # Extract GPS from ExifGPS group
+        # Extract GPS from ExifGPS or GPSinExif group (different Sony models use different names)
         gps_group = root.find(".//{*}Group[@name='ExifGPS']")
+        if gps_group is None:
+            gps_group = root.find(".//{*}Group[@name='GPSinExif']")
         if gps_group is not None:
             gps_items: dict[str, str | None] = {}
             for item in gps_group.findall(".//{*}Item"):
