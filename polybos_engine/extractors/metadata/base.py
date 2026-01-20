@@ -113,6 +113,73 @@ def run_ffprobe(file_path: str) -> dict[str, Any]:
         raise RuntimeError(f"Failed to parse ffprobe output: {e}")
 
 
+def get_video_info(file_path: str) -> tuple[float, float, int, int]:
+    """Get basic video info using ffprobe.
+
+    This is a lightweight probe that only fetches video stream info,
+    useful for frame extraction where full probe data isn't needed.
+
+    Handles edge cases like files with multiple video streams (AVCHD)
+    that cause ffprobe to output multiple lines.
+
+    Args:
+        file_path: Path to the video file
+
+    Returns:
+        Tuple of (fps, duration, width, height)
+    """
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height,r_frame_rate,duration",
+        "-of",
+        "csv=p=0",
+        file_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+    # Take only first line (some files have multiple video streams)
+    first_line = result.stdout.strip().split("\n")[0]
+    parts = first_line.split(",")
+
+    # Output format: width,height,fps,duration
+    width = int(parts[0]) if parts and parts[0] else 1920
+    height = int(parts[1]) if len(parts) > 1 and parts[1] else 1080
+
+    # Parse frame rate (can be "30/1" or "29.97")
+    fps_str = parts[2] if len(parts) > 2 else "30"
+    if "/" in fps_str:
+        num, den = fps_str.split("/")
+        fps = float(num) / float(den) if float(den) > 0 else 30.0
+    else:
+        fps = float(fps_str) if fps_str else 30.0
+
+    # Duration might be in stream or need to get from format
+    duration = float(parts[3]) if len(parts) > 3 and parts[3] else 0
+
+    if duration == 0:
+        # Try getting duration from format
+        cmd2 = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+            file_path,
+        ]
+        result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=30)
+        first_line2 = result2.stdout.strip().split("\n")[0]
+        duration = float(first_line2) if first_line2 else 0
+
+    return fps, duration, width, height
+
+
 def run_ffprobe_batch(
     file_paths: list[str],
 ) -> dict[str, dict[str, Any] | Exception]:

@@ -13,6 +13,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from polybos_engine.extractors.metadata.base import get_video_info
+
 logger = logging.getLogger(__name__)
 
 # Cache for hardware acceleration detection
@@ -74,56 +76,6 @@ def _detect_hwaccel() -> str | None:
     logger.info("Hardware acceleration: None (software decoding)")
     _hwaccel_cache = ""
     return None
-
-
-def _get_video_info(file_path: str) -> tuple[float, float, int, int]:
-    """Get video info using ffprobe.
-
-    Returns:
-        (fps, duration, width, height)
-    """
-    cmd = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=width,height,r_frame_rate,duration",
-        "-of",
-        "csv=p=0",
-        file_path,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    parts = result.stdout.strip().split(",")
-
-    width = int(parts[0]) if parts and parts[0] else 1920
-    height = int(parts[1]) if len(parts) > 1 and parts[1] else 1080
-
-    fps_str = parts[2] if len(parts) > 2 else "30"
-    if "/" in fps_str:
-        num, den = fps_str.split("/")
-        fps = float(num) / float(den) if float(den) > 0 else 30.0
-    else:
-        fps = float(fps_str) if fps_str else 30.0
-
-    duration = float(parts[3]) if len(parts) > 3 and parts[3] else 0
-
-    if duration == 0:
-        cmd2 = [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "csv=p=0",
-            file_path,
-        ]
-        result2 = subprocess.run(cmd2, capture_output=True, text=True)
-        duration = float(result2.stdout.strip()) if result2.stdout.strip() else 0
-
-    return fps, duration, width, height
 
 
 @dataclass
@@ -294,7 +246,7 @@ def decode_frames(
         hwaccel = _detect_hwaccel()
 
     # Get video info
-    _, duration, src_width, src_height = _get_video_info(file_path)
+    _, duration, src_width, src_height = get_video_info(file_path)
 
     # Calculate output dimensions (maintain aspect ratio, cap at max_dimension)
     if src_width > src_height:

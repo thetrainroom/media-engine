@@ -10,6 +10,8 @@ from enum import StrEnum
 import cv2
 import numpy as np
 
+from polybos_engine.extractors.metadata.base import get_video_info
+
 logger = logging.getLogger(__name__)
 
 # Cache for hardware acceleration detection
@@ -65,62 +67,6 @@ class MotionAnalysis:
     segments: list[MotionSegment]
     avg_intensity: float
     is_stable: bool  # True if mostly static/tripod
-
-
-def _get_video_info(file_path: str) -> tuple[float, float, int, int]:
-    """Get video info using ffprobe.
-
-    Returns:
-        (fps, duration, width, height)
-    """
-    cmd = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-select_streams",
-        "v:0",
-        "-show_entries",
-        "stream=width,height,r_frame_rate,duration",
-        "-of",
-        "csv=p=0",
-        file_path,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    # Take only first line (some files have multiple video streams)
-    first_line = result.stdout.strip().split("\n")[0]
-    parts = first_line.split(",")
-
-    # Output format: width,height,fps,duration
-    width = int(parts[0]) if parts and parts[0] else 1920
-    height = int(parts[1]) if len(parts) > 1 and parts[1] else 1080
-
-    # Parse frame rate (can be "30/1" or "29.97")
-    fps_str = parts[2] if len(parts) > 2 else "30"
-    if "/" in fps_str:
-        num, den = fps_str.split("/")
-        fps = float(num) / float(den) if float(den) > 0 else 30.0
-    else:
-        fps = float(fps_str) if fps_str else 30.0
-
-    # Duration might be in stream or need to get from format
-    duration = float(parts[3]) if len(parts) > 3 and parts[3] else 0
-
-    if duration == 0:
-        # Try getting duration from format
-        cmd2 = [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "csv=p=0",
-            file_path,
-        ]
-        result2 = subprocess.run(cmd2, capture_output=True, text=True)
-        duration = float(result2.stdout.strip()) if result2.stdout.strip() else 0
-
-    return fps, duration, width, height
 
 
 # Chunk duration in seconds (2 minutes)
@@ -324,7 +270,7 @@ def analyze_motion(
         MotionAnalysis with motion type segments
     """
     # Get video info
-    fps, duration, width, height = _get_video_info(file_path)
+    fps, duration, width, height = get_video_info(file_path)
     if duration == 0:
         # Fallback to opencv for duration
         cap = cv2.VideoCapture(file_path)
