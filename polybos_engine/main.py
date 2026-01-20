@@ -754,26 +754,26 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             motion_data[i] = motion
                             adaptive_timestamps[i] = get_adaptive_timestamps(motion)
 
-                            if request.enable_motion:
-                                motion_result = {
-                                    "duration": motion.duration,
-                                    "fps": motion.fps,
-                                    "primary_motion": motion.primary_motion.value,
-                                    "avg_intensity": float(motion.avg_intensity),
-                                    "is_stable": bool(motion.is_stable),
-                                    "segments": [
-                                        {
-                                            "start": seg.start,
-                                            "end": seg.end,
-                                            "motion_type": seg.motion_type.value,
-                                            "intensity": float(seg.intensity),
-                                        }
-                                        for seg in motion.segments
-                                    ],
-                                }
-                                update_file_status(
-                                    i, "running", "motion", motion_result
-                                )
+                            # Always store motion data when computed (needed for Pass 2 timestamps)
+                            motion_result = {
+                                "duration": motion.duration,
+                                "fps": motion.fps,
+                                "primary_motion": motion.primary_motion.value,
+                                "avg_intensity": float(motion.avg_intensity),
+                                "is_stable": bool(motion.is_stable),
+                                "segments": [
+                                    {
+                                        "start": seg.start,
+                                        "end": seg.end,
+                                        "motion_type": seg.motion_type.value,
+                                        "intensity": float(seg.intensity),
+                                    }
+                                    for seg in motion.segments
+                                ],
+                            }
+                            update_file_status(
+                                i, "running", "motion", motion_result
+                            )
                             logger.info(
                                 f"Motion for {fname}: stable={motion.is_stable}, "
                                 f"timestamps={len(adaptive_timestamps[i])}"
