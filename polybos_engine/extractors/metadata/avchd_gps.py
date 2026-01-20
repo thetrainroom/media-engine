@@ -194,9 +194,7 @@ def extract_avchd_gps(file_path: str) -> GPS | None:
                         longitude=float(lon),
                         altitude=float(alt) if isinstance(alt, (int, float)) else None,
                     )
-                    logger.info(
-                        f"Extracted GPS from AVCHD SEI: {lat:.6f}, {lon:.6f}"
-                    )
+                    logger.info(f"Extracted GPS from AVCHD SEI: {lat:.6f}, {lon:.6f}")
                     return gps
 
             pos += 1
@@ -208,9 +206,7 @@ def extract_avchd_gps(file_path: str) -> GPS | None:
         return None
 
 
-def extract_avchd_gps_track(
-    file_path: str, max_points: int = 10000
-) -> GPSTrack | None:
+def extract_avchd_gps_track(file_path: str, max_points: int = 10000) -> GPSTrack | None:
     """Extract full GPS track from AVCHD file.
 
     Args:
@@ -255,7 +251,9 @@ def extract_avchd_gps_track(
                         point = GPSTrackPoint(
                             latitude=float(lat),
                             longitude=float(lon),
-                            altitude=float(alt) if isinstance(alt, (int, float)) else None,
+                            altitude=(
+                                float(alt) if isinstance(alt, (int, float)) else None
+                            ),
                         )
                         gps_points.append(point)
                         last_lat = float(lat)

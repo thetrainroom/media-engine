@@ -200,11 +200,13 @@ def _parse_srt_sidecar(video_path: str) -> SidecarMetadata | None:
 
                 # Dedupe consecutive identical points
                 if lat != last_lat or lon != last_lon:
-                    gps_points.append(GPSTrackPoint(
-                        latitude=round(lat, 6),
-                        longitude=round(lon, 6),
-                        altitude=round(alt, 1) if alt is not None else None,
-                    ))
+                    gps_points.append(
+                        GPSTrackPoint(
+                            latitude=round(lat, 6),
+                            longitude=round(lon, 6),
+                            altitude=round(alt, 1) if alt is not None else None,
+                        )
+                    )
                     last_lat = lat
                     last_lon = lon
 
@@ -319,7 +321,11 @@ class DJIExtractor:
 
         # Get GPS and track - from sidecar (drone) or base metadata
         gps = sidecar.gps if sidecar and sidecar.gps else base_metadata.gps
-        gps_track = sidecar.gps_track if sidecar and sidecar.gps_track else base_metadata.gps_track
+        gps_track = (
+            sidecar.gps_track
+            if sidecar and sidecar.gps_track
+            else base_metadata.gps_track
+        )
 
         # Determine device type using model and GPS presence as hints
         has_gps = gps is not None

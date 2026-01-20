@@ -65,7 +65,9 @@ def test_images():
     """Fixture providing test images."""
     images = get_test_images(10)
     if not images:
-        pytest.skip("No test images found. Set TEST_IMAGES_DIR or mount /Volumes/Backup")
+        pytest.skip(
+            "No test images found. Set TEST_IMAGES_DIR or mount /Volumes/Backup"
+        )
     return images
 
 
@@ -149,7 +151,9 @@ class TestCLIPModelLifecycle:
 
         # Embeddings should be very similar (not exact due to potential float differences)
         similarity = sum(a * b for a, b in zip(embedding1, embedding2))
-        assert similarity > 0.99, f"Embeddings should be consistent, got similarity {similarity}"
+        assert (
+            similarity > 0.99
+        ), f"Embeddings should be consistent, got similarity {similarity}"
 
 
 class TestOCRModelLifecycle:
@@ -254,8 +258,9 @@ class TestMultiModelBatchCycle:
         final_ram, _ = memory_readings[-1]
 
         # Allow 20% variance
-        assert final_ram > baseline_ram * 0.8, \
-            f"RAM decreased too much: {baseline_ram:.1f}GB -> {final_ram:.1f}GB"
+        assert (
+            final_ram > baseline_ram * 0.8
+        ), f"RAM decreased too much: {baseline_ram:.1f}GB -> {final_ram:.1f}GB"
 
 
 class TestConcurrentUnloads:

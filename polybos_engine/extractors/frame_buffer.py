@@ -170,24 +170,38 @@ def _extract_single_frame(
 
     # Build filter chain based on hardware acceleration
     if hwaccel == "videotoolbox":
-        cmd.extend(["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"])
-        vf_filter = f"scale_vt=w={out_width}:h={actual_out_height},hwdownload,format=p010le"
+        cmd.extend(
+            ["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"]
+        )
+        vf_filter = (
+            f"scale_vt=w={out_width}:h={actual_out_height},hwdownload,format=p010le"
+        )
     elif hwaccel == "cuda":
         cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
         vf_filter = f"scale_cuda={out_width}:{actual_out_height},hwdownload,format=nv12"
     else:
         actual_out_height = out_height
-        vf_filter = f"scale={out_width}:{out_height}:force_original_aspect_ratio=decrease"
+        vf_filter = (
+            f"scale={out_width}:{out_height}:force_original_aspect_ratio=decrease"
+        )
 
-    cmd.extend([
-        "-ss", str(timestamp),
-        "-i", file_path,
-        "-vf", vf_filter,
-        "-frames:v", "1",
-        "-f", "rawvideo",
-        "-pix_fmt", "bgr24",
-        "-",
-    ])
+    cmd.extend(
+        [
+            "-ss",
+            str(timestamp),
+            "-i",
+            file_path,
+            "-vf",
+            vf_filter,
+            "-frames:v",
+            "1",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-",
+        ]
+    )
 
     process: subprocess.Popen[bytes] | None = None
     try:
@@ -203,13 +217,23 @@ def _extract_single_frame(
         if len(raw_frame) != frame_size:
             # Try without hardware acceleration
             if hwaccel:
-                logger.debug(f"Hardware decode failed for frame at {timestamp}s, trying software")
+                logger.debug(
+                    f"Hardware decode failed for frame at {timestamp}s, trying software"
+                )
                 return _extract_single_frame(
-                    file_path, timestamp, out_width, out_height, None, src_width, src_height
+                    file_path,
+                    timestamp,
+                    out_width,
+                    out_height,
+                    None,
+                    src_width,
+                    src_height,
                 )
             return None
 
-        frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((actual_out_height, out_width, 3))
+        frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape(
+            (actual_out_height, out_width, 3)
+        )
         return frame.copy()
 
     except subprocess.TimeoutExpired:
@@ -262,8 +286,7 @@ def decode_frames(
 
     logger.info(
         f"Decoding {len(timestamps)} frames from {file_path} "
-        f"at {out_width}x{out_height}"
-        + (f" (hwaccel={hwaccel})" if hwaccel else "")
+        f"at {out_width}x{out_height}" + (f" (hwaccel={hwaccel})" if hwaccel else "")
     )
 
     frames: dict[float, SharedFrame] = {}

@@ -204,7 +204,9 @@ def detect_voice_activity(
         if not frames:
             logger.warning(f"No audio frames extracted from {file_path}")
             return {
-                "audio_content": str(AudioContent.AUDIO),  # Has audio track but empty/silent
+                "audio_content": str(
+                    AudioContent.AUDIO
+                ),  # Has audio track but empty/silent
                 "speech_ratio": 0.0,
                 "speech_segments": [],
                 "total_duration": 0.0,

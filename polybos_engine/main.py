@@ -271,7 +271,9 @@ class BatchRequest(BaseModel):
     enable_motion: bool = False
 
     # Context for Whisper
-    language: str | None = None  # Force specific language (ISO 639-1 code, e.g., "en", "no")
+    language: str | None = (
+        None  # Force specific language (ISO 639-1 code, e.g., "en", "no")
+    )
     language_hints: list[str] | None = None  # Hints (currently unused by Whisper)
     context_hint: str | None = None
     # Context for Qwen VLM - per-file context mapping (file path -> context dict)
@@ -306,7 +308,9 @@ class BatchJobStatus(BaseModel):
 
     batch_id: str
     status: str  # queued, pending, running, completed, failed
-    queue_position: int | None = None  # Position in queue (1 = next to run), None if not queued
+    queue_position: int | None = (
+        None  # Position in queue (1 = next to run), None if not queued
+    )
     current_extractor: str | None = None
     progress: JobProgress | None = None
     files: list[BatchFileStatus] = []
@@ -419,7 +423,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
     batch_start_time = time.time()
     peak_memory = _get_memory_mb()
     stage_start_times: dict[str, float] = {}  # extractor -> start time
-    file_resolutions: dict[int, str] = {}  # file_idx -> resolution bucket (for timing predictions)
+    file_resolutions: dict[int, str] = (
+        {}
+    )  # file_idx -> resolution bucket (for timing predictions)
 
     def update_batch_progress(
         extractor: str,
@@ -561,7 +567,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
                 if isinstance(probe_data, Exception):
                     logger.warning(f"Metadata failed for {file_path}: {probe_data}")
-                    logger.warning(f"Skipping all extractors for {file_path} - file unreadable")
+                    logger.warning(
+                        f"Skipping all extractors for {file_path} - file unreadable"
+                    )
                     update_file_status(i, "failed", "metadata", None, str(probe_data))
                     update_file_timing(i, "metadata", time.time() - file_start)
                     failed_files.add(i)
@@ -577,7 +585,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     )
                 except Exception as e:
                     logger.warning(f"Metadata failed for {file_path}: {e}")
-                    logger.warning(f"Skipping all extractors for {file_path} - file unreadable")
+                    logger.warning(
+                        f"Skipping all extractors for {file_path} - file unreadable"
+                    )
                     update_file_status(i, "failed", "metadata", None, str(e))
                     failed_files.add(i)
                 update_file_timing(i, "metadata", time.time() - file_start)
@@ -724,7 +734,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 logger.info("Clearing memory before Whisper...")
                 _clear_memory()
                 update_batch_progress(
-                    "transcript", "Loading Whisper model...", 0, len(files_to_transcribe)
+                    "transcript",
+                    "Loading Whisper model...",
+                    0,
+                    len(files_to_transcribe),
                 )
 
                 for idx, i in enumerate(files_to_transcribe):
@@ -934,7 +947,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     # Use shared frame buffer (required)
                     buffer = frame_buffers.get(i)
                     if buffer is None:
-                        logger.warning(f"No frame buffer for {file_path}, skipping objects")
+                        logger.warning(
+                            f"No frame buffer for {file_path}, skipping objects"
+                        )
                         person_timestamps[i] = []
                         continue
 
@@ -980,9 +995,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             # Clear memory before loading heavy model
             logger.info("Clearing memory before Qwen...")
             _clear_memory()
-            update_batch_progress(
-                "visual", "Loading Qwen model...", 0, total_files
-            )
+            update_batch_progress("visual", "Loading Qwen model...", 0, total_files)
             # Log contexts for debugging
             logger.info(f"Qwen batch contexts: {request.contexts}")
 
@@ -1005,9 +1018,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
                     # Get per-file context
                     file_context = (
-                        request.contexts.get(file_path)
-                        if request.contexts
-                        else None
+                        request.contexts.get(file_path) if request.contexts else None
                     )
                     logger.info(
                         f"Calling Qwen with context for {fname}: {file_context}"
@@ -1027,9 +1038,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     update_file_status(i, "running", "visual", visual_data)
                     logger.info(f"Stored visual_data for file {i}: {visual_data}")
                 except Exception as e:
-                    logger.warning(
-                        f"Visual failed for {file_path}: {e}", exc_info=True
-                    )
+                    logger.warning(f"Visual failed for {file_path}: {e}", exc_info=True)
                 update_file_timing(i, "visual", time.time() - file_start)
             # Unload Qwen to free memory
             update_batch_progress("visual", "Unloading Qwen model...", None, None)
@@ -1066,7 +1075,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         )
                         faces = None
                     elif buffer is None:
-                        logger.warning(f"No frame buffer for {file_path}, skipping faces")
+                        logger.warning(
+                            f"No frame buffer for {file_path}, skipping faces"
+                        )
                         faces = None
                     else:
                         # Objects disabled - use shared frame buffer
@@ -1151,7 +1162,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 try:
                     buffer = frame_buffers.get(i)
                     if buffer is None:
-                        logger.warning(f"No frame buffer for {file_path}, skipping CLIP")
+                        logger.warning(
+                            f"No frame buffer for {file_path}, skipping CLIP"
+                        )
                         clip = None
                     else:
                         clip = extract_clip(
@@ -1441,10 +1454,18 @@ def _run_model_checks(check_id: str) -> None:
         start = time.time()
         try:
             _get_qwen_model("Qwen/Qwen2-VL-2B-Instruct")
-            results["qwen_2b"] = {"canLoad": True, "error": None, "loadTimeSeconds": round(time.time() - start, 1)}
+            results["qwen_2b"] = {
+                "canLoad": True,
+                "error": None,
+                "loadTimeSeconds": round(time.time() - start, 1),
+            }
             unload_qwen_model()
         except Exception as e:
-            results["qwen_2b"] = {"canLoad": False, "error": str(e), "loadTimeSeconds": round(time.time() - start, 1)}
+            results["qwen_2b"] = {
+                "canLoad": False,
+                "error": str(e),
+                "loadTimeSeconds": round(time.time() - start, 1),
+            }
 
         # Test Whisper large-v3
         logger.info("Testing Whisper large-v3 model...")
@@ -1476,6 +1497,7 @@ def _run_model_checks(check_id: str) -> None:
                     )
                 finally:
                     import os
+
                     os.unlink(temp_path)
             elif has_cuda():
                 from faster_whisper import WhisperModel  # type: ignore[import-not-found]
@@ -1485,20 +1507,36 @@ def _run_model_checks(check_id: str) -> None:
                 import whisper  # type: ignore[import-not-found]
 
                 whisper.load_model("large-v3")
-            results["whisper_large"] = {"canLoad": True, "error": None, "loadTimeSeconds": round(time.time() - start, 1)}
+            results["whisper_large"] = {
+                "canLoad": True,
+                "error": None,
+                "loadTimeSeconds": round(time.time() - start, 1),
+            }
             unload_whisper_model()
         except Exception as e:
-            results["whisper_large"] = {"canLoad": False, "error": str(e), "loadTimeSeconds": round(time.time() - start, 1)}
+            results["whisper_large"] = {
+                "canLoad": False,
+                "error": str(e),
+                "loadTimeSeconds": round(time.time() - start, 1),
+            }
 
         # Test CLIP
         logger.info("Testing CLIP model...")
         start = time.time()
         try:
             get_clip_backend()
-            results["clip"] = {"canLoad": True, "error": None, "loadTimeSeconds": round(time.time() - start, 1)}
+            results["clip"] = {
+                "canLoad": True,
+                "error": None,
+                "loadTimeSeconds": round(time.time() - start, 1),
+            }
             unload_clip_model()
         except Exception as e:
-            results["clip"] = {"canLoad": False, "error": str(e), "loadTimeSeconds": round(time.time() - start, 1)}
+            results["clip"] = {
+                "canLoad": False,
+                "error": str(e),
+                "loadTimeSeconds": round(time.time() - start, 1),
+            }
 
         # Test YOLO
         logger.info("Testing YOLO model...")
@@ -1507,10 +1545,18 @@ def _run_model_checks(check_id: str) -> None:
             from ultralytics import YOLO  # type: ignore[import-not-found]
 
             YOLO("yolov8m.pt")
-            results["yolo"] = {"canLoad": True, "error": None, "loadTimeSeconds": round(time.time() - start, 1)}
+            results["yolo"] = {
+                "canLoad": True,
+                "error": None,
+                "loadTimeSeconds": round(time.time() - start, 1),
+            }
             unload_yolo_model()
         except Exception as e:
-            results["yolo"] = {"canLoad": False, "error": str(e), "loadTimeSeconds": round(time.time() - start, 1)}
+            results["yolo"] = {
+                "canLoad": False,
+                "error": str(e),
+                "loadTimeSeconds": round(time.time() - start, 1),
+            }
 
         # Test Face detection (DeepFace)
         logger.info("Testing Face detection model...")
@@ -1519,10 +1565,18 @@ def _run_model_checks(check_id: str) -> None:
             from deepface import DeepFace  # type: ignore[import-not-found]
 
             DeepFace.build_model("Facenet")
-            results["faces"] = {"canLoad": True, "error": None, "loadTimeSeconds": round(time.time() - start, 1)}
+            results["faces"] = {
+                "canLoad": True,
+                "error": None,
+                "loadTimeSeconds": round(time.time() - start, 1),
+            }
             unload_face_model()
         except Exception as e:
-            results["faces"] = {"canLoad": False, "error": str(e), "loadTimeSeconds": round(time.time() - start, 1)}
+            results["faces"] = {
+                "canLoad": False,
+                "error": str(e),
+                "loadTimeSeconds": round(time.time() - start, 1),
+            }
 
         _model_check_results[check_id] = {
             "results": results,

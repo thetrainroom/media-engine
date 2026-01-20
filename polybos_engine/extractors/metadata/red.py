@@ -218,7 +218,9 @@ class RedExtractor:
         firmware = r3d_data.get("firmware")
         software_str = firmware
         if serial:
-            software_str = f"{firmware} (S/N: {serial})" if firmware else f"S/N: {serial}"
+            software_str = (
+                f"{firmware} (S/N: {serial})" if firmware else f"S/N: {serial}"
+            )
 
         device = DeviceInfo(
             make="RED",

@@ -162,7 +162,9 @@ def parse_avchd_structure(avchd_path: str) -> list[AVCHDRecording]:
         else:
             # New recording - save current group and start new one
             total_dur = sum(c.duration for c in current_group)
-            recordings.append(AVCHDRecording(clips=current_group, total_duration=total_dur))
+            recordings.append(
+                AVCHDRecording(clips=current_group, total_duration=total_dur)
+            )
             current_group = [clip]
 
     # Don't forget the last group

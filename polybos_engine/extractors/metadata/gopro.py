@@ -97,9 +97,7 @@ def _extract_gpmd_gps(file_path: str) -> tuple[GPS | None, GPSTrack | None]:
             "pipe:1",
         ]
 
-        result = subprocess.run(
-            cmd, capture_output=True, timeout=30, check=False
-        )
+        result = subprocess.run(cmd, capture_output=True, timeout=30, check=False)
 
         if result.returncode != 0 or not result.stdout:
             return None, None
@@ -116,7 +114,7 @@ def _extract_gpmd_gps(file_path: str) -> tuple[GPS | None, GPSTrack | None]:
 
         while i < len(data) - 8:
             # Read FourCC tag
-            tag = data[i:i + 4]
+            tag = data[i : i + 4]
             if len(tag) < 4:
                 break
 
@@ -131,7 +129,7 @@ def _extract_gpmd_gps(file_path: str) -> tuple[GPS | None, GPSTrack | None]:
                     scale_offset = i + 8
                     if scale_offset + 4 <= len(data):
                         current_scale = struct.unpack(
-                            ">i", data[scale_offset:scale_offset + 4]
+                            ">i", data[scale_offset : scale_offset + 4]
                         )[0]
 
             # Check for GPS5 (GPS data)
@@ -146,8 +144,7 @@ def _extract_gpmd_gps(file_path: str) -> tuple[GPS | None, GPSTrack | None]:
                         sample_offset = gps_offset + j * 20
                         if sample_offset + 20 <= len(data):
                             values = struct.unpack(
-                                ">iiiii",
-                                data[sample_offset:sample_offset + 20]
+                                ">iiiii", data[sample_offset : sample_offset + 20]
                             )
                             lat = values[0] / current_scale
                             lon = values[1] / current_scale
@@ -175,7 +172,11 @@ def _extract_gpmd_gps(file_path: str) -> tuple[GPS | None, GPSTrack | None]:
                 longitude=gps_points[0].longitude,
                 altitude=gps_points[0].altitude,
             )
-            track = GPSTrack(points=gps_points, source="gpmd") if len(gps_points) > 1 else None
+            track = (
+                GPSTrack(points=gps_points, source="gpmd")
+                if len(gps_points) > 1
+                else None
+            )
             logger.info(f"Extracted {len(gps_points)} GPS points from GoPro GPMD")
             return first_gps, track
 

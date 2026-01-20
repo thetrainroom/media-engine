@@ -11,7 +11,12 @@ from typing import Any
 
 import torch
 
-from polybos_engine.config import DeviceType, get_device, get_free_memory_gb, get_settings
+from polybos_engine.config import (
+    DeviceType,
+    get_device,
+    get_free_memory_gb,
+    get_settings,
+)
 from polybos_engine.extractors.frames import FrameExtractor
 from polybos_engine.schemas import BoundingBox, ObjectDetection, ObjectsResult
 
@@ -84,7 +89,9 @@ def _get_qwen_model(
     # Log memory status (informational only - let PyTorch handle OOM)
     free_memory = get_free_memory_gb()
     model_memory_gb = 15.0 if "7B" in model_name else 5.0
-    logger.info(f"Free memory: {free_memory:.1f}GB, model needs: ~{model_memory_gb:.0f}GB")
+    logger.info(
+        f"Free memory: {free_memory:.1f}GB, model needs: ~{model_memory_gb:.0f}GB"
+    )
 
     # Clear existing GPU memory before loading
     import gc
@@ -331,7 +338,9 @@ def extract_objects_qwen(
         # Now load the model (after ffmpeg has finished)
         # If this fails due to OOM, the exception propagates up
         try:
-            model, processor, torch_device = _get_qwen_model(model_name, progress_callback)
+            model, processor, torch_device = _get_qwen_model(
+                model_name, progress_callback
+            )
         except (RuntimeError, MemoryError, OSError) as e:
             error_msg = str(e).lower()
             if "out of memory" in error_msg or "cannot allocate" in error_msg:
@@ -519,7 +528,9 @@ def _extract_frames_at_timestamps(
                     frame_paths.append(output_path)
                     logger.info(f"Extracted frame {i} at {ts:.2f}s: {output_path}")
                 else:
-                    logger.warning(f"Frame at {ts:.2f}s: could not save to {output_path}")
+                    logger.warning(
+                        f"Frame at {ts:.2f}s: could not save to {output_path}"
+                    )
                     frame_paths.append("")
             else:
                 logger.warning(f"Frame at {ts:.2f}s: extraction failed")
@@ -561,12 +572,20 @@ def _parse_objects_and_description(response: str) -> tuple[list[str], str | None
                         if isinstance(item, dict):
                             raw_objects = item.get("objects", [])
                             for obj in raw_objects:
-                                if isinstance(obj, str) and len(obj) < 100 and obj.strip():
+                                if (
+                                    isinstance(obj, str)
+                                    and len(obj) < 100
+                                    and obj.strip()
+                                ):
                                     objects.append(obj)
                                 elif isinstance(obj, dict):
                                     # Handle nested format: {"name": "person"}
                                     name = obj.get("name", "") or obj.get("label", "")
-                                    if isinstance(name, str) and len(name) < 100 and name.strip():
+                                    if (
+                                        isinstance(name, str)
+                                        and len(name) < 100
+                                        and name.strip()
+                                    ):
                                         objects.append(name)
                             desc = item.get("description", "")
                             if (

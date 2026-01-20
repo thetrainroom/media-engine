@@ -175,7 +175,9 @@ def _load_frames_chunk(
     if hwaccel == "videotoolbox":
         # Decode on hardware, scale on GPU, then transfer to CPU
         # p010le is required for VideoToolbox hwdownload (10-bit format)
-        cmd.extend(["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"])
+        cmd.extend(
+            ["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"]
+        )
         vf_filter = f"scale_vt=w={out_width}:h={actual_out_height},hwdownload,format=p010le,fps={sample_fps}"
     elif hwaccel == "cuda":
         cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
@@ -184,21 +186,23 @@ def _load_frames_chunk(
         actual_out_height = out_height  # Use the provided value for software
         vf_filter = f"scale={out_width}:{out_height}:force_original_aspect_ratio=decrease,fps={sample_fps}"
 
-    cmd.extend([
-        "-ss",
-        str(start_time),
-        "-t",
-        str(chunk_duration),
-        "-i",
-        file_path,
-        "-vf",
-        vf_filter,
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "gray",
-        "-",
-    ])
+    cmd.extend(
+        [
+            "-ss",
+            str(start_time),
+            "-t",
+            str(chunk_duration),
+            "-i",
+            file_path,
+            "-vf",
+            vf_filter,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "-",
+        ]
+    )
 
     logger.debug(f"FFmpeg command: {' '.join(cmd)}")
 
@@ -215,7 +219,9 @@ def _load_frames_chunk(
         raw_frame = process.stdout.read(frame_size)  # type: ignore[union-attr]
         if len(raw_frame) != frame_size:
             break
-        frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape((actual_out_height, out_width))
+        frame = np.frombuffer(raw_frame, dtype=np.uint8).reshape(
+            (actual_out_height, out_width)
+        )
         frames.append(frame.copy())
 
     _, stderr = process.communicate()
@@ -230,9 +236,13 @@ def _load_frames_chunk(
     if not frames and hwaccel:
         # Log the stderr to understand why it failed
         if stderr:
-            logger.warning(f"Hardware acceleration ({hwaccel}) failed: {stderr.decode(errors='ignore')[:500]}")
+            logger.warning(
+                f"Hardware acceleration ({hwaccel}) failed: {stderr.decode(errors='ignore')[:500]}"
+            )
         else:
-            logger.warning(f"Hardware acceleration ({hwaccel}) failed, no frames produced")
+            logger.warning(
+                f"Hardware acceleration ({hwaccel}) failed, no frames produced"
+            )
         return _load_frames_chunk(
             file_path,
             start_time,
@@ -375,6 +385,7 @@ def analyze_motion(
 
     # Log timing breakdown (always print for diagnostics)
     import sys
+
     print(
         f"Timing: decode={total_load_time:.2f}s, optical_flow={total_flow_time:.2f}s, "
         f"frames={global_frame_idx}",
@@ -486,7 +497,9 @@ def _classify_flow(flow: np.ndarray) -> tuple[MotionType, float]:
         ratio = abs_mean_y / (mean_magnitude + 1e-7)
         if ratio > PAN_TILT_THRESHOLD:
             if mean_y > 0:
-                return MotionType.TILT_UP, float(mean_magnitude)  # Flow down = camera tilts up
+                return MotionType.TILT_UP, float(
+                    mean_magnitude
+                )  # Flow down = camera tilts up
             else:
                 return MotionType.TILT_DOWN, float(mean_magnitude)
 

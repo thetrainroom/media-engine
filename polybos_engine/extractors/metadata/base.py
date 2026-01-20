@@ -223,11 +223,16 @@ def extract_keyframes(file_path: str, timeout: int = 60) -> KeyframeInfo | None:
     """
     cmd = [
         "ffprobe",
-        "-v", "error",
-        "-select_streams", "v:0",
-        "-skip_frame", "nokey",
-        "-show_entries", "frame=pts_time",
-        "-of", "csv=p=0",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-skip_frame",
+        "nokey",
+        "-show_entries",
+        "frame=pts_time",
+        "-of",
+        "csv=p=0",
         file_path,
     ]
 
@@ -284,9 +289,7 @@ def _analyze_keyframe_intervals(timestamps: list[float]) -> tuple[bool, float | 
         return False, None
 
     # Calculate intervals between keyframes
-    intervals = [
-        timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)
-    ]
+    intervals = [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)]
 
     avg_interval = sum(intervals) / len(intervals)
 
@@ -298,7 +301,8 @@ def _analyze_keyframe_intervals(timestamps: list[float]) -> tuple[bool, float | 
     # Scene cuts will have irregular intervals
     variance_threshold = 0.2  # 20% variance allowed for "fixed"
     consistent_count = sum(
-        1 for interval in intervals
+        1
+        for interval in intervals
         if abs(interval - avg_interval) / avg_interval < variance_threshold
     )
 

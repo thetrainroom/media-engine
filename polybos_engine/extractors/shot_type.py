@@ -207,7 +207,9 @@ def _extract_frame_at(file_path: str, output_dir: str, timestamp: float) -> str 
             if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 return output_path
             else:
-                logger.warning(f"Frame at {timestamp}s: could not save to {output_path}")
+                logger.warning(
+                    f"Frame at {timestamp}s: could not save to {output_path}"
+                )
         else:
             logger.warning(f"Frame at {timestamp}s: extraction failed")
 

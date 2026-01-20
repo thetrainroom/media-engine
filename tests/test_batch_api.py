@@ -129,7 +129,9 @@ def test_videos():
     """Fixture providing test videos."""
     videos = get_test_videos(3)
     if not videos:
-        pytest.skip("No test videos found. Set TEST_VIDEO_PATH or mount /Volumes/Backup")
+        pytest.skip(
+            "No test videos found. Set TEST_VIDEO_PATH or mount /Volumes/Backup"
+        )
     return videos
 
 
@@ -426,7 +428,13 @@ class TestBatchLifecycle:
 
             status = response.json()
             assert status["batch_id"] == batch_id
-            assert status["status"] in ("queued", "pending", "running", "completed", "failed")
+            assert status["status"] in (
+                "queued",
+                "pending",
+                "running",
+                "completed",
+                "failed",
+            )
 
             if status["status"] == "completed":
                 break
@@ -507,27 +515,35 @@ class TestBatchMultipleExtractors:
             }
 
             response = api_client.post("/batch", json=request)
-            assert response.status_code == 200, f"Batch {i+1}/{num_runs} creation failed"
+            assert (
+                response.status_code == 200
+            ), f"Batch {i+1}/{num_runs} creation failed"
 
             data = response.json()
             batch_id = data["batch_id"]
 
             status = wait_for_batch(api_client, batch_id, timeout=120)
-            assert status["status"] == "completed", f"Batch {i+1}/{num_runs} failed: {status}"
+            assert (
+                status["status"] == "completed"
+            ), f"Batch {i+1}/{num_runs} failed: {status}"
 
             # Track memory and timing
-            memory_history.append({
-                "batch": i + 1,
-                "elapsed_seconds": status.get("elapsed_seconds"),
-                "memory_mb": status.get("memory_mb"),
-                "peak_memory_mb": status.get("peak_memory_mb"),
-                "extractor_timings": status.get("extractor_timings", []),
-            })
+            memory_history.append(
+                {
+                    "batch": i + 1,
+                    "elapsed_seconds": status.get("elapsed_seconds"),
+                    "memory_mb": status.get("memory_mb"),
+                    "peak_memory_mb": status.get("peak_memory_mb"),
+                    "extractor_timings": status.get("extractor_timings", []),
+                }
+            )
 
             # Print timing report
             print(f"\nBatch {i+1}/{num_runs}:")
             print(f"  Elapsed: {status.get('elapsed_seconds')}s")
-            print(f"  Memory: {status.get('memory_mb')}MB (peak: {status.get('peak_memory_mb')}MB)")
+            print(
+                f"  Memory: {status.get('memory_mb')}MB (peak: {status.get('peak_memory_mb')}MB)"
+            )
             for timing in status.get("extractor_timings", []):
                 print(f"  {timing['extractor']}: {timing['duration_seconds']}s")
 
@@ -538,7 +554,9 @@ class TestBatchMultipleExtractors:
         if memory_history[0]["peak_memory_mb"] and memory_history[-1]["peak_memory_mb"]:
             first_peak = memory_history[0]["peak_memory_mb"]
             last_peak = memory_history[-1]["peak_memory_mb"]
-            assert last_peak < first_peak * 1.5, f"Memory grew too much: {first_peak}MB -> {last_peak}MB"
+            assert (
+                last_peak < first_peak * 1.5
+            ), f"Memory grew too much: {first_peak}MB -> {last_peak}MB"
 
     @pytest.mark.slow
     def test_batch_repeated_runs_stress(self, api_client, test_videos):
@@ -585,26 +603,34 @@ class TestBatchMultipleExtractors:
                 }
 
             response = api_client.post("/batch", json=request)
-            assert response.status_code == 200, f"Batch {i+1}/{num_runs} creation failed"
+            assert (
+                response.status_code == 200
+            ), f"Batch {i+1}/{num_runs} creation failed"
 
             data = response.json()
             batch_id = data["batch_id"]
 
             status = wait_for_batch(api_client, batch_id, timeout=300)
-            assert status["status"] == "completed", f"Batch {i+1}/{num_runs} failed: {status}"
+            assert (
+                status["status"] == "completed"
+            ), f"Batch {i+1}/{num_runs} failed: {status}"
 
             # Track memory and timing
-            memory_history.append({
-                "batch": i + 1,
-                "elapsed_seconds": status.get("elapsed_seconds"),
-                "memory_mb": status.get("memory_mb"),
-                "peak_memory_mb": status.get("peak_memory_mb"),
-            })
+            memory_history.append(
+                {
+                    "batch": i + 1,
+                    "elapsed_seconds": status.get("elapsed_seconds"),
+                    "memory_mb": status.get("memory_mb"),
+                    "peak_memory_mb": status.get("peak_memory_mb"),
+                }
+            )
 
             # Print timing report
             print(f"\nBatch {i+1}/{num_runs}:")
             print(f"  Elapsed: {status.get('elapsed_seconds')}s")
-            print(f"  Memory: {status.get('memory_mb')}MB (peak: {status.get('peak_memory_mb')}MB)")
+            print(
+                f"  Memory: {status.get('memory_mb')}MB (peak: {status.get('peak_memory_mb')}MB)"
+            )
             for timing in status.get("extractor_timings", []):
                 print(f"  {timing['extractor']}: {timing['duration_seconds']}s")
 
