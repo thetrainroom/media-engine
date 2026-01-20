@@ -1177,7 +1177,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             i,
                             "running",
                             "clip",
-                            {"model": clip.model, "count": len(clip.segments)},
+                            clip.model_dump(),  # Store full result with embeddings
                         )
                     else:
                         update_file_status(i, "running", "clip", None)
