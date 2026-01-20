@@ -21,7 +21,6 @@ from fastapi.testclient import TestClient
 from polybos_engine import main
 from polybos_engine.main import app
 
-
 # Get project root (parent of tests/)
 _PROJECT_ROOT = Path(__file__).parent.parent
 

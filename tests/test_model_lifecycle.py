@@ -12,7 +12,6 @@ import os
 
 import pytest
 
-
 # Image directories to search (in order of preference)
 IMAGE_SEARCH_PATHS = [
     "/Volumes/Backup/drone/20251015_vindhella_borgund",
