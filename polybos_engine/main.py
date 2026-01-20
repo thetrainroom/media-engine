@@ -1347,6 +1347,50 @@ async def health():
     )
 
 
+LOG_FILE = "/tmp/polybos_engine.log"
+
+
+@app.get("/logs")
+async def get_logs(
+    lines: int = 100,
+    level: str | None = None,
+) -> dict[str, Any]:
+    """Get recent log entries for debugging.
+
+    Args:
+        lines: Number of lines to return (default 100, max 1000)
+        level: Filter by log level (DEBUG, INFO, WARNING, ERROR)
+
+    Returns:
+        Dict with log lines and metadata
+    """
+    lines = min(lines, 1000)  # Cap at 1000 lines
+
+    if not os.path.exists(LOG_FILE):
+        return {"lines": [], "total": 0, "file": LOG_FILE}
+
+    try:
+        with open(LOG_FILE) as f:
+            all_lines = f.readlines()
+
+        # Filter by level if specified
+        if level:
+            level_upper = level.upper()
+            all_lines = [line for line in all_lines if f" {level_upper} " in line]
+
+        # Return last N lines
+        recent_lines = all_lines[-lines:]
+
+        return {
+            "lines": [line.rstrip() for line in recent_lines],
+            "total": len(all_lines),
+            "returned": len(recent_lines),
+            "file": LOG_FILE,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read logs: {e}")
+
+
 @app.get("/settings", response_model=SettingsResponse)
 async def get_settings_endpoint():
     """Get current settings.

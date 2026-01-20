@@ -163,6 +163,41 @@ Health check.
 
 ---
 
+### GET /logs
+
+Get recent log entries for debugging.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `lines` | int | 100 | Number of lines to return (max 1000) |
+| `level` | string | null | Filter by log level (DEBUG, INFO, WARNING, ERROR) |
+
+**Response:**
+```json
+{
+  "lines": [
+    "2024-01-15 10:00:00,123 INFO polybos_engine.main: Starting batch abc123",
+    "2024-01-15 10:00:01,456 INFO polybos_engine.extractors.metadata: Extracted metadata"
+  ],
+  "total": 1500,
+  "returned": 100,
+  "file": "/tmp/polybos_engine.log"
+}
+```
+
+**Examples:**
+```bash
+# Get last 100 lines
+curl http://localhost:8000/logs
+
+# Get last 50 error lines
+curl "http://localhost:8000/logs?lines=50&level=ERROR"
+```
+
+---
+
 ### GET /hardware
 
 Get hardware capabilities and auto-selected models.
