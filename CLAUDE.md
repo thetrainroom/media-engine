@@ -255,3 +255,36 @@ pytest tests/                    # All tests
 pytest tests/ -m "not slow"      # Skip slow AI tests
 pytest tests/test_api.py -v      # API tests only
 ```
+
+### Stress Test
+
+The stress test (`tests/stress_test.py`) runs the engine repeatedly with various extractor combinations to verify stability under sustained load. It monitors memory usage and validates results.
+
+```bash
+# Requires test videos in test_data/video/
+# Engine must be running on localhost:8001
+
+# Run with defaults (10 iterations, random extractor configs)
+python tests/stress_test.py
+
+# Run for 50 iterations
+python tests/stress_test.py --iterations 50
+
+# Run for 1 hour
+python tests/stress_test.py --duration 3600
+
+# Thorough mode: test every file with every config
+python tests/stress_test.py --thorough
+
+# Heavy mode: larger files, all extractors including Qwen
+python tests/stress_test.py --heavy
+
+# Combine modes
+python tests/stress_test.py --heavy --duration 7200
+```
+
+The stress test validates:
+- All enabled extractors produce output
+- Metadata has required fields (duration, resolution, fps)
+- No memory leaks (compares first/second half memory averages)
+- Files without audio don't trigger transcript warnings
