@@ -34,7 +34,10 @@ Create a new batch extraction job.
     "/path/to/video1.mp4": {"location": "Oslo", "person": "John Smith"},
     "/path/to/video2.mp4": {"location": "Bergen", "person": "Jane Doe"}
   },
-  "qwen_timestamps": [10.0, 30.0, 60.0]
+  "visual_timestamps": {
+    "/path/to/video1.mp4": [10.0, 30.0, 60.0],
+    "/path/to/video2.mp4": [5.0, 15.0]
+  }
 }
 ```
 
@@ -55,7 +58,7 @@ Create a new batch extraction job.
 | `language` | string | null | Force language for Whisper (ISO 639-1 code, e.g., "en", "no") |
 | `language_hints` | string[] | null | Language hints (currently unused) |
 | `context_hint` | string | null | Context hint for Whisper initial prompt |
-| `qwen_timestamps` | float[] | null | Specific timestamps for Qwen analysis |
+| `visual_timestamps` | object | null | Per-file timestamps for visual/VLM analysis (file path -> float[]) |
 
 **Note:** Model selection (whisper_model, yolo_model, qwen_model, clip_model) is configured via `PUT /settings`. This keeps hardware-dependent configuration in one place.
 

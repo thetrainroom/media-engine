@@ -622,6 +622,7 @@
 
             try {
                 // Build batch request (telemetry is always extracted automatically)
+                const timestamps = getTimestampsFromInput();
                 const batchRequest = {
                     files: [filePath],
                     enable_metadata: enableMetadata,
@@ -635,7 +636,7 @@
                     object_detector: objectDetector,
                     contexts: Object.keys(context).length > 0 ? { [filePath]: context } : null,
                     context_hint: contextHint,
-                    qwen_timestamps: getTimestampsFromInput()
+                    visual_timestamps: timestamps ? { [filePath]: timestamps } : null
                 };
 
                 const createResponse = await fetch(`${ENGINE_URL}/batch`, {

@@ -286,7 +286,9 @@ class BatchRequest(BaseModel):
     # Context for Qwen VLM - per-file context mapping (file path -> context dict)
     # Example: {"/path/video1.mp4": {"location": "Oslo"}, "/path/video2.mp4": {"location": "Bergen"}}
     contexts: dict[str, dict[str, str]] | None = None
-    qwen_timestamps: list[float] | None = None
+    # Per-file timestamps for visual/VLM analysis (file path -> list of timestamps)
+    # Example: {"/path/video1.mp4": [10.0, 30.0], "/path/video2.mp4": [5.0, 15.0, 25.0]}
+    visual_timestamps: dict[str, list[float]] | None = None
 
 
 class BatchFileStatus(BaseModel):
@@ -714,7 +716,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         person_timestamps: dict[int, list[float]] = {}
 
         # Skip motion analysis if timestamps are already provided
-        has_precomputed_timestamps = bool(request.qwen_timestamps)
+        has_precomputed_timestamps = bool(request.visual_timestamps)
 
         if needs_visual_processing:
             start_extractor_timing("visual_processing")
@@ -837,9 +839,11 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     motion = motion_data.get(i)
                     timestamps = adaptive_timestamps.get(i, [])
 
-                    # Use precomputed timestamps if provided
-                    if has_precomputed_timestamps and request.qwen_timestamps:
-                        timestamps = request.qwen_timestamps
+                    # Use precomputed timestamps if provided for this file
+                    if has_precomputed_timestamps and request.visual_timestamps:
+                        file_timestamps = request.visual_timestamps.get(file_path)
+                        if file_timestamps:
+                            timestamps = file_timestamps
 
                     # Apply motion-based filtering for stable footage
                     if motion and motion.is_stable and timestamps:
@@ -1026,7 +1030,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 )
                 try:
                     motion = motion_data.get(i)
-                    timestamps = request.qwen_timestamps
+                    # Get per-file timestamps if provided
+                    timestamps: list[float] | None = None
+                    if request.visual_timestamps:
+                        timestamps = request.visual_timestamps.get(file_path)
                     if timestamps is None and motion:
                         timestamps = get_sample_timestamps(motion, max_samples=5)
 
