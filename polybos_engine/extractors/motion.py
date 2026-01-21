@@ -47,9 +47,12 @@ class MotionType(StrEnum):
     COMPLEX = "complex"  # Multiple motions combined
 
 
-@dataclass
+@dataclass(slots=True)
 class MotionSegment:
-    """A segment of video with consistent motion."""
+    """A segment of video with consistent motion.
+
+    Uses slots=True to reduce memory overhead per instance.
+    """
 
     start: float
     end: float
@@ -57,9 +60,12 @@ class MotionSegment:
     intensity: float  # Average flow magnitude
 
 
-@dataclass
+@dataclass(slots=True)
 class MotionAnalysis:
-    """Complete motion analysis for a video."""
+    """Complete motion analysis for a video.
+
+    Uses slots=True to reduce memory overhead per instance.
+    """
 
     duration: float
     fps: float

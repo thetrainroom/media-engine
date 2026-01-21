@@ -17,36 +17,48 @@ from polybos_engine.schemas import Transcript, TranscriptHints, TranscriptSegmen
 ProgressCallback = Callable[[str, int | None, int | None], None]
 
 
-@dataclass
+@dataclass(slots=True)
 class TranscriptionSegment:
-    """A single segment from transcription."""
+    """A single segment from transcription.
+
+    Uses slots=True to reduce memory overhead per instance.
+    """
 
     start: float
     end: float
     text: str
 
 
-@dataclass
+@dataclass(slots=True)
 class TranscriptionResult:
-    """Result from a transcription backend."""
+    """Result from a transcription backend.
+
+    Uses slots=True to reduce memory overhead per instance.
+    """
 
     language: str
     language_probability: float
     segments: list[TranscriptionSegment] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class SpeakerSegment:
-    """A speaker segment from diarization."""
+    """A speaker segment from diarization.
+
+    Uses slots=True to reduce memory overhead per instance.
+    """
 
     start: float
     end: float
     speaker: str
 
 
-@dataclass
+@dataclass(slots=True)
 class DiarizationResult:
-    """Result from speaker diarization."""
+    """Result from speaker diarization.
+
+    Uses slots=True to reduce memory overhead per instance.
+    """
 
     segments: list[SpeakerSegment] = field(default_factory=list)
     speaker_count: int = 0

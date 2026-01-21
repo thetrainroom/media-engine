@@ -78,12 +78,14 @@ def _detect_hwaccel() -> str | None:
     return None
 
 
-@dataclass
+@dataclass(slots=True)
 class SharedFrame:
     """A decoded frame with lazy format conversions.
 
     Stores the original BGR frame and provides lazy conversion to other formats
     (RGB, grayscale, PIL) to minimize memory usage and conversion overhead.
+
+    Uses slots=True to reduce memory overhead per instance.
     """
 
     timestamp: float
@@ -114,12 +116,14 @@ class SharedFrame:
         return self._pil
 
 
-@dataclass
+@dataclass(slots=True)
 class SharedFrameBuffer:
     """Buffer of decoded frames for a video file.
 
     Holds pre-decoded frames that can be shared across multiple extractors,
     eliminating redundant video decoding.
+
+    Uses slots=True to reduce memory overhead.
     """
 
     file_path: str

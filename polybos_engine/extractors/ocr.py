@@ -120,6 +120,11 @@ def unload_ocr_model() -> None:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
             torch.cuda.empty_cache()
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            if hasattr(torch.mps, "synchronize"):
+                torch.mps.synchronize()
+            if hasattr(torch.mps, "empty_cache"):
+                torch.mps.empty_cache()
 
         gc.collect()
         logger.info("EasyOCR model unloaded")

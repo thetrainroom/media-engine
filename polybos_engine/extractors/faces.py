@@ -129,10 +129,16 @@ def extract_faces(
                     align=True,
                 )
 
+                if faces:
+                    logger.debug(f"RetinaFace found {len(faces)} raw detections at {timestamp}s")
+
                 for face in faces:
                     # Skip low confidence detections
                     confidence = face.get("confidence", 0)
                     if confidence < min_confidence:
+                        logger.debug(
+                            f"Skipping face at {timestamp}s: confidence {confidence:.2f} < {min_confidence}"
+                        )
                         continue
 
                     # Get bounding box
@@ -142,6 +148,9 @@ def extract_faces(
 
                     # Skip small faces
                     if w < min_face_size or h < min_face_size:
+                        logger.debug(
+                            f"Skipping face at {timestamp}s: size {w}x{h} < {min_face_size}px"
+                        )
                         continue
 
                     # Crop face with padding for better embedding

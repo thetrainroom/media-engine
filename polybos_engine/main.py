@@ -5,6 +5,7 @@ import gc
 import logging
 import os
 import signal
+import subprocess
 import threading
 import time
 import uuid
@@ -77,7 +78,10 @@ def _clear_memory() -> None:
 
     Call before loading heavy AI models to free up memory.
     """
-    gc.collect()
+    # Multiple gc passes to handle circular references
+    for _ in range(3):
+        gc.collect()
+
     try:
         import torch
 
@@ -91,6 +95,7 @@ def _clear_memory() -> None:
                 torch.mps.synchronize()
     except ImportError:
         pass
+
     # Also try mlx cleanup
     try:
         import mlx.core as mx
@@ -98,6 +103,8 @@ def _clear_memory() -> None:
         mx.metal.clear_cache()
     except (ImportError, AttributeError):
         pass
+
+    # Final gc pass after GPU cleanup
     gc.collect()
 
 
@@ -781,7 +788,22 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     except Exception as e:
                         logger.warning(f"Motion analysis failed for {file_path}: {e}")
                         motion_data[i] = None
-                        adaptive_timestamps[i] = []
+                        # Fallback: generate uniform timestamps from duration
+                        # This ensures visual extractors still run even if motion fails
+                        file_result = batch_jobs[batch_id].files[i]
+                        meta = file_result.results.get("metadata")
+                        if meta and meta.get("duration"):
+                            duration = meta["duration"]
+                            # Generate ~10 uniform timestamps
+                            num_samples = min(10, max(3, int(duration / 10)))
+                            step = duration / (num_samples + 1)
+                            fallback_ts = [step * (j + 1) for j in range(num_samples)]
+                            adaptive_timestamps[i] = fallback_ts
+                            logger.info(
+                                f"Using fallback timestamps for {fname}: {num_samples} uniform samples"
+                            )
+                        else:
+                            adaptive_timestamps[i] = []
                     update_file_timing(i, "motion", time.time() - motion_start)
 
                 # --- Scene Detection ---
@@ -883,7 +905,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         person_ts = person_timestamps.get(i, [])
 
                         if request.enable_objects and person_ts:
-                            # YOLO-triggered: decode frames for person timestamps
+                            # YOLO found persons - decode those specific frames
                             person_buffer = decode_frames(
                                 file_path, timestamps=person_ts
                             )
@@ -891,14 +913,15 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             logger.info(
                                 f"Face detection on {len(person_ts)} person frames for {fname}"
                             )
-                        elif request.enable_objects and not person_ts:
-                            # YOLO ran but found no persons - skip
-                            logger.info(
-                                f"Skipping faces for {fname} - no persons detected"
-                            )
-                            faces = None
                         elif buffer is not None:
+                            # No person timestamps from YOLO (or YOLO not enabled)
+                            # Fall back to regular frame buffer
                             faces = extract_faces(file_path, frame_buffer=buffer)
+                            if request.enable_objects:
+                                logger.info(
+                                    f"Face detection on {len(buffer.frames)} frames for {fname} "
+                                    "(YOLO found no persons, using all frames)"
+                                )
                         else:
                             faces = None
 
@@ -1153,6 +1176,13 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 batch_jobs[batch_id].peak_memory_mb = peak_memory
 
     finally:
+        # Cleanup old batch jobs to free memory
+        _cleanup_expired_batch_jobs()
+
+        # Clear memory before starting next batch
+        logger.info("Clearing memory after batch completion...")
+        _clear_memory()
+
         # Always start the next batch from queue (or set batch_running = False)
         _start_next_batch()
 
@@ -1277,26 +1307,40 @@ async def get_logs(
     lines = min(lines, 1000)  # Cap at 1000 lines
 
     if not os.path.exists(LOG_FILE):
-        return {"lines": [], "total": 0, "file": LOG_FILE}
+        return {"lines": [], "total": 0, "returned": 0, "file": LOG_FILE}
 
     try:
-        with open(LOG_FILE) as f:
-            all_lines = f.readlines()
+        # Use tail to efficiently read last N lines without loading entire file
+        # Read more lines if filtering by level (we'll filter down after)
+        read_lines = lines * 10 if level else lines
+
+        result = subprocess.run(
+            ["tail", "-n", str(read_lines), LOG_FILE],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        if result.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"tail failed: {result.stderr}")
+
+        all_lines = result.stdout.splitlines()
 
         # Filter by level if specified
         if level:
             level_upper = level.upper()
             all_lines = [line for line in all_lines if f" {level_upper} " in line]
-
-        # Return last N lines
-        recent_lines = all_lines[-lines:]
+            # Take only requested number after filtering
+            all_lines = all_lines[-lines:]
 
         return {
-            "lines": [line.rstrip() for line in recent_lines],
-            "total": len(all_lines),
-            "returned": len(recent_lines),
+            "lines": all_lines,
+            "total": len(all_lines),  # Note: this is approximate when using tail
+            "returned": len(all_lines),
             "file": LOG_FILE,
         }
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=500, detail="Timeout reading logs")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to read logs: {e}")
 
