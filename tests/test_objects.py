@@ -37,6 +37,8 @@ def test_objects_summary_matches_detections(test_video_path):
 
 
 def test_objects_file_not_found():
-    """Test object detection with non-existent file."""
+    """Test that decode_frames raises FileNotFoundError for non-existent files."""
+    from polybos_engine.extractors.frame_buffer import decode_frames
+
     with pytest.raises(FileNotFoundError):
-        extract_objects("/nonexistent/video.mp4")
+        decode_frames("/nonexistent/video.mp4", timestamps=[1.0])

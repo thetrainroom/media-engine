@@ -23,6 +23,8 @@ def test_extract_ocr(test_video_path):
 
 
 def test_ocr_file_not_found():
-    """Test OCR extraction with non-existent file."""
+    """Test that decode_frames raises FileNotFoundError for non-existent files."""
+    from polybos_engine.extractors.frame_buffer import decode_frames
+
     with pytest.raises(FileNotFoundError):
-        extract_ocr("/nonexistent/video.mp4")
+        decode_frames("/nonexistent/video.mp4", timestamps=[1.0])

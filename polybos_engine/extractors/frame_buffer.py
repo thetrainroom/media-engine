@@ -269,7 +269,15 @@ def decode_frames(
 
     Returns:
         SharedFrameBuffer with decoded frames
+
+    Raises:
+        FileNotFoundError: If the video file doesn't exist
     """
+    from pathlib import Path
+
+    if not Path(file_path).exists():
+        raise FileNotFoundError(f"Video file not found: {file_path}")
+
     if hwaccel is None:
         hwaccel = _detect_hwaccel()
 
