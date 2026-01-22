@@ -1724,6 +1724,38 @@ async def list_extractors():
     }
 
 
+@app.post("/encode_text")
+async def encode_text(request: dict):
+    """Encode a text query to a CLIP embedding for text-to-image search.
+
+    Request body:
+        text: str - The text query to encode
+        model_name: str (optional) - CLIP model name (e.g., "ViT-B-32")
+
+    Returns:
+        embedding: list[float] - The normalized CLIP embedding (512 or 768 dimensions)
+        model: str - The model used for encoding
+    """
+    from polybos_engine.extractors.clip import encode_text_query, get_clip_backend
+
+    text = request.get("text", "")
+    if not text:
+        raise HTTPException(status_code=400, detail="Text query is required")
+
+    model_name = request.get("model_name")
+
+    try:
+        embedding = encode_text_query(text, model_name)
+        backend = get_clip_backend(model_name)
+        return {
+            "embedding": embedding,
+            "model": backend.get_model_name(),
+        }
+    except Exception as e:
+        logger.error(f"Text encoding failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 if __name__ == "__main__":
     import uvicorn
 

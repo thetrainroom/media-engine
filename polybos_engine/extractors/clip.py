@@ -68,6 +68,18 @@ class CLIPBackend(ABC):
         """Get the model name."""
         pass
 
+    @abstractmethod
+    def encode_text(self, text: str) -> Embedding:
+        """Encode text to embedding vector.
+
+        Args:
+            text: Text string to encode
+
+        Returns:
+            List of floats representing the embedding (normalized)
+        """
+        pass
+
 
 class OpenCLIPBackend(CLIPBackend):
     """OpenCLIP backend for CUDA/CPU."""
@@ -103,6 +115,19 @@ class OpenCLIPBackend(CLIPBackend):
 
     def get_model_name(self) -> str:
         return self._model_name
+
+    def encode_text(self, text: str) -> Embedding:
+        import open_clip  # type: ignore[import-not-found]
+        import torch
+
+        # Tokenize the text
+        tokenized = open_clip.tokenize([text]).to(self.device)
+
+        with torch.no_grad():
+            embedding = self.model.encode_text(tokenized)
+            embedding = embedding / embedding.norm(dim=-1, keepdim=True)
+
+        return embedding.cpu().numpy().flatten().tolist()
 
 
 class MLXCLIPBackend(CLIPBackend):
@@ -155,6 +180,20 @@ class MLXCLIPBackend(CLIPBackend):
 
     def get_model_name(self) -> str:
         return self._model_name
+
+    def encode_text(self, text: str) -> Embedding:
+        self._load_model()
+
+        if self._processor is not None:
+            # Using transformers
+            inputs = self._processor(text=text, return_tensors="pt")
+            outputs = self._model.get_text_features(**inputs)
+            embedding = outputs / outputs.norm(dim=-1, keepdim=True)
+            return embedding.detach().numpy().flatten().tolist()
+        else:
+            # Using mlx-clip
+            embedding = self._model.encode_text(text)
+            return embedding.tolist()
 
 
 # Singleton backend instance
@@ -347,3 +386,24 @@ def extract_clip_image(
             )
         ],
     )
+
+
+def encode_text_query(
+    text: str,
+    model_name: str | None = None,
+) -> Embedding:
+    """Encode a text query to a CLIP embedding.
+
+    The resulting embedding can be used for text-to-image search by comparing
+    against image embeddings using cosine similarity.
+
+    Args:
+        text: Text query to encode
+        model_name: CLIP model name (e.g., "ViT-B-32", "ViT-L-14"). If None, uses default.
+
+    Returns:
+        List of floats representing the normalized embedding
+    """
+    backend = get_clip_backend(model_name)
+    logger.info(f"Encoding text query: {text[:50]}...")
+    return backend.encode_text(text)
