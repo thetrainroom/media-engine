@@ -3,6 +3,7 @@
 import asyncio
 import atexit
 import gc
+import json
 import logging
 import logging.handlers
 import os
@@ -186,6 +187,8 @@ def _cleanup_resources():
     not to import new modules or use logging (file handlers may be closed).
     """
     try:
+        # Save timing history before shutdown
+        _save_timing_history()
         shutdown_ffprobe_pool()
         unload_whisper_model()
         unload_qwen_model()
@@ -245,9 +248,58 @@ JOB_TTL_SECONDS = 3600
 # Key: (extractor, resolution_bucket) -> list of processing times in seconds
 _timing_history: dict[tuple[str, str], list[float]] = {}
 _timing_history_lock = threading.Lock()
+_timing_history_dirty = False  # Track if we need to save
+_timing_history_last_save = 0.0  # Last save timestamp
 
 # Keep last N samples per bucket for rolling average
 _MAX_TIMING_SAMPLES = 20
+
+# Timing history persistence
+_TIMING_HISTORY_FILE = Path.home() / ".config" / "polybos" / "timing_history.json"
+_TIMING_SAVE_INTERVAL = 30.0  # Save at most every 30 seconds
+
+
+def _load_timing_history() -> None:
+    """Load timing history from disk on startup."""
+    global _timing_history
+    if not _TIMING_HISTORY_FILE.exists():
+        return
+    try:
+        with open(_TIMING_HISTORY_FILE) as f:
+            data = json.load(f)
+        # Convert string keys back to tuples
+        with _timing_history_lock:
+            for key_str, values in data.items():
+                # Key format: "extractor|resolution"
+                parts = key_str.split("|")
+                if len(parts) == 2:
+                    _timing_history[(parts[0], parts[1])] = values[-_MAX_TIMING_SAMPLES:]
+        logger.info(f"Loaded timing history: {len(_timing_history)} buckets")
+    except Exception as e:
+        logger.warning(f"Failed to load timing history: {e}")
+
+
+def _save_timing_history() -> None:
+    """Save timing history to disk."""
+    global _timing_history_dirty, _timing_history_last_save
+    with _timing_history_lock:
+        if not _timing_history:
+            return
+        # Convert tuple keys to strings for JSON
+        data = {f"{k[0]}|{k[1]}": v for k, v in _timing_history.items()}
+    try:
+        _TIMING_HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_TIMING_HISTORY_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+        _timing_history_dirty = False
+        _timing_history_last_save = time.time()
+        logger.debug(f"Saved timing history: {len(data)} buckets")
+    except Exception as e:
+        logger.warning(f"Failed to save timing history: {e}")
+
+
+# Load timing history on module import
+_load_timing_history()
 
 
 def _get_resolution_bucket(width: int | None, height: int | None) -> str:
@@ -269,26 +321,60 @@ def _get_resolution_bucket(width: int | None, height: int | None) -> str:
         return "8k+"
 
 
-def _record_timing(extractor: str, resolution_bucket: str, seconds: float) -> None:
-    """Record processing time for future ETA predictions."""
+def _record_timing(
+    extractor: str,
+    resolution_bucket: str,
+    seconds: float,
+    units: float | None = None,
+) -> None:
+    """Record processing rate for future ETA predictions.
+
+    Args:
+        extractor: Name of the extractor (transcript, visual, objects, etc.)
+        resolution_bucket: Resolution category (720p, 1080p, 4k, etc.)
+        seconds: Wall clock time to process
+        units: Normalization units - depends on extractor:
+            - transcript: duration in minutes (stores seconds per minute)
+            - visual: number of timestamps (stores seconds per timestamp)
+            - objects/faces/ocr/clip: number of frames (stores seconds per frame)
+            - If None, stores raw seconds (for metadata, telemetry, etc.)
+    """
+    global _timing_history_dirty
+
+    # Calculate rate (seconds per unit) or use raw seconds
+    if units and units > 0:
+        rate = seconds / units
+    else:
+        rate = seconds
+
     key = (extractor, resolution_bucket)
     with _timing_history_lock:
         if key not in _timing_history:
             _timing_history[key] = []
-        _timing_history[key].append(seconds)
+        _timing_history[key].append(rate)
         # Keep only recent samples
         if len(_timing_history[key]) > _MAX_TIMING_SAMPLES:
             _timing_history[key] = _timing_history[key][-_MAX_TIMING_SAMPLES:]
         sample_count = len(_timing_history[key])
         avg = sum(_timing_history[key]) / sample_count
+        _timing_history_dirty = True
+
+        unit_label = "/unit" if units else "s"
         logger.debug(
-            f"Recorded timing: {extractor}@{resolution_bucket} = {seconds:.2f}s "
-            f"(avg: {avg:.2f}s from {sample_count} samples)"
+            f"Recorded timing: {extractor}@{resolution_bucket} = {rate:.2f}{unit_label} "
+            f"(avg: {avg:.2f}{unit_label} from {sample_count} samples)"
         )
+    # Save periodically (not on every update to reduce disk I/O)
+    if _timing_history_dirty and time.time() - _timing_history_last_save > _TIMING_SAVE_INTERVAL:
+        _save_timing_history()
 
 
-def _get_predicted_time(extractor: str, resolution_bucket: str) -> float | None:
-    """Get predicted processing time based on historical data."""
+def _get_predicted_rate(extractor: str, resolution_bucket: str) -> float | None:
+    """Get predicted processing rate based on historical data.
+
+    Returns the average rate (seconds per unit) for the given extractor and resolution.
+    Multiply by the number of units to get predicted time.
+    """
     key = (extractor, resolution_bucket)
     with _timing_history_lock:
         if key in _timing_history and _timing_history[key]:
@@ -505,7 +591,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     for res in file_resolutions.values():
                         res_counts[res] = res_counts.get(res, 0) + 1
                     common_res = max(res_counts, key=lambda r: res_counts[r])
-                predicted = _get_predicted_time(extractor, common_res)
+                predicted = _get_predicted_rate(extractor, common_res)
                 if predicted is not None:
                     eta = round(predicted * total, 1)
 
@@ -569,8 +655,21 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         timing.files_processed = files_processed
                         break
 
-    def update_file_timing(file_idx: int, extractor: str, duration: float) -> None:
-        """Record per-file timing for an extractor."""
+    def update_file_timing(
+        file_idx: int, extractor: str, duration: float, units: float | None = None
+    ) -> None:
+        """Record per-file timing for an extractor.
+
+        Args:
+            file_idx: Index of the file in the batch
+            extractor: Name of the extractor
+            duration: Wall clock seconds to process
+            units: Normalization units for rate calculation:
+                - transcript: duration in minutes
+                - visual: number of timestamps
+                - objects/faces/ocr/clip: number of frames
+                - None: store raw seconds (metadata, telemetry, etc.)
+        """
         with batch_jobs_lock:
             if batch_id in batch_jobs and file_idx < len(batch_jobs[batch_id].files):
                 batch_jobs[batch_id].files[file_idx].timings[extractor] = round(
@@ -578,7 +677,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 )
         # Record to historical timing for future ETA predictions
         resolution = file_resolutions.get(file_idx, "unknown")
-        _record_timing(extractor, resolution, duration)
+        _record_timing(extractor, resolution, duration, units)
 
     try:
         with batch_jobs_lock:
@@ -938,11 +1037,16 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     except Exception as e:
                         logger.warning(f"Objects failed for {file_path}: {e}")
                         person_timestamps[i] = []
-                    update_file_timing(i, "objects", time.time() - objects_start)
+                    # Use number of frames as units for rate calculation
+                    num_frames = len(buffer.frames) if buffer else None
+                    update_file_timing(
+                        i, "objects", time.time() - objects_start, num_frames
+                    )
 
                 # --- Faces ---
                 if request.enable_faces:
                     faces_start = time.time()
+                    face_frame_count: int | None = None
                     try:
                         person_ts = person_timestamps.get(i, [])
 
@@ -952,6 +1056,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                                 file_path, timestamps=person_ts
                             )
                             faces = extract_faces(file_path, frame_buffer=person_buffer)
+                            face_frame_count = len(person_buffer.frames)
                             logger.info(
                                 f"Face detection on {len(person_ts)} person frames for {fname}"
                             )
@@ -959,6 +1064,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             # No person timestamps from YOLO (or YOLO not enabled)
                             # Fall back to regular frame buffer
                             faces = extract_faces(file_path, frame_buffer=buffer)
+                            face_frame_count = len(buffer.frames)
                             if request.enable_objects:
                                 logger.info(
                                     f"Face detection on {len(buffer.frames)} frames for {fname} "
@@ -994,7 +1100,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             )
                     except Exception as e:
                         logger.warning(f"Faces failed for {file_path}: {e}")
-                    update_file_timing(i, "faces", time.time() - faces_start)
+                    update_file_timing(
+                        i, "faces", time.time() - faces_start, face_frame_count
+                    )
 
                 # --- OCR ---
                 if request.enable_ocr and buffer is not None:
@@ -1006,7 +1114,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         )
                     except Exception as e:
                         logger.warning(f"OCR failed for {file_path}: {e}")
-                    update_file_timing(i, "ocr", time.time() - ocr_start)
+                    num_frames = len(buffer.frames) if buffer else None
+                    update_file_timing(i, "ocr", time.time() - ocr_start, num_frames)
 
                 # --- CLIP ---
                 if request.enable_clip and buffer is not None:
@@ -1023,7 +1132,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             update_file_status(i, "running", "clip", None)
                     except Exception as e:
                         logger.warning(f"CLIP failed for {file_path}: {e}")
-                    update_file_timing(i, "clip", time.time() - clip_start)
+                    num_frames = len(buffer.frames) if buffer else None
+                    update_file_timing(i, "clip", time.time() - clip_start, num_frames)
 
                 # --- Release buffer for this file ---
                 if buffer is not None:
@@ -1093,7 +1203,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     update_file_status(i, "running", "visual", visual_data)
                 except Exception as e:
                     logger.warning(f"Visual failed for {file_path}: {e}", exc_info=True)
-                update_file_timing(i, "visual", time.time() - file_start)
+                # Use number of timestamps as units for rate calculation
+                num_timestamps = len(timestamps) if timestamps else None
+                update_file_timing(i, "visual", time.time() - file_start, num_timestamps)
 
             update_batch_progress("visual", "Unloading Qwen model...", None, None)
             unload_qwen_model()
@@ -1162,7 +1274,17 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         whisper_ran = True
                     except Exception as e:
                         logger.warning(f"Transcript failed for {file_path}: {e}")
-                    update_file_timing(i, "transcript", time.time() - file_start)
+                    # Get duration in minutes for rate calculation
+                    duration_minutes: float | None = None
+                    with batch_jobs_lock:
+                        file_results = batch_jobs[batch_id].files[i].results
+                        if file_results and file_results.get("metadata"):
+                            duration_sec = file_results["metadata"].get("duration")
+                            if duration_sec:
+                                duration_minutes = duration_sec / 60.0
+                    update_file_timing(
+                        i, "transcript", time.time() - file_start, duration_minutes
+                    )
 
                 # Unload Whisper to free memory
                 if whisper_ran:
