@@ -1,6 +1,6 @@
 # Polybos Media Engine API Reference
 
-Base URL: `http://localhost:8000`
+Base URL: `http://localhost:8001`
 
 Interactive documentation available at `/docs` (Swagger UI) when server is running.
 
@@ -79,6 +79,21 @@ Create a new batch extraction job.
 
 Get batch job status and results.
 
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `status_only` | bool | false | If true, return only status/progress without large result data. Use for polling progress. |
+
+**Examples:**
+```bash
+# Poll status only (lightweight, no embeddings/transcripts)
+curl "http://localhost:8001/batch/abc123?status_only=true"
+
+# Get full results when done
+curl "http://localhost:8001/batch/abc123"
+```
+
 **Response:**
 ```json
 {
@@ -109,6 +124,19 @@ Get batch job status and results.
       "filename": "video1.mp4",
       "status": "completed",
       "timings": {"metadata": 2.5, "telemetry": 0.1, "scenes": 30.0},
+      "extractor_status": {
+        "metadata": "completed",
+        "telemetry": "completed",
+        "vad": "skipped",
+        "motion": "skipped",
+        "scenes": "completed",
+        "objects": "skipped",
+        "faces": "skipped",
+        "ocr": "skipped",
+        "clip": "skipped",
+        "visual": "skipped",
+        "transcript": "skipped"
+      },
       "results": {
         "metadata": {...},
         "telemetry": {...},
@@ -133,6 +161,26 @@ Get batch job status and results.
 | Field | Description |
 |-------|-------------|
 | `queue_position` | Position in queue (1 = next to run). `null` if not queued. |
+
+**`status_only=true` response:**
+
+When polling for progress, use `?status_only=true` to avoid transferring large result data (embeddings, transcripts, detections). The response includes:
+- All status fields (`status`, `current_extractor`, `progress`, `queue_position`)
+- Per-file `status`, `error`, `timings`, `extractor_status`
+- Batch metrics (`elapsed_seconds`, `memory_mb`, `peak_memory_mb`, `extractor_timings`)
+
+But excludes:
+- `files[].results` (empty object instead of metadata, transcript, embeddings, etc.)
+
+**Extractor Status Values:**
+
+| Status | Description |
+|--------|-------------|
+| `pending` | Not yet started |
+| `active` | Currently processing this file |
+| `completed` | Finished successfully |
+| `failed` | Failed with error |
+| `skipped` | Extractor not enabled for this batch, or file skipped (e.g., no audio for transcript) |
 
 ---
 
@@ -193,10 +241,10 @@ Get recent log entries for debugging.
 **Examples:**
 ```bash
 # Get last 100 lines
-curl http://localhost:8000/logs
+curl http://localhost:8001/logs
 
 # Get last 50 error lines
-curl "http://localhost:8000/logs?lines=50&level=ERROR"
+curl "http://localhost:8001/logs?lines=50&level=ERROR"
 ```
 
 ---

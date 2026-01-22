@@ -424,6 +424,7 @@ class BatchFileStatus(BaseModel):
     results: dict[str, Any] = {}
     error: str | None = None
     timings: dict[str, float] = {}  # extractor -> seconds
+    extractor_status: dict[str, str] = {}  # extractor -> pending/active/completed/failed/skipped
 
 
 class ExtractorTiming(BaseModel):
@@ -629,6 +630,20 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 if error:
                     batch_jobs[batch_id].files[file_idx].error = error
 
+    def update_extractor_status(
+        file_idx: int, extractor: str, status: str
+    ) -> None:
+        """Update extractor status for a file.
+
+        Args:
+            file_idx: Index of the file in the batch
+            extractor: Name of the extractor
+            status: One of 'pending', 'active', 'completed', 'failed', 'skipped'
+        """
+        with batch_jobs_lock:
+            if batch_id in batch_jobs and file_idx < len(batch_jobs[batch_id].files):
+                batch_jobs[batch_id].files[file_idx].extractor_status[extractor] = status
+
     def start_extractor_timing(extractor: str) -> datetime:
         """Start timing for an extractor stage."""
         started = datetime.now(timezone.utc)
@@ -709,6 +724,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 update_batch_progress(
                     "metadata", f"Processing {Path(file_path).name}", i + 1, total_files
                 )
+                update_extractor_status(i, "metadata", "active")
                 probe_data = probe_results.get(file_path)
 
                 if isinstance(probe_data, Exception):
@@ -717,6 +733,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         f"Skipping all extractors for {file_path} - file unreadable"
                     )
                     update_file_status(i, "failed", "metadata", None, str(probe_data))
+                    update_extractor_status(i, "metadata", "failed")
                     update_file_timing(i, "metadata", time.time() - file_start)
                     failed_files.add(i)
                     continue
@@ -724,6 +741,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 try:
                     metadata = extract_metadata(file_path, probe_data)
                     update_file_status(i, "running", "metadata", metadata.model_dump())
+                    update_extractor_status(i, "metadata", "completed")
                     # Store resolution bucket for timing predictions
                     file_resolutions[i] = _get_resolution_bucket(
                         metadata.resolution.width,
@@ -735,6 +753,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         f"Skipping all extractors for {file_path} - file unreadable"
                     )
                     update_file_status(i, "failed", "metadata", None, str(e))
+                    update_extractor_status(i, "metadata", "failed")
                     failed_files.add(i)
                 update_file_timing(i, "metadata", time.time() - file_start)
             end_extractor_timing("metadata", total_files)
@@ -747,6 +766,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             update_batch_progress(
                 "telemetry", f"Processing {Path(file_path).name}", i + 1, total_files
             )
+            update_extractor_status(i, "telemetry", "active")
             try:
                 telemetry = extract_telemetry(file_path)
                 update_file_status(
@@ -755,8 +775,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     "telemetry",
                     telemetry.model_dump() if telemetry else None,
                 )
+                update_extractor_status(i, "telemetry", "completed")
             except Exception as e:
                 logger.warning(f"Telemetry failed for {file_path}: {e}")
+                update_extractor_status(i, "telemetry", "failed")
             update_file_timing(i, "telemetry", time.time() - file_start)
         end_extractor_timing("telemetry", total_files)
 
@@ -768,8 +790,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             vad_ran = False  # Track if we actually ran VAD on any file
             for i, file_path in enumerate(files):
                 if i in failed_files:
+                    update_extractor_status(i, "vad", "skipped")
                     continue
                 file_start = time.time()
+                update_extractor_status(i, "vad", "active")
 
                 # Check media type - skip VAD for images
                 media_type = get_media_type(file_path)
@@ -782,6 +806,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         "total_duration": 0.0,
                     }
                     update_file_status(i, "running", "vad", no_audio_result)
+                    update_extractor_status(i, "vad", "completed")
                     update_file_timing(i, "vad", time.time() - file_start)
                     continue
 
@@ -803,6 +828,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         "total_duration": 0.0,
                     }
                     update_file_status(i, "running", "vad", no_audio_result)
+                    update_extractor_status(i, "vad", "completed")
                     update_file_timing(i, "vad", time.time() - file_start)
                     continue
 
@@ -813,9 +839,11 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 try:
                     vad_result = detect_voice_activity(file_path)
                     update_file_status(i, "running", "vad", vad_result)
+                    update_extractor_status(i, "vad", "completed")
                     vad_ran = True
                 except Exception as e:
                     logger.warning(f"VAD failed for {file_path}: {e}")
+                    update_extractor_status(i, "vad", "failed")
                 update_file_timing(i, "vad", time.time() - file_start)
 
             # Only unload if we actually loaded the model
@@ -891,10 +919,12 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     and media_type != MediaType.IMAGE
                 ):
                     motion_start = time.time()
+                    update_extractor_status(i, "motion", "active")
                     try:
                         if media_type == MediaType.IMAGE:
                             motion_data[i] = None
                             adaptive_timestamps[i] = [0.0]
+                            update_extractor_status(i, "motion", "completed")
                         else:
                             motion = analyze_motion(file_path)
                             motion_data[i] = motion
@@ -920,12 +950,14 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             update_file_status(
                                 i, "running", "motion", motion_result
                             )
+                            update_extractor_status(i, "motion", "completed")
                             logger.info(
                                 f"Motion for {fname}: stable={motion.is_stable}, "
                                 f"timestamps={len(adaptive_timestamps[i])}"
                             )
                     except Exception as e:
                         logger.warning(f"Motion analysis failed for {file_path}: {e}")
+                        update_extractor_status(i, "motion", "failed")
                         motion_data[i] = None
                         # Fallback: generate uniform timestamps from duration
                         # This ensures visual extractors still run even if motion fails
@@ -948,6 +980,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 # --- Scene Detection ---
                 if request.enable_scenes and media_type != MediaType.IMAGE:
                     scenes_start = time.time()
+                    update_extractor_status(i, "scenes", "active")
                     try:
                         scenes = extract_scenes(file_path)
                         update_file_status(
@@ -956,8 +989,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             "scenes",
                             scenes.model_dump() if scenes else None,
                         )
+                        update_extractor_status(i, "scenes", "completed")
                     except Exception as e:
                         logger.warning(f"Scenes failed for {file_path}: {e}")
+                        update_extractor_status(i, "scenes", "failed")
                     update_file_timing(i, "scenes", time.time() - scenes_start)
 
                 # --- Decode Frames (for Objects, Faces, OCR, CLIP) ---
@@ -1009,6 +1044,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 # --- Objects (YOLO) ---
                 if request.enable_objects and buffer is not None:
                     objects_start = time.time()
+                    update_extractor_status(i, "objects", "active")
                     try:
                         objects = extract_objects(
                             file_path,
@@ -1034,9 +1070,11 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                                 )
                         else:
                             person_timestamps[i] = []
+                        update_extractor_status(i, "objects", "completed")
                     except Exception as e:
                         logger.warning(f"Objects failed for {file_path}: {e}")
                         person_timestamps[i] = []
+                        update_extractor_status(i, "objects", "failed")
                     # Use number of frames as units for rate calculation
                     num_frames = len(buffer.frames) if buffer else None
                     update_file_timing(
@@ -1047,6 +1085,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 if request.enable_faces:
                     faces_start = time.time()
                     face_frame_count: int | None = None
+                    update_extractor_status(i, "faces", "active")
                     try:
                         person_ts = person_timestamps.get(i, [])
 
@@ -1098,8 +1137,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                                 "faces",
                                 {"count": 0, "unique_estimate": 0, "detections": []},
                             )
+                        update_extractor_status(i, "faces", "completed")
                     except Exception as e:
                         logger.warning(f"Faces failed for {file_path}: {e}")
+                        update_extractor_status(i, "faces", "failed")
                     update_file_timing(
                         i, "faces", time.time() - faces_start, face_frame_count
                     )
@@ -1107,19 +1148,23 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 # --- OCR ---
                 if request.enable_ocr and buffer is not None:
                     ocr_start = time.time()
+                    update_extractor_status(i, "ocr", "active")
                     try:
                         ocr = extract_ocr(file_path, frame_buffer=buffer)
                         update_file_status(
                             i, "running", "ocr", ocr.model_dump() if ocr else None
                         )
+                        update_extractor_status(i, "ocr", "completed")
                     except Exception as e:
                         logger.warning(f"OCR failed for {file_path}: {e}")
+                        update_extractor_status(i, "ocr", "failed")
                     num_frames = len(buffer.frames) if buffer else None
                     update_file_timing(i, "ocr", time.time() - ocr_start, num_frames)
 
                 # --- CLIP ---
                 if request.enable_clip and buffer is not None:
                     clip_start = time.time()
+                    update_extractor_status(i, "clip", "active")
                     try:
                         clip = extract_clip(
                             file_path,
@@ -1130,8 +1175,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             update_file_status(i, "running", "clip", clip.model_dump())
                         else:
                             update_file_status(i, "running", "clip", None)
+                        update_extractor_status(i, "clip", "completed")
                     except Exception as e:
                         logger.warning(f"CLIP failed for {file_path}: {e}")
+                        update_extractor_status(i, "clip", "failed")
                     num_frames = len(buffer.frames) if buffer else None
                     update_file_timing(i, "clip", time.time() - clip_start, num_frames)
 
@@ -1170,12 +1217,14 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
             for i, file_path in enumerate(files):
                 if i in failed_files:
+                    update_extractor_status(i, "visual", "skipped")
                     continue
                 file_start = time.time()
                 fname = Path(file_path).name
                 update_batch_progress(
                     "visual", f"Analyzing: {fname}", i + 1, total_files
                 )
+                update_extractor_status(i, "visual", "active")
                 try:
                     motion = motion_data.get(i)
                     # Get per-file timestamps if provided
@@ -1201,8 +1250,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     if visual_result.descriptions:
                         visual_data["descriptions"] = visual_result.descriptions
                     update_file_status(i, "running", "visual", visual_data)
+                    update_extractor_status(i, "visual", "completed")
                 except Exception as e:
                     logger.warning(f"Visual failed for {file_path}: {e}", exc_info=True)
+                    update_extractor_status(i, "visual", "failed")
                 # Use number of timestamps as units for rate calculation
                 num_timestamps = len(timestamps) if timestamps else None
                 update_file_timing(i, "visual", time.time() - file_start, num_timestamps)
@@ -1221,10 +1272,12 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             files_to_transcribe: list[int] = []
             for i, file_path in enumerate(files):
                 if i in failed_files:
+                    update_extractor_status(i, "transcript", "skipped")
                     continue
                 # Skip images
                 media_type = get_media_type(file_path)
                 if media_type == MediaType.IMAGE:
+                    update_extractor_status(i, "transcript", "skipped")
                     continue
                 # Check for audio track
                 has_audio = True
@@ -1235,6 +1288,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             has_audio = False
                 if has_audio:
                     files_to_transcribe.append(i)
+                else:
+                    update_extractor_status(i, "transcript", "skipped")
 
             if files_to_transcribe:
                 # Clear memory before loading heavy model
@@ -1256,6 +1311,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         idx + 1,
                         len(files_to_transcribe),
                     )
+                    update_extractor_status(i, "transcript", "active")
                     try:
                         transcript = extract_transcript(
                             file_path,
@@ -1271,9 +1327,11 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             "transcript",
                             transcript.model_dump() if transcript else None,
                         )
+                        update_extractor_status(i, "transcript", "completed")
                         whisper_ran = True
                     except Exception as e:
                         logger.warning(f"Transcript failed for {file_path}: {e}")
+                        update_extractor_status(i, "transcript", "failed")
                     # Get duration in minutes for rate calculation
                     duration_minutes: float | None = None
                     with batch_jobs_lock:
@@ -1382,12 +1440,36 @@ def _create_batch_sync(
             status = "queued"
             logger.info(f"Queued batch {batch_id} at position {queue_position}")
 
+    # Build initial extractor status for each file
+    # Order matches processing order in run_batch_job
+    extractor_flags = [
+        ("metadata", request.enable_metadata),
+        ("telemetry", True),  # Always runs
+        ("vad", request.enable_vad),
+        ("motion", request.enable_motion),
+        ("scenes", request.enable_scenes),
+        ("objects", request.enable_objects),
+        ("faces", request.enable_faces),
+        ("ocr", request.enable_ocr),
+        ("clip", request.enable_clip),
+        ("visual", request.enable_visual),
+        ("transcript", request.enable_transcript),
+    ]
+    initial_extractor_status = {
+        name: "pending" if enabled else "skipped" for name, enabled in extractor_flags
+    }
+
     batch = BatchJobStatus(
         batch_id=batch_id,
         status=status,
         queue_position=queue_position,
         files=[
-            BatchFileStatus(file=f, filename=Path(f).name, status="pending")
+            BatchFileStatus(
+                file=f,
+                filename=Path(f).name,
+                status="pending",
+                extractor_status=initial_extractor_status.copy(),
+            )
             for f in request.files
         ],
         created_at=datetime.now(timezone.utc),
@@ -1424,17 +1506,60 @@ async def create_batch(request: BatchRequest) -> dict[str, str]:
     return {"batch_id": batch_id}
 
 
-def _get_batch_sync(batch_id: str) -> BatchJobStatus | None:
-    """Synchronous helper to get batch status (runs in thread pool)."""
+def _get_batch_sync(batch_id: str, status_only: bool = False) -> BatchJobStatus | None:
+    """Synchronous helper to get batch status (runs in thread pool).
+
+    Args:
+        batch_id: The batch ID to look up
+        status_only: If True, return status/progress without large result data
+    """
     with batch_jobs_lock:
-        return batch_jobs.get(batch_id)
+        batch = batch_jobs.get(batch_id)
+        if batch is None:
+            return None
+
+        if status_only:
+            # Return a copy with results stripped out (keep status, progress, timings)
+            return BatchJobStatus(
+                batch_id=batch.batch_id,
+                status=batch.status,
+                queue_position=batch.queue_position,
+                current_extractor=batch.current_extractor,
+                progress=batch.progress,
+                files=[
+                    BatchFileStatus(
+                        file=f.file,
+                        filename=f.filename,
+                        status=f.status,
+                        results={},  # Empty - no large data
+                        error=f.error,
+                        timings=f.timings,
+                        extractor_status=f.extractor_status,
+                    )
+                    for f in batch.files
+                ],
+                created_at=batch.created_at,
+                completed_at=batch.completed_at,
+                extractor_timings=batch.extractor_timings,
+                elapsed_seconds=batch.elapsed_seconds,
+                memory_mb=batch.memory_mb,
+                peak_memory_mb=batch.peak_memory_mb,
+            )
+
+        return batch
 
 
 @app.get("/batch/{batch_id}")
-async def get_batch(batch_id: str) -> BatchJobStatus:
-    """Get batch job status and results."""
+async def get_batch(batch_id: str, status_only: bool = False) -> BatchJobStatus:
+    """Get batch job status and results.
+
+    Args:
+        batch_id: The batch ID to look up
+        status_only: If True, return only status/progress without large result data.
+            Use this for polling progress to avoid transferring large embeddings/transcripts.
+    """
     # Run lock acquisition in thread pool to avoid blocking event loop
-    result = await asyncio.to_thread(_get_batch_sync, batch_id)
+    result = await asyncio.to_thread(_get_batch_sync, batch_id, status_only)
     if result is None:
         raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
     return result

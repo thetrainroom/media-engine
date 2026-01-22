@@ -467,6 +467,129 @@ class TestBatchLifecycle:
         response = api_client.get("/batch/nonexistent")
         assert response.status_code == 404
 
+    def test_batch_status_only(self, api_client, test_videos):
+        """Test status_only parameter returns progress without large results."""
+        # Create and wait for batch with scenes (produces results)
+        response = api_client.post(
+            "/batch",
+            json={
+                "files": test_videos[:1],
+                "enable_metadata": True,
+                "enable_scenes": True,
+            },
+        )
+        assert response.status_code == 200
+        batch_id = response.json()["batch_id"]
+
+        wait_for_batch(api_client, batch_id, timeout=120)
+
+        # Fetch with status_only=true - results should be empty
+        response_status_only = api_client.get(f"/batch/{batch_id}?status_only=true")
+        assert response_status_only.status_code == 200
+        status_only = response_status_only.json()
+
+        # All status fields should be present
+        assert status_only["batch_id"] == batch_id
+        assert status_only["status"] == "completed"
+        assert "elapsed_seconds" in status_only
+        assert "memory_mb" in status_only
+        assert "extractor_timings" in status_only
+
+        # Per-file status and timings should be present
+        assert len(status_only["files"]) == 1
+        file_status = status_only["files"][0]
+        assert file_status["status"] == "completed"
+        assert "timings" in file_status
+
+        # extractor_status should be present and show correct states
+        assert "extractor_status" in file_status
+        ext_status = file_status["extractor_status"]
+        assert ext_status["metadata"] == "completed"
+        assert ext_status["telemetry"] == "completed"
+        assert ext_status["scenes"] == "completed"
+        # Disabled extractors should be skipped
+        assert ext_status["objects"] == "skipped"
+        assert ext_status["transcript"] == "skipped"
+
+        # But results should be empty
+        assert file_status["results"] == {}
+
+        # Fetch without status_only - results should be present
+        response_full = api_client.get(f"/batch/{batch_id}")
+        assert response_full.status_code == 200
+        full = response_full.json()
+
+        # Results should now have data
+        file_full = full["files"][0]
+        assert "metadata" in file_full["results"]
+        assert "scenes" in file_full["results"]
+
+        # Cleanup
+        api_client.delete(f"/batch/{batch_id}")
+
+    def test_extractor_status_tracking(self, api_client, test_videos):
+        """Test that extractor_status shows correct states for each extractor."""
+        # Create batch with multiple extractors
+        response = api_client.post(
+            "/batch",
+            json={
+                "files": test_videos[:1],
+                "enable_metadata": True,
+                "enable_scenes": True,
+                "enable_vad": True,
+                # Leave other extractors disabled
+            },
+        )
+        assert response.status_code == 200
+        batch_id = response.json()["batch_id"]
+
+        wait_for_batch(api_client, batch_id, timeout=120)
+
+        # Check final extractor_status
+        response = api_client.get(f"/batch/{batch_id}")
+        assert response.status_code == 200
+        status = response.json()
+
+        file_status = status["files"][0]
+        ext_status = file_status["extractor_status"]
+
+        # All extractors should be present
+        expected_extractors = [
+            "metadata",
+            "telemetry",
+            "vad",
+            "motion",
+            "scenes",
+            "objects",
+            "faces",
+            "ocr",
+            "clip",
+            "visual",
+            "transcript",
+        ]
+        for ext in expected_extractors:
+            assert ext in ext_status, f"Missing extractor: {ext}"
+
+        # Enabled extractors should be completed (or failed if no audio for VAD)
+        assert ext_status["metadata"] == "completed"
+        assert ext_status["telemetry"] == "completed"
+        assert ext_status["scenes"] == "completed"
+        # VAD might be completed or skipped depending on whether video has audio
+        assert ext_status["vad"] in ("completed", "skipped")
+
+        # Disabled extractors should be skipped
+        assert ext_status["objects"] == "skipped"
+        assert ext_status["faces"] == "skipped"
+        assert ext_status["ocr"] == "skipped"
+        assert ext_status["clip"] == "skipped"
+        assert ext_status["visual"] == "skipped"
+        assert ext_status["transcript"] == "skipped"
+        # Motion is skipped when no visual extractors need it
+        assert ext_status["motion"] == "skipped"
+
+        # Cleanup
+        api_client.delete(f"/batch/{batch_id}")
+
 
 class TestBatchMultipleExtractors:
     """Test batch with multiple extractors (model loading/unloading)."""
