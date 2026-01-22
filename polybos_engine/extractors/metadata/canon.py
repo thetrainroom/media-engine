@@ -218,8 +218,8 @@ class CanonExtractor:
         """Detect if file is from a Canon camera."""
         tags = get_tags_lower(probe_data)
 
-        # Check make tag
-        make = tags.get("make") or tags.get("manufacturer")
+        # Check make tag (various names used by different formats)
+        make = tags.get("make") or tags.get("manufacturer") or tags.get("company_name")
         if make and "CANON" in make.upper():
             return True
 
