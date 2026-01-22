@@ -389,13 +389,10 @@ def analyze_motion(
             global_frame_idx += 1
         total_flow_time += time.perf_counter() - flow_start
 
-    # Log timing breakdown (always print for diagnostics)
-    import sys
-
-    print(
-        f"Timing: decode={total_load_time:.2f}s, optical_flow={total_flow_time:.2f}s, "
-        f"frames={global_frame_idx}",
-        file=sys.stderr,
+    # Log timing breakdown
+    logger.info(
+        f"Motion analysis timing: decode={total_load_time:.2f}s, "
+        f"optical_flow={total_flow_time:.2f}s, frames={global_frame_idx}"
     )
 
     if not frame_motions:

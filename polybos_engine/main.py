@@ -9,6 +9,7 @@ import os
 import queue
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -17,20 +18,26 @@ from pathlib import Path
 from typing import Any
 
 # Configure non-blocking logging using a queue
-# This prevents the event loop from blocking on log writes when stdout is full
+# This prevents the event loop from blocking on log writes when stdout/stderr are full
 _log_queue: queue.Queue[logging.LogRecord] = queue.Queue(-1)  # Unlimited size
 _queue_handler = logging.handlers.QueueHandler(_log_queue)
 
-# Actual handlers that write to file and stderr (run in separate thread)
+# Always log to file
 _file_handler = logging.FileHandler("/tmp/polybos_engine.log")
-_stream_handler = logging.StreamHandler()
 _log_formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 _file_handler.setFormatter(_log_formatter)
-_stream_handler.setFormatter(_log_formatter)
+
+# Build handler list - only include stderr if it's a real tty, not a pipe
+# When running under a parent process that doesn't read our stderr, writing blocks
+_handlers: list[logging.Handler] = [_file_handler]
+if sys.stderr.isatty():
+    _stream_handler = logging.StreamHandler()
+    _stream_handler.setFormatter(_log_formatter)
+    _handlers.append(_stream_handler)
 
 # QueueListener handles the actual I/O in a separate thread
 _queue_listener = logging.handlers.QueueListener(
-    _log_queue, _file_handler, _stream_handler, respect_handler_level=True
+    _log_queue, *_handlers, respect_handler_level=True
 )
 _queue_listener.start()
 
