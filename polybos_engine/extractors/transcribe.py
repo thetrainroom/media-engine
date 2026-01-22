@@ -122,6 +122,7 @@ class WhisperMLX(TranscriptionBackend):
             language=language,
             initial_prompt=initial_prompt,
             word_timestamps=False,
+            task="transcribe",  # Explicitly prevent translation to English
         )
 
         return TranscriptionResult(
@@ -165,6 +166,7 @@ class WhisperCUDA(TranscriptionBackend):
             language=language,
             initial_prompt=initial_prompt,
             word_timestamps=False,
+            task="transcribe",  # Explicitly prevent translation to English
         )
 
         return TranscriptionResult(
@@ -209,6 +211,7 @@ class WhisperCPU(TranscriptionBackend):
             language=language,
             initial_prompt=initial_prompt,
             word_timestamps=False,
+            task="transcribe",  # Explicitly prevent translation to English
         )
 
         return TranscriptionResult(
