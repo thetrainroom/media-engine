@@ -1,5 +1,6 @@
 """FastAPI application for Polybos Media Engine."""
 
+import asyncio
 import atexit
 import gc
 import logging
@@ -1194,24 +1195,18 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         _start_next_batch()
 
 
-@app.post("/batch")
-async def create_batch(request: BatchRequest) -> dict[str, str]:
-    """Create a new batch extraction job (memory-efficient extractor-first processing).
+def _create_batch_sync(
+    batch_id: str, request: BatchRequest
+) -> tuple[bool, int | None, str]:
+    """Synchronous helper to create batch (runs in thread pool).
 
-    Only one batch runs at a time. If a batch is already running, new batches
-    are queued and will start automatically when the current batch finishes.
+    Returns:
+        (should_start, queue_position, status)
     """
     global batch_running
 
-    # Cleanup expired batch jobs on new batch creation (lazy cleanup)
+    # Cleanup expired batch jobs
     _cleanup_expired_batch_jobs()
-
-    # Validate all files exist
-    for file_path in request.files:
-        if not Path(file_path).exists():
-            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
-
-    batch_id = str(uuid.uuid4())[:8]
 
     # Check if we should start immediately or queue
     with batch_queue_lock:
@@ -1242,6 +1237,26 @@ async def create_batch(request: BatchRequest) -> dict[str, str]:
     with batch_jobs_lock:
         batch_jobs[batch_id] = batch
 
+    return should_start, queue_position, status
+
+
+@app.post("/batch")
+async def create_batch(request: BatchRequest) -> dict[str, str]:
+    """Create a new batch extraction job (memory-efficient extractor-first processing).
+
+    Only one batch runs at a time. If a batch is already running, new batches
+    are queued and will start automatically when the current batch finishes.
+    """
+    # Validate all files exist
+    for file_path in request.files:
+        if not Path(file_path).exists():
+            raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
+
+    batch_id = str(uuid.uuid4())[:8]
+
+    # Run lock operations in thread pool to avoid blocking event loop
+    should_start, _, _ = await asyncio.to_thread(_create_batch_sync, batch_id, request)
+
     # Start immediately if no batch running
     if should_start:
         thread = threading.Thread(target=run_batch_job, args=(batch_id, request))
@@ -1250,13 +1265,41 @@ async def create_batch(request: BatchRequest) -> dict[str, str]:
     return {"batch_id": batch_id}
 
 
+def _get_batch_sync(batch_id: str) -> BatchJobStatus | None:
+    """Synchronous helper to get batch status (runs in thread pool)."""
+    with batch_jobs_lock:
+        return batch_jobs.get(batch_id)
+
+
 @app.get("/batch/{batch_id}")
 async def get_batch(batch_id: str) -> BatchJobStatus:
     """Get batch job status and results."""
+    # Run lock acquisition in thread pool to avoid blocking event loop
+    result = await asyncio.to_thread(_get_batch_sync, batch_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
+    return result
+
+
+def _delete_batch_sync(batch_id: str) -> tuple[bool, bool]:
+    """Synchronous helper to delete batch (runs in thread pool).
+
+    Returns:
+        (found, was_queued) - whether batch was found and if it was queued
+    """
     with batch_jobs_lock:
         if batch_id not in batch_jobs:
-            raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
-        return batch_jobs[batch_id]
+            return False, False
+        was_queued = batch_jobs[batch_id].status == "queued"
+        del batch_jobs[batch_id]
+
+    # If it was queued, remove from queue and update positions
+    if was_queued:
+        with batch_queue_lock:
+            batch_queue[:] = [(bid, req) for bid, req in batch_queue if bid != batch_id]
+        _update_queue_positions()
+
+    return True, was_queued
 
 
 @app.delete("/batch/{batch_id}")
@@ -1267,17 +1310,10 @@ async def delete_batch(batch_id: str) -> dict[str, str]:
     removed from the queue. If running, deletion will not stop processing
     - it will just remove the status tracking.
     """
-    with batch_jobs_lock:
-        if batch_id not in batch_jobs:
-            raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
-        was_queued = batch_jobs[batch_id].status == "queued"
-        del batch_jobs[batch_id]
-
-    # If it was queued, remove from queue and update positions
-    if was_queued:
-        with batch_queue_lock:
-            batch_queue[:] = [(bid, req) for bid, req in batch_queue if bid != batch_id]
-        _update_queue_positions()
+    # Run lock acquisition in thread pool to avoid blocking event loop
+    found, _ = await asyncio.to_thread(_delete_batch_sync, batch_id)
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Batch not found: {batch_id}")
 
     logger.info(f"Deleted batch job {batch_id}")
     return {"status": "deleted", "batch_id": batch_id}
