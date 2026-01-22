@@ -17,20 +17,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+# When running under a parent process that doesn't read our stdout/stderr,
+# writes block when the pipe buffer fills up. Redirect to /dev/null to prevent this.
+# This must happen BEFORE any logging or library initialization.
+_is_interactive = sys.stdout.isatty() and sys.stderr.isatty()
+if not _is_interactive:
+    # Redirect stdout/stderr to /dev/null to prevent blocking writes
+    _devnull = open(os.devnull, "w")
+    sys.stdout = _devnull
+    sys.stderr = _devnull
+
 # Configure non-blocking logging using a queue
-# This prevents the event loop from blocking on log writes when stdout/stderr are full
 _log_queue: queue.Queue[logging.LogRecord] = queue.Queue(-1)  # Unlimited size
 _queue_handler = logging.handlers.QueueHandler(_log_queue)
 
-# Always log to file
+# Always log to file (this is the only output when running non-interactively)
 _file_handler = logging.FileHandler("/tmp/polybos_engine.log")
 _log_formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
 _file_handler.setFormatter(_log_formatter)
 
-# Build handler list - only include stderr if it's a real tty, not a pipe
-# When running under a parent process that doesn't read our stderr, writing blocks
+# Build handler list - only include stderr if running interactively
 _handlers: list[logging.Handler] = [_file_handler]
-if sys.stderr.isatty():
+if _is_interactive:
     _stream_handler = logging.StreamHandler()
     _stream_handler.setFormatter(_log_formatter)
     _handlers.append(_stream_handler)

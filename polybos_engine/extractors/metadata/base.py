@@ -74,6 +74,7 @@ class SidecarMetadata:
     gps_track: Any | None = None  # GPSTrack
     color_space: ColorSpace | None = None
     lens: LensInfo | None = None
+    created_at: datetime | None = None
 
 
 def run_ffprobe(file_path: str) -> dict[str, Any]:
@@ -392,6 +393,7 @@ def parse_creation_time(
         or tags_lower.get("com.apple.quicktime.creationdate")
         or tags_lower.get("date_recorded")
         or tags_lower.get("date-eng")  # Some MKV files
+        or tags_lower.get("modification_date")  # Canon MXF files
     )
 
     # Fallback to stream tags if format tags don't have the date

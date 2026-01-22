@@ -12,10 +12,17 @@ Detection methods:
 Canon XML sidecar files contain:
 - Device info (Manufacturer, ModelName)
 - GPS coordinates (Location element)
+- Creation date (CreationDate element)
+
+Canon Cinema EOS MXF filename format:
+- Example: A012C001_230515_BY9X.MXF or A012C001_230515BY9X.MXF
+- The YYMMDD date is embedded after the clip number
 """
 
 import logging
+import re
 import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -32,13 +39,53 @@ from .registry import get_tags_lower, register_extractor
 
 logger = logging.getLogger(__name__)
 
+# Pattern for Canon Cinema EOS MXF filenames with embedded date
+# Format: A###C###H<YYMMDD><XX>_CANON.MXF
+# Example: A012C001H200529BY_CANON.MXF -> date is 200529 (2020-05-29)
+CANON_DATE_PATTERN = re.compile(r"H(\d{6})", re.IGNORECASE)
+
+
+def _parse_date_from_filename(file_path: str) -> datetime | None:
+    """Extract recording date from Canon MXF filename.
+
+    Canon Cinema EOS cameras encode the date in the filename:
+    - A012C001_230515_BY9X.MXF -> 2023-05-15
+    - A012C001_230515BY9X.MXF -> 2023-05-15
+    - CLIP_230515.MXF -> 2023-05-15
+
+    The date format is YYMMDD (2-digit year, month, day).
+    """
+    filename = Path(file_path).stem
+
+    match = CANON_DATE_PATTERN.search(filename)
+    if not match:
+        return None
+
+    date_str = match.group(1)
+    try:
+        # Parse YYMMDD format
+        year = int(date_str[0:2])
+        month = int(date_str[2:4])
+        day = int(date_str[4:6])
+
+        # Convert 2-digit year to 4-digit (assume 20xx for now)
+        full_year = 2000 + year if year < 70 else 1900 + year
+
+        # Validate date components
+        if not (1 <= month <= 12 and 1 <= day <= 31):
+            return None
+
+        return datetime(full_year, month, day, tzinfo=timezone.utc)
+    except (ValueError, IndexError):
+        return None
+
 
 def _parse_xml_sidecar(video_path: str) -> SidecarMetadata | None:
     """Parse Canon XML sidecar file for additional metadata.
 
     Canon cameras create XML sidecar files with naming pattern:
-    - Video: A012C001H200529BY_CANON.MXF
-    - XML:   A012C001H200529BY_CANON.XML
+    - Video: A012C001_230515_BY9X.MXF
+    - XML:   A012C001_230515_BY9X.XML
     """
     path = Path(video_path)
 
@@ -64,6 +111,7 @@ def _parse_xml_sidecar(video_path: str) -> SidecarMetadata | None:
 
         device: DeviceInfo | None = None
         gps: GPS | None = None
+        created_at: datetime | None = None
 
         # Extract device info
         device_elem = root.find(".//canon:Device", ns) or root.find(".//{*}Device")
@@ -89,6 +137,38 @@ def _parse_xml_sidecar(video_path: str) -> SidecarMetadata | None:
                     detection_method=DetectionMethod.XML_SIDECAR,
                     confidence=1.0,
                 )
+
+        # Extract creation date - try multiple possible element names
+        date_elements = [
+            ".//canon:CreationDate",
+            ".//canon:StartDate",
+            ".//canon:Date",
+            ".//{*}CreationDate",
+            ".//{*}StartDate",
+            ".//{*}Date",
+        ]
+        for date_xpath in date_elements:
+            if date_xpath.startswith(".//canon:"):
+                date_elem = root.find(date_xpath, ns)
+            else:
+                date_elem = root.find(date_xpath)
+
+            if date_elem is not None and date_elem.text:
+                try:
+                    # Try ISO format first (2023-05-15T10:30:00)
+                    date_text = date_elem.text.strip()
+                    if "T" in date_text:
+                        created_at = datetime.fromisoformat(
+                            date_text.replace("Z", "+00:00")
+                        )
+                    else:
+                        # Try date only (2023-05-15)
+                        created_at = datetime.strptime(date_text, "%Y-%m-%d").replace(
+                            tzinfo=timezone.utc
+                        )
+                    break
+                except ValueError:
+                    continue
 
         # Extract GPS from Location element
         location_elem = root.find(".//canon:Location", ns) or root.find(
@@ -119,8 +199,8 @@ def _parse_xml_sidecar(video_path: str) -> SidecarMetadata | None:
                 except ValueError:
                     pass
 
-        if device or gps:
-            return SidecarMetadata(device=device, gps=gps)
+        if device or gps or created_at:
+            return SidecarMetadata(device=device, gps=gps, created_at=created_at)
         return None
 
     except ET.ParseError as e:
@@ -198,6 +278,16 @@ class CanonExtractor:
         # Merge metadata
         gps = sidecar.gps if sidecar and sidecar.gps else base_metadata.gps
 
+        # Get creation date: prefer base_metadata, then sidecar, then filename
+        created_at = base_metadata.created_at
+        if created_at is None and sidecar and sidecar.created_at:
+            created_at = sidecar.created_at
+            logger.debug(f"Got creation date from XML sidecar: {created_at}")
+        if created_at is None:
+            created_at = _parse_date_from_filename(file_path)
+            if created_at:
+                logger.debug(f"Parsed creation date from filename: {created_at}")
+
         return Metadata(
             duration=base_metadata.duration,
             resolution=base_metadata.resolution,
@@ -208,7 +298,7 @@ class CanonExtractor:
             bitrate=base_metadata.bitrate,
             file_size=base_metadata.file_size,
             timecode=base_metadata.timecode,
-            created_at=base_metadata.created_at,
+            created_at=created_at,
             device=device,
             gps=gps,
             color_space=base_metadata.color_space,
