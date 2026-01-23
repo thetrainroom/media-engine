@@ -1,12 +1,29 @@
 """FastAPI application for Polybos Media Engine."""
 
+# Prevent fork crashes on macOS with Hugging Face tokenizers library.
+# The tokenizers library registers atfork handlers that panic when the process forks
+# (e.g., to run ffmpeg via subprocess). This must be set BEFORE any imports.
+import os
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+# On macOS, use 'spawn' instead of 'fork' for multiprocessing to avoid crashes
+# with libraries that aren't fork-safe (tokenizers, PyTorch, etc.)
+import multiprocessing
+import sys
+
+if sys.platform == "darwin":
+    try:
+        multiprocessing.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass  # Already set
+
 import asyncio
 import atexit
 import gc
 import json
 import logging
 import logging.handlers
-import os
 import queue
 import signal
 import subprocess
