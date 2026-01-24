@@ -1025,6 +1025,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
                 if visual_extractors_needed:
                     decode_start = time.time()
+                    update_extractor_status(i, "frame_decode", "active")
                     motion = motion_data.get(i)
                     timestamps = adaptive_timestamps.get(i, [])
 
@@ -1054,8 +1055,12 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             logger.info(
                                 f"Decoded {len(buffer.frames)}/{len(timestamps)} frames for {fname}"
                             )
+                            update_extractor_status(i, "frame_decode", "completed")
                         except Exception as e:
                             logger.warning(f"Frame decode failed for {file_path}: {e}")
+                            update_extractor_status(i, "frame_decode", "failed")
+                    else:
+                        update_extractor_status(i, "frame_decode", "skipped")
                     update_file_timing(i, "frame_decode", time.time() - decode_start)
 
                 # --- Objects (YOLO) ---
@@ -1459,12 +1464,20 @@ def _create_batch_sync(
 
     # Build initial extractor status for each file
     # Order matches processing order in run_batch_job
+    # frame_decode is enabled if any visual extractor needs it
+    frame_decode_needed = any([
+        request.enable_objects,
+        request.enable_faces,
+        request.enable_ocr,
+        request.enable_clip,
+    ])
     extractor_flags = [
         ("metadata", request.enable_metadata),
         ("telemetry", True),  # Always runs
         ("vad", request.enable_vad),
         ("motion", request.enable_motion),
         ("scenes", request.enable_scenes),
+        ("frame_decode", frame_decode_needed),
         ("objects", request.enable_objects),
         ("faces", request.enable_faces),
         ("ocr", request.enable_ocr),
