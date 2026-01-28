@@ -2045,25 +2045,43 @@ async def encode_text(request: dict):
     Request body:
         text: str - The text query to encode
         model_name: str (optional) - CLIP model name (e.g., "ViT-B-32")
+        translate: bool (optional) - Whether to translate non-English queries to English (default: true)
 
     Returns:
         embedding: list[float] - The normalized CLIP embedding (512 or 768 dimensions)
         model: str - The model used for encoding
+        original_text: str - The original query text
+        translated_text: str - The text that was actually encoded (may be translated)
+        detected_language: str | None - Detected language of the original text
+        was_translated: bool - Whether the text was translated
     """
     from polybos_engine.extractors.clip import encode_text_query, get_clip_backend
+    from polybos_engine.extractors.translate import translate_query_for_clip
 
     text = request.get("text", "")
     if not text:
         raise HTTPException(status_code=400, detail="Text query is required")
 
     model_name = request.get("model_name")
+    enable_translation = request.get("translate", True)
 
     try:
-        embedding = encode_text_query(text, model_name)
+        # Translate query if needed
+        translated_text, detected_lang, was_translated = translate_query_for_clip(
+            text, enable_translation=enable_translation
+        )
+
+        # Encode the (possibly translated) text
+        embedding = encode_text_query(translated_text, model_name)
         backend = get_clip_backend(model_name)
+
         return {
             "embedding": embedding,
             "model": backend.get_model_name(),
+            "original_text": text,
+            "translated_text": translated_text,
+            "detected_language": detected_lang,
+            "was_translated": was_translated,
         }
     except Exception as e:
         logger.error(f"Text encoding failed: {e}")
