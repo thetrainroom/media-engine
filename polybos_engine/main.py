@@ -93,6 +93,7 @@ from polybos_engine.extractors import (
     FFPROBE_WORKERS,
     SharedFrameBuffer,
     analyze_motion,
+    check_faces_are_known,
     decode_frames,
     detect_voice_activity,
     extract_clip,
@@ -119,6 +120,9 @@ from polybos_engine.extractors import (
 )
 from polybos_engine.extractors.vad import AudioContent
 from polybos_engine.schemas import (
+    BoundingBox,
+    FaceDetection,
+    FacesResult,
     HealthResponse,
     MediaType,
     SettingsResponse,
@@ -1110,29 +1114,197 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     update_extractor_status(i, "faces", "active")
                     try:
                         person_ts = person_timestamps.get(i, [])
+                        motion = motion_data.get(i)
 
-                        if request.enable_objects and person_ts:
-                            # YOLO found persons - decode those specific frames
-                            person_buffer = decode_frames(
-                                file_path, timestamps=person_ts
-                            )
-                            faces = extract_faces(file_path, frame_buffer=person_buffer)
-                            face_frame_count = len(person_buffer.frames)
-                            logger.info(
-                                f"Face detection on {len(person_ts)} person frames for {fname}"
-                            )
-                        elif buffer is not None:
-                            # No person timestamps from YOLO (or YOLO not enabled)
-                            # Fall back to regular frame buffer
-                            faces = extract_faces(file_path, frame_buffer=buffer)
-                            face_frame_count = len(buffer.frames)
-                            if request.enable_objects:
+                        # Get video duration from motion data or metadata results
+                        duration = 0.0
+                        if motion is not None:
+                            duration = motion.duration
+                        else:
+                            file_result = batch_jobs[batch_id].files[i]
+                            if file_result.results.get("metadata"):
+                                duration = file_result.results["metadata"].get("duration", 0.0)
+
+                        # Calculate FPS based on motion intensity
+                        intensity = motion.avg_intensity if motion else 0.0
+                        if intensity >= 10.0:
+                            face_fps = 3.0
+                        elif intensity >= 6.0:
+                            face_fps = 2.0
+                        elif intensity >= 2.0:
+                            face_fps = 1.5
+                        else:
+                            face_fps = 1.0
+
+                        # Adaptive face detection for long videos
+                        # Short videos (<60s): process all at once
+                        # Long videos: use batched approach with early exit when faces stabilize
+                        batch_duration = 30.0  # Process 30s at a time
+                        verification_interval = 10.0  # Check every 10s once stable
+                        min_consistent_batches = 2  # Need 2 batches of same faces to go sparse
+
+                        faces = None
+                        face_frame_count = 0
+                        all_detections: list[dict[str, Any]] = []
+                        known_embeddings: list[list[float]] = []
+                        consistent_batches = 0
+                        in_verification_mode = False
+
+                        if duration <= 60.0:
+                            # Short video - process all at once
+                            num_samples = max(1, int(duration * face_fps))
+                            step = duration / (num_samples + 1)
+                            face_timestamps = [step * (j + 1) for j in range(num_samples)]
+
+                            # Merge with YOLO person timestamps
+                            if person_ts:
+                                all_ts = sorted(set(person_ts + face_timestamps))
+                                merged_ts: list[float] = []
+                                for ts in all_ts:
+                                    if not merged_ts or ts - merged_ts[-1] >= 0.3:
+                                        merged_ts.append(ts)
+                                face_timestamps = merged_ts
+
+                            if face_timestamps:
+                                face_buffer = decode_frames(
+                                    file_path, timestamps=face_timestamps
+                                )
+                                faces = extract_faces(file_path, frame_buffer=face_buffer)
+                                face_frame_count = len(face_buffer.frames)
                                 logger.info(
-                                    f"Face detection on {len(buffer.frames)} frames for {fname} "
-                                    "(YOLO found no persons, using all frames)"
+                                    f"Face detection on {face_frame_count} frames for {fname} "
+                                    f"(short video, {face_fps} FPS)"
                                 )
                         else:
-                            faces = None
+                            # Long video - use adaptive batching
+                            current_time = 0.0
+                            total_frames = 0
+
+                            while current_time < duration:
+                                # Determine batch parameters
+                                if in_verification_mode:
+                                    # Sparse verification: just check every 10s
+                                    batch_end = min(current_time + verification_interval, duration)
+                                    batch_timestamps = [current_time + verification_interval / 2]
+                                else:
+                                    # Normal dense sampling
+                                    batch_end = min(current_time + batch_duration, duration)
+                                    batch_duration = batch_end - current_time
+                                    num_batch_samples = max(1, int(batch_duration * face_fps))
+                                    step = batch_duration / (num_batch_samples + 1)
+                                    batch_timestamps = [
+                                        current_time + step * (j + 1)
+                                        for j in range(num_batch_samples)
+                                    ]
+
+                                    # Add YOLO person timestamps in this range
+                                    batch_person_ts = [
+                                        ts for ts in person_ts
+                                        if current_time <= ts < batch_end
+                                    ]
+                                    if batch_person_ts:
+                                        all_ts = sorted(set(batch_person_ts + batch_timestamps))
+                                        merged_ts = []
+                                        for ts in all_ts:
+                                            if not merged_ts or ts - merged_ts[-1] >= 0.3:
+                                                merged_ts.append(ts)
+                                        batch_timestamps = merged_ts
+
+                                # Process this batch
+                                if batch_timestamps:
+                                    batch_buffer = decode_frames(
+                                        file_path, timestamps=batch_timestamps
+                                    )
+                                    batch_faces = extract_faces(
+                                        file_path, frame_buffer=batch_buffer
+                                    )
+                                    total_frames += len(batch_buffer.frames)
+
+                                    if batch_faces and batch_faces.detections:
+                                        # Add detections to our collection
+                                        for d in batch_faces.detections:
+                                            all_detections.append({
+                                                "timestamp": d.timestamp,
+                                                "bbox": d.bbox.model_dump(),
+                                                "confidence": d.confidence,
+                                                "embedding": d.embedding,
+                                                "image_base64": d.image_base64,
+                                                "needs_review": d.needs_review,
+                                                "review_reason": d.review_reason,
+                                            })
+
+                                        # Check if faces are all known
+                                        all_known, new_embs = check_faces_are_known(
+                                            batch_faces, known_embeddings
+                                        )
+
+                                        if new_embs:
+                                            # New faces found - add to known and reset consistency
+                                            known_embeddings.extend(new_embs)
+                                            consistent_batches = 0
+                                            if in_verification_mode:
+                                                logger.info(
+                                                    f"New face detected at {current_time:.1f}s, "
+                                                    "exiting verification mode"
+                                                )
+                                                in_verification_mode = False
+                                        elif all_known and known_embeddings:
+                                            # All faces are known
+                                            consistent_batches += 1
+                                            if (
+                                                consistent_batches >= min_consistent_batches
+                                                and not in_verification_mode
+                                            ):
+                                                in_verification_mode = True
+                                                logger.info(
+                                                    f"Faces stable after {current_time:.1f}s, "
+                                                    "switching to verification mode (every 10s)"
+                                                )
+                                    elif not known_embeddings:
+                                        # No faces in this batch and no known faces yet
+                                        consistent_batches += 1
+                                        if consistent_batches >= min_consistent_batches:
+                                            in_verification_mode = True
+
+                                current_time = batch_end
+
+                            face_frame_count = total_frames
+
+                            # Create result from collected detections
+                            if all_detections:
+                                # Reconstruct FacesResult from batched detections
+                                faces = FacesResult(
+                                    count=len(all_detections),
+                                    unique_estimate=len(known_embeddings),
+                                    detections=[
+                                        FaceDetection(
+                                            timestamp=d["timestamp"],
+                                            bbox=BoundingBox(**d["bbox"]),
+                                            confidence=d["confidence"],
+                                            embedding=d["embedding"],
+                                            image_base64=d["image_base64"],
+                                            needs_review=d.get("needs_review", False),
+                                            review_reason=d.get("review_reason"),
+                                        )
+                                        for d in all_detections
+                                    ],
+                                )
+
+                            mode_info = "verification" if in_verification_mode else "normal"
+                            logger.info(
+                                f"Face detection on {total_frames} frames for {fname} "
+                                f"(adaptive batching, {len(known_embeddings)} unique, "
+                                f"ended in {mode_info} mode)"
+                            )
+
+                        # Fallback if no duration info
+                        if faces is None and buffer is not None:
+                            faces = extract_faces(file_path, frame_buffer=buffer)
+                            face_frame_count = len(buffer.frames)
+                            logger.info(
+                                f"Face detection on {len(buffer.frames)} frames for {fname} "
+                                "(using shared buffer)"
+                            )
 
                         if faces:
                             faces_data = {

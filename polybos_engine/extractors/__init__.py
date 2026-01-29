@@ -1,7 +1,7 @@
 """Video feature extractors."""
 
 from .clip import extract_clip, extract_clip_image, unload_clip_model
-from .faces import extract_faces, unload_face_model
+from .faces import check_faces_are_known, extract_faces, unload_face_model
 from .frame_buffer import (
     SharedFrame,
     SharedFrameBuffer,
@@ -39,6 +39,7 @@ __all__ = [
     "shutdown_ffprobe_pool",
     "extract_transcript",
     "extract_faces",
+    "check_faces_are_known",
     "extract_scenes",
     "extract_objects",
     "extract_objects_qwen",

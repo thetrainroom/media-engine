@@ -291,6 +291,50 @@ def _embedding_distance(emb1: Embedding, emb2: Embedding) -> float:
     return 1.0 - float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
 
 
+def check_faces_are_known(
+    new_faces: FacesResult,
+    known_embeddings: list[Embedding],
+    threshold: float = 0.5,
+) -> tuple[bool, list[Embedding]]:
+    """Check if all detected faces match known embeddings.
+
+    Args:
+        new_faces: Newly detected faces
+        known_embeddings: List of known face embeddings
+        threshold: Maximum distance to consider a match (cosine distance)
+
+    Returns:
+        Tuple of (all_known, new_embeddings):
+        - all_known: True if all detected faces match known embeddings
+        - new_embeddings: List of embeddings for any new (unknown) faces
+    """
+    if not new_faces.detections:
+        return True, []
+
+    new_embeddings: list[Embedding] = []
+    all_known = True
+
+    for detection in new_faces.detections:
+        if not detection.embedding:
+            continue
+
+        # Check if this face matches any known embedding
+        is_known = False
+        for known_emb in known_embeddings:
+            if not known_emb:
+                continue
+            dist = _embedding_distance(detection.embedding, known_emb)
+            if dist < threshold:
+                is_known = True
+                break
+
+        if not is_known:
+            all_known = False
+            new_embeddings.append(detection.embedding)
+
+    return all_known, new_embeddings
+
+
 def _find_position_match(
     det: FaceDetection,
     persons: list[list[tuple[int, Embedding]]],
