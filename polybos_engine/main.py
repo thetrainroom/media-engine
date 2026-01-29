@@ -434,6 +434,9 @@ class BatchRequest(BaseModel):
     # Per-file timestamps for visual/VLM analysis (file path -> list of timestamps)
     # Example: {"/path/video1.mp4": [10.0, 30.0], "/path/video2.mp4": [5.0, 15.0, 25.0]}
     visual_timestamps: dict[str, list[float]] | None = None
+    # Optional LUT path for visual analysis (e.g., for log footage color correction)
+    # Applied to extracted frames before sending to Qwen
+    lut_path: str | None = None
 
 
 class BatchFileStatus(BaseModel):
@@ -1432,13 +1435,14 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         request.contexts.get(file_path) if request.contexts else None
                     )
                     logger.info(
-                        f"Calling Qwen with context for {fname}: {file_context}"
+                        f"Calling Qwen with context for {fname}: {file_context}, lut_path={request.lut_path}"
                     )
                     visual_result = extract_objects_qwen(
                         file_path,
                         timestamps=timestamps,
                         model_name=qwen_model,
                         context=file_context,
+                        lut_path=request.lut_path,
                     )
                     visual_data: dict[str, Any] = {"summary": visual_result.summary}
                     if visual_result.descriptions:

@@ -69,6 +69,65 @@ def unload_qwen_model() -> None:
         gc.collect()
 
 
+# Known LOG/HDR color transfer characteristics
+# These indicate footage that needs color correction to look "normal"
+LOG_COLOR_TRANSFERS = {
+    # HDR transfer functions
+    "arib-std-b67",  # HLG (Hybrid Log-Gamma)
+    "smpte2084",     # PQ (Perceptual Quantizer) / HDR10
+    "smpte428",      # DCI-P3
+    # Manufacturer LOG profiles (as they appear in ffmpeg metadata)
+    "log",           # Generic log
+    "slog",          # Sony S-Log
+    "slog2",         # Sony S-Log2
+    "slog3",         # Sony S-Log3
+    "vlog",          # Panasonic V-Log
+    "clog",          # Canon C-Log
+    "clog2",         # Canon C-Log2
+    "clog3",         # Canon C-Log3
+    "dlog",          # DJI D-Log
+    "dlog-m",        # DJI D-Log M
+    "hlg",           # HLG
+    "n-log",         # Nikon N-Log
+    "f-log",         # Fujifilm F-Log
+    "f-log2",        # Fujifilm F-Log2
+    "blackmagic",    # Blackmagic Film
+    "arri",          # ARRI Log C
+    "logc",          # ARRI Log C
+    "redlogfilm",    # RED Log Film
+}
+
+
+def _is_log_color_space(color_transfer: str | None) -> bool:
+    """Check if the color transfer characteristic indicates LOG/HDR footage.
+
+    Args:
+        color_transfer: The color transfer characteristic from video metadata
+                       (e.g., "arib-std-b67", "smpte2084", "bt709")
+
+    Returns:
+        True if the footage appears to be in a LOG/flat/HDR color space
+        that would benefit from color correction before viewing.
+    """
+    if not color_transfer:
+        return False
+
+    # Normalize to lowercase for comparison
+    ct_lower = color_transfer.lower().replace("_", "-").replace(" ", "")
+
+    # Check for exact matches first
+    if ct_lower in LOG_COLOR_TRANSFERS:
+        return True
+
+    # Check for partial matches (e.g., "s-log3" contains "log")
+    log_keywords = ["log", "hlg", "pq", "hdr", "dci-p3"]
+    for keyword in log_keywords:
+        if keyword in ct_lower:
+            return True
+
+    return False
+
+
 def _get_qwen_model(
     model_name: str,
     progress_callback: ProgressCallback | None = None,
@@ -215,8 +274,11 @@ Respond with JSON only, no other text."""
         "event": "Event",
     }
 
+    # Handle log footage note separately (not as a bullet point)
+    log_footage_note = context.get("log_footage_note", "")
+
     for key, value in context.items():
-        if value:
+        if value and key != "log_footage_note":
             label = labels.get(key, key.replace("_", " ").title())
             context_lines.append(f"- {label}: {value}")
 
@@ -243,9 +305,17 @@ IMPORTANT: This location has these nearby landmarks: {nearby_landmarks}
 - Example: say "Eiffel Tower" not just "a tower"
 """
 
+    # Add log footage instruction if applicable
+    log_instruction = ""
+    if log_footage_note:
+        log_instruction = f"""
+NOTE: {log_footage_note}
+- Focus on describing the content and action, not the color grading
+"""
+
     # Enhanced prompt with context
     return f"""{context_section}
-{person_instruction}{landmark_instruction}
+{person_instruction}{landmark_instruction}{log_instruction}
 Look at this image carefully and describe what you see.
 
 You MUST respond with ONLY this exact JSON format:
@@ -272,6 +342,7 @@ def extract_objects_qwen(
     model_name: str | None = None,
     context: dict[str, str] | None = None,
     progress_callback: ProgressCallback | None = None,
+    lut_path: str | None = None,
 ) -> ObjectsResult:
     """Extract objects using Qwen2-VL vision-language model.
 
@@ -289,6 +360,7 @@ def extract_objects_qwen(
             - "device": Camera/device used
             - "topic": Subject matter of the video
         progress_callback: Optional callback for progress updates (message, current, total)
+        lut_path: Optional path to a LUT file (.cube) to apply for log footage color correction
 
     Returns:
         ObjectsResult with detected objects and contextual descriptions
@@ -322,11 +394,39 @@ def extract_objects_qwen(
         else:
             logger.info(f"Analyzing {len(timestamps)} provided timestamps")
 
+        # Check for LOG/HDR color space from metadata
+        color_transfer = context.get("color_transfer") if context else None
+        is_log_footage = _is_log_color_space(color_transfer)
+
+        # Add context hint for log footage
+        if context is None:
+            context = {}
+        else:
+            context = context.copy()  # Don't modify the original
+
+        if lut_path and os.path.exists(lut_path):
+            # LUT applied - colors are corrected but may still be slightly off
+            context["log_footage_note"] = (
+                "This footage was recorded in LOG profile and color-corrected with a LUT. "
+                "Colors shown are the corrected version but may still appear slightly desaturated."
+            )
+            logger.info("Added log footage context hint (with LUT)")
+        elif is_log_footage:
+            # LOG detected but no LUT - colors are definitely off
+            context["log_footage_note"] = (
+                f"This footage appears to be in LOG/flat color profile ({color_transfer}). "
+                "Colors are desaturated and not representative of the actual scene. "
+                "Focus on describing content and action, not colors."
+            )
+            logger.info(f"Added log footage context hint (no LUT, color_transfer={color_transfer})")
+
         # IMPORTANT: Extract frames BEFORE loading the model!
         # ffmpeg can crash (SIGABRT) when forked from a process with MPS/Metal loaded.
         if progress_callback:
             progress_callback("Extracting frames...", None, None)
-        frame_paths = _extract_frames_at_timestamps(file_path, temp_dir, timestamps)
+        frame_paths = _extract_frames_at_timestamps(
+            file_path, temp_dir, timestamps, lut_path=lut_path
+        )
         total_frames = len([p for p in frame_paths if p])
 
         if total_frames == 0:
@@ -500,13 +600,27 @@ def _get_video_duration(file_path: str) -> float:
 
 
 def _extract_frames_at_timestamps(
-    file_path: str, output_dir: str, timestamps: list[float], max_width: int = 1280
+    file_path: str,
+    output_dir: str,
+    timestamps: list[float],
+    max_width: int = 1280,
+    lut_path: str | None = None,
 ) -> list[str]:
     """Extract frames at specific timestamps, resized for VLM inference.
 
     Uses FrameExtractor which handles both videos (via OpenCV/ffmpeg)
-    and images (via direct loading).
+    and images (via direct loading). When a LUT path is provided, uses
+    ffmpeg directly to apply the LUT during extraction.
+
+    Args:
+        file_path: Path to video/image file
+        output_dir: Directory to save extracted frames
+        timestamps: List of timestamps to extract (in seconds)
+        max_width: Maximum width for scaling (default 1280)
+        lut_path: Optional path to a .cube LUT file for color correction
     """
+    import subprocess
+
     import cv2
 
     frame_paths: list[str] = []
@@ -515,26 +629,72 @@ def _extract_frames_at_timestamps(
         f"Extracting {len(timestamps)} frames from {file_path} at timestamps {timestamps}"
     )
 
-    # Use FrameExtractor with max_width scaling
-    with FrameExtractor(file_path, max_dimension=max_width) as extractor:
+    # If LUT is provided, use ffmpeg directly for extraction with LUT applied
+    if lut_path and os.path.exists(lut_path):
+        logger.info(f"Applying LUT: {lut_path}")
         for i, ts in enumerate(timestamps):
             output_path = os.path.join(output_dir, f"frame_{i:04d}.jpg")
-            frame = extractor.get_frame_at(ts)
+            try:
+                # Build filter chain: LUT + scale
+                scale_filter = (
+                    f"scale={max_width}:{max_width}:force_original_aspect_ratio=decrease"
+                )
+                lut_filter = f"lut3d='{lut_path}'"
+                vf = f"{lut_filter},{scale_filter}"
 
-            if frame is not None:
-                # Save frame as JPEG with moderate quality for VLM
-                cv2.imwrite(output_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    str(ts),
+                    "-i",
+                    file_path,
+                    "-vf",
+                    vf,
+                    "-frames:v",
+                    "1",
+                    "-update",
+                    "1",
+                    "-q:v",
+                    "2",
+                    output_path,
+                ]
+                subprocess.run(cmd, capture_output=True, check=True)
+
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     frame_paths.append(output_path)
-                    logger.info(f"Extracted frame {i} at {ts:.2f}s: {output_path}")
+                    logger.info(
+                        f"Extracted frame {i} at {ts:.2f}s with LUT: {output_path}"
+                    )
                 else:
                     logger.warning(
-                        f"Frame at {ts:.2f}s: could not save to {output_path}"
+                        f"Frame at {ts:.2f}s: could not extract with LUT"
                     )
                     frame_paths.append("")
-            else:
-                logger.warning(f"Frame at {ts:.2f}s: extraction failed")
+            except subprocess.CalledProcessError as e:
+                logger.warning(f"Frame at {ts:.2f}s: ffmpeg failed: {e}")
                 frame_paths.append("")
+    else:
+        # Standard extraction without LUT
+        with FrameExtractor(file_path, max_dimension=max_width) as extractor:
+            for i, ts in enumerate(timestamps):
+                output_path = os.path.join(output_dir, f"frame_{i:04d}.jpg")
+                frame = extractor.get_frame_at(ts)
+
+                if frame is not None:
+                    # Save frame as JPEG with moderate quality for VLM
+                    cv2.imwrite(output_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+                        frame_paths.append(output_path)
+                        logger.info(f"Extracted frame {i} at {ts:.2f}s: {output_path}")
+                    else:
+                        logger.warning(
+                            f"Frame at {ts:.2f}s: could not save to {output_path}"
+                        )
+                        frame_paths.append("")
+                else:
+                    logger.warning(f"Frame at {ts:.2f}s: extraction failed")
+                    frame_paths.append("")
 
     successful = sum(1 for p in frame_paths if p)
     logger.info(
