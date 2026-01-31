@@ -43,6 +43,7 @@ from .base import (
     FFPROBE_WORKERS,
     build_base_metadata,
     extract_keyframes,
+    get_duration_fast,
     run_ffprobe,
     run_ffprobe_batch,
     shutdown_ffprobe_pool,
@@ -58,6 +59,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "extract_metadata",
+    "get_duration_fast",
     "run_ffprobe_batch",
     "list_extractors",
     "FFPROBE_WORKERS",

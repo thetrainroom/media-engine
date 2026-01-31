@@ -182,6 +182,25 @@ def get_video_info(file_path: str) -> tuple[float, float, int, int]:
     return fps, duration, width, height
 
 
+def get_duration_fast(file_path: str) -> float | None:
+    """Get just the duration of a video file.
+
+    This is a lightweight wrapper around get_video_info for when
+    only duration is needed (e.g., for ETA predictions).
+
+    Args:
+        file_path: Path to the video file
+
+    Returns:
+        Duration in seconds, or None if couldn't be determined
+    """
+    try:
+        _, duration, _, _ = get_video_info(file_path)
+        return duration if duration > 0 else None
+    except Exception:
+        return None
+
+
 def run_ffprobe_batch(
     file_paths: list[str],
 ) -> dict[str, dict[str, Any] | Exception]:

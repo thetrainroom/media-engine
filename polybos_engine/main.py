@@ -258,7 +258,11 @@ class JobProgress(BaseModel):
     total: int | None = None
     # ETA tracking
     stage_elapsed_seconds: float | None = None  # Time spent in current stage
-    eta_seconds: float | None = None  # Estimated seconds remaining for stage
+    eta_seconds: float | None = None  # Estimated seconds remaining for current stage
+    # Total ETA fields (for full batch/queue visibility)
+    total_eta_seconds: float | None = None  # Total time remaining for entire batch
+    queue_eta_seconds: float | None = None  # Total time remaining for all queued batches
+    queued_batches: int | None = None  # Number of batches waiting in queue
 
 
 # Job TTL for automatic cleanup (1 hour)
@@ -401,6 +405,178 @@ def _get_predicted_rate(extractor: str, resolution_bucket: str) -> float | None:
         if key in _timing_history and _timing_history[key]:
             return sum(_timing_history[key]) / len(_timing_history[key])
     return None
+
+
+# Default processing rates (seconds per unit) when no historical data
+# Used as fallback for ETA predictions
+_DEFAULT_RATES: dict[str, float] = {
+    "metadata": 1.0,  # ~1 second per file
+    "telemetry": 0.5,  # ~0.5 seconds per file
+    "vad": 0.5,  # ~0.5 seconds per minute of video
+    # Sub-extractors within visual_processing (per frame rates)
+    "motion": 0.5,  # ~0.5 seconds per file (analyzes whole video)
+    "scenes": 0.3,  # ~0.3 seconds per file
+    "frame_decode": 0.05,  # ~0.05 seconds per frame
+    "objects": 0.3,  # ~0.3 seconds per frame (YOLO)
+    "faces": 0.2,  # ~0.2 seconds per frame
+    "ocr": 0.3,  # ~0.3 seconds per frame
+    "clip": 0.15,  # ~0.15 seconds per frame
+    # Separate stages
+    "visual": 5.0,  # ~5 seconds per timestamp (Qwen VLM is slow)
+    "transcript": 3.0,  # ~3 seconds per minute of video
+}
+
+# Extractor processing order - must match run_batch_job()
+_EXTRACTOR_ORDER = [
+    "metadata",
+    "telemetry",
+    "vad",
+    "visual_processing",  # Combined: motion, scenes, frame_decode, objects, faces, ocr, clip
+    "visual",  # Qwen VLM
+    "transcript",
+]
+
+
+def _predict_extractor_time(
+    extractor: str,
+    resolution_bucket: str,
+    duration_seconds: float,
+    num_frames: int | None = None,
+    num_timestamps: int | None = None,
+    enabled_sub_extractors: set[str] | None = None,
+) -> float:
+    """Predict processing time for a single extractor on a single file.
+
+    Args:
+        extractor: Name of the extractor
+        resolution_bucket: Resolution category (720p, 1080p, 4k, etc.)
+        duration_seconds: Video duration in seconds
+        num_frames: Number of frames to process (for frame-based extractors)
+        num_timestamps: Number of timestamps for visual/VLM analysis
+        enabled_sub_extractors: For visual_processing, which sub-extractors are enabled
+
+    Returns:
+        Predicted processing time in seconds
+    """
+    # Duration in minutes for duration-based extractors
+    duration_minutes = duration_seconds / 60.0
+
+    # Extractors that scale with duration
+    if extractor in ("vad", "transcript"):
+        rate = _get_predicted_rate(extractor, resolution_bucket)
+        if rate is None:
+            rate = _DEFAULT_RATES.get(extractor, 1.0)
+        return rate * duration_minutes
+
+    # visual_processing: sum up time for each enabled sub-extractor
+    if extractor == "visual_processing":
+        total_time = 0.0
+        sub_extractors = enabled_sub_extractors or {
+            "motion", "scenes", "frame_decode", "objects", "faces", "ocr", "clip"
+        }
+
+        # Smart sampling typically uses ~20-50 frames, not duration*2
+        # Use a more conservative estimate
+        estimated_frames = num_frames if num_frames else min(50, max(10, int(duration_seconds / 2)))
+
+        for sub in sub_extractors:
+            rate = _get_predicted_rate(sub, resolution_bucket)
+            if rate is None:
+                rate = _DEFAULT_RATES.get(sub, 0.1)
+
+            # motion, scenes store raw seconds per file
+            # frame_decode, objects, faces, ocr, clip store seconds per frame
+            if sub in ("motion", "scenes"):
+                total_time += rate  # raw seconds per file
+            else:
+                total_time += rate * estimated_frames  # per-frame rate × frame count
+
+        return total_time
+
+    # Visual/Qwen scales with timestamps
+    if extractor == "visual":
+        rate = _get_predicted_rate(extractor, resolution_bucket)
+        if rate is None:
+            rate = _DEFAULT_RATES.get(extractor, 5.0)
+        timestamps = num_timestamps if num_timestamps else 5
+        return rate * timestamps
+
+    # Fixed-time extractors (metadata, telemetry)
+    rate = _get_predicted_rate(extractor, resolution_bucket)
+    if rate is None:
+        rate = _DEFAULT_RATES.get(extractor, 1.0)
+    return rate
+
+
+def _get_enabled_extractors_from_request(
+    request: "BatchRequest",
+) -> tuple[set[str], set[str]]:
+    """Get the set of enabled extractors from a batch request.
+
+    Returns:
+        Tuple of (main_extractors, sub_extractors within visual_processing)
+    """
+    enabled = {"metadata", "telemetry"}  # Always enabled
+    sub_extractors: set[str] = set()
+
+    if request.enable_vad:
+        enabled.add("vad")
+
+    # Track which sub-extractors are enabled within visual_processing
+    if request.enable_motion:
+        sub_extractors.add("motion")
+    if request.enable_scenes:
+        sub_extractors.add("scenes")
+    if request.enable_objects:
+        sub_extractors.update({"frame_decode", "objects"})
+    if request.enable_faces:
+        sub_extractors.update({"frame_decode", "faces"})
+    if request.enable_ocr:
+        sub_extractors.update({"frame_decode", "ocr"})
+    if request.enable_clip:
+        sub_extractors.update({"frame_decode", "clip"})
+
+    # visual_processing runs if any sub-extractor is enabled
+    if sub_extractors:
+        enabled.add("visual_processing")
+
+    if request.enable_visual:
+        enabled.add("visual")
+    if request.enable_transcript:
+        enabled.add("transcript")
+
+    return enabled, sub_extractors
+
+
+def _calculate_queue_eta() -> tuple[float, int]:
+    """Calculate total ETA for all queued batches.
+
+    Returns: (total_seconds, batch_count)
+    """
+    total_eta = 0.0
+    batch_count = 0
+
+    with batch_queue_lock:
+        for _, request in batch_queue:
+            batch_count += 1
+            enabled, sub_extractors = _get_enabled_extractors_from_request(request)
+
+            # Estimate time for each file in queued batch
+            for _file_path in request.files:
+                # Use average duration estimate if metadata not yet available
+                duration = 60.0  # Default: 1 minute estimate
+                resolution = "1080p"  # Default resolution
+
+                for ext in enabled:
+                    if ext in _EXTRACTOR_ORDER:
+                        total_eta += _predict_extractor_time(
+                            ext,
+                            resolution,
+                            duration,
+                            enabled_sub_extractors=sub_extractors if ext == "visual_processing" else None,
+                        )
+
+    return total_eta, batch_count
 
 
 class BatchRequest(BaseModel):
@@ -584,6 +760,58 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
     file_resolutions: dict[int, str] = (
         {}
     )  # file_idx -> resolution bucket (for timing predictions)
+    file_durations: dict[int, float] = {}  # file_idx -> duration in seconds
+
+    # Get enabled extractors for this batch
+    enabled_extractors, enabled_sub_extractors = _get_enabled_extractors_from_request(request)
+
+    def calculate_total_eta(current_extractor: str, stage_eta: float) -> float:
+        """Calculate total remaining time for the entire batch.
+
+        Args:
+            current_extractor: Currently running extractor
+            stage_eta: Remaining time for current stage
+
+        Returns:
+            Total estimated remaining seconds for the batch
+        """
+        total_eta = stage_eta if stage_eta else 0.0
+
+        # Get the current extractor's position in the order
+        if current_extractor not in _EXTRACTOR_ORDER:
+            return total_eta
+
+        current_ext_idx = _EXTRACTOR_ORDER.index(current_extractor)
+        num_files = len(request.files)
+
+        # Add time for remaining extractors (after current one)
+        remaining_extractors = _EXTRACTOR_ORDER[current_ext_idx + 1 :]
+        logger.info(
+            f"ETA calc: current={current_extractor}, remaining={remaining_extractors}, "
+            f"enabled={enabled_extractors}"
+        )
+
+        for ext in remaining_extractors:
+            if ext not in enabled_extractors:
+                logger.info(f"ETA calc: skipping {ext} (not enabled)")
+                continue
+
+            # Sum predicted time across all files
+            for file_idx in range(num_files):
+                resolution = file_resolutions.get(file_idx, "1080p")
+                duration = file_durations.get(file_idx, 60.0)  # Default 1 min
+                predicted = _predict_extractor_time(
+                    ext,
+                    resolution,
+                    duration,
+                    enabled_sub_extractors=enabled_sub_extractors if ext == "visual_processing" else None,
+                )
+                total_eta += predicted
+                logger.info(
+                    f"ETA calc: {ext} file={file_idx} res={resolution} dur={duration}s -> +{predicted:.1f}s"
+                )
+
+        return round(total_eta, 1)
 
     def update_batch_progress(
         extractor: str,
@@ -604,9 +832,40 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             stage_elapsed = round(time.time() - stage_start_times[extractor], 1)
             # Calculate ETA if we have progress info
             if current is not None and total is not None and current > 0:
-                avg_time_per_item = stage_elapsed / current
-                remaining_items = total - current
-                eta = round(avg_time_per_item * remaining_items, 1)
+                # Always use prediction-based ETA for remaining files + current file
+                # This is more accurate than elapsed-based calculation
+                eta = 0.0
+
+                # Add predicted time for current file (estimate 50% remaining)
+                current_file_idx = current - 1
+                current_res = file_resolutions.get(current_file_idx, "1080p")
+                current_dur = file_durations.get(current_file_idx, 60.0)
+                current_predicted = _predict_extractor_time(
+                    extractor,
+                    current_res,
+                    current_dur,
+                    enabled_sub_extractors=enabled_sub_extractors if extractor == "visual_processing" else None,
+                )
+                # Estimate we're ~halfway through current file if we have some elapsed time
+                if stage_elapsed > 0 and current > 1:
+                    # For files after the first, estimate based on avg time per completed file
+                    avg_per_file = stage_elapsed / (current - 1)
+                    eta += max(0, avg_per_file * 0.5)  # ~50% of avg remaining for current
+                else:
+                    eta += current_predicted * 0.5  # ~50% of predicted remaining for current
+
+                # Add predicted time for remaining files
+                for file_idx in range(current, total):
+                    resolution = file_resolutions.get(file_idx, "1080p")
+                    duration = file_durations.get(file_idx, 60.0)
+                    eta += _predict_extractor_time(
+                        extractor,
+                        resolution,
+                        duration,
+                        enabled_sub_extractors=enabled_sub_extractors if extractor == "visual_processing" else None,
+                    )
+
+                eta = round(eta, 1)
             elif current == 0 and total is not None and total > 0:
                 # No progress yet - try to use historical timing for prediction
                 # Use the most common resolution in the batch, or "unknown" if none set
@@ -620,6 +879,19 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 if predicted is not None:
                     eta = round(predicted * total, 1)
 
+        # Calculate total ETA for entire batch (current stage + remaining stages)
+        total_eta = calculate_total_eta(extractor, eta or 0.0)
+
+        # Debug logging for ETA calculation (use INFO level to see it)
+        if total_eta and total_eta > 0:
+            logger.info(
+                f"ETA: {extractor} stage={eta}s, total={total_eta}s, "
+                f"subs={enabled_sub_extractors}, files={len(file_durations)}"
+            )
+
+        # Calculate queue ETA (for all queued batches)
+        queue_eta, queued_count = _calculate_queue_eta()
+
         with batch_jobs_lock:
             if batch_id in batch_jobs:
                 batch_jobs[batch_id].current_extractor = extractor
@@ -629,6 +901,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     total=total,
                     stage_elapsed_seconds=stage_elapsed,
                     eta_seconds=eta,
+                    # Always send total_eta - even if 0, it's valid info
+                    total_eta_seconds=total_eta,
+                    queue_eta_seconds=queue_eta if queue_eta > 0 else None,
+                    queued_batches=queued_count if queued_count > 0 else None,
                 )
                 # Update memory and elapsed time
                 current_mem = _get_memory_mb()
@@ -729,6 +1005,21 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         # If we can't read the file with ffprobe, there's no point trying other extractors
         failed_files: set[int] = set()
 
+        # Always get file durations and resolutions for ETA predictions (lightweight ffprobe)
+        # This runs even if metadata isn't enabled
+        if not request.enable_metadata:
+            from polybos_engine.extractors.metadata.base import get_video_info
+            for i, file_path in enumerate(files):
+                try:
+                    _fps, duration, width, height = get_video_info(file_path)
+                    if duration:
+                        file_durations[i] = duration
+                    # Determine resolution bucket from dimensions
+                    file_resolutions[i] = _get_resolution_bucket(width, height)
+                    logger.info(f"ETA: file {i} duration={duration}s, res={file_resolutions[i]}")
+                except Exception as e:
+                    logger.warning(f"Could not get video info for {file_path}: {e}")
+
         # Stage 1: Metadata (parallel ffprobe for speed)
         if request.enable_metadata:
             start_extractor_timing("metadata")
@@ -771,6 +1062,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         metadata.resolution.width,
                         metadata.resolution.height,
                     )
+                    # Store duration for total ETA predictions
+                    if metadata.duration is not None:
+                        file_durations[i] = metadata.duration
+                        logger.info(f"ETA: stored duration {metadata.duration}s for file {i}")
                 except Exception as e:
                     logger.warning(f"Metadata failed for {file_path}: {e}")
                     logger.warning(
@@ -1068,7 +1363,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             update_extractor_status(i, "frame_decode", "failed")
                     else:
                         update_extractor_status(i, "frame_decode", "skipped")
-                    update_file_timing(i, "frame_decode", time.time() - decode_start)
+                    # Pass frame count as units for per-frame rate calculation
+                    num_frames = len(buffer.frames) if buffer else None
+                    update_file_timing(i, "frame_decode", time.time() - decode_start, num_frames)
 
                 # --- Objects (YOLO) ---
                 if request.enable_objects and buffer is not None:
@@ -1452,6 +1749,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                 except Exception as e:
                     logger.warning(f"Visual failed for {file_path}: {e}", exc_info=True)
                     update_extractor_status(i, "visual", "failed")
+                    update_file_status(i, "failed", error=str(e))
+                    failed_files.add(i)
                 # Use number of timestamps as units for rate calculation
                 num_timestamps = len(timestamps) if timestamps else None
                 update_file_timing(i, "visual", time.time() - file_start, num_timestamps)
@@ -1530,6 +1829,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     except Exception as e:
                         logger.warning(f"Transcript failed for {file_path}: {e}")
                         update_extractor_status(i, "transcript", "failed")
+                        update_file_status(i, "failed", error=str(e))
+                        failed_files.add(i)
                     # Get duration in minutes for rate calculation
                     duration_minutes: float | None = None
                     with batch_jobs_lock:
@@ -1558,7 +1859,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
             for i in range(len(files)):
                 if i in failed_files:
                     # File already marked as failed - don't overwrite
-                    logger.info(f"Batch {batch_id} file {i} skipped (failed metadata)")
+                    error_msg = batch_jobs[batch_id].files[i].error or "unknown error"
+                    logger.info(f"Batch {batch_id} file {i} marked failed: {error_msg}")
                     continue
                 # Log results before marking complete
                 result_keys = list(batch_jobs[batch_id].files[i].results.keys())
