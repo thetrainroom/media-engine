@@ -340,12 +340,8 @@ def get_available_vram_gb() -> float:
             )
             total_bytes = int(result.stdout.strip())
             total_gb = total_bytes / (1024**3)
-            # Apple Silicon can use ~75% of unified memory for GPU
-            available_gb = total_gb * 0.75
-            logger.info(
-                f"Apple Silicon: {total_gb:.0f}GB unified, ~{available_gb:.0f}GB for GPU"
-            )
-            return available_gb
+            logger.info(f"Apple Silicon: {total_gb:.0f}GB unified memory")
+            return total_gb
         except Exception as e:
             logger.warning(f"Failed to get Apple Silicon memory: {e}")
             return 8.0  # Conservative default for M1/M2
@@ -356,107 +352,62 @@ def get_available_vram_gb() -> float:
 def get_free_memory_gb() -> float:
     """Get memory available for ML models without causing excessive swapping.
 
-    On macOS, this accounts for:
-    - Current swap usage (if already swapping, memory is tight)
-    - App memory pressure
-    - Leaves buffer for system and other apps
+    Uses psutil for cross-platform memory detection, which correctly accounts
+    for free, inactive, and purgeable memory on macOS.
 
     Returns:
         Estimated GB available for loading models.
     """
     try:
-        import subprocess
+        import psutil
+
+        mem = psutil.virtual_memory()
+        # psutil.available is the memory that can be given to processes
+        # without swapping - this is what we want
+        available_gb = mem.available / (1024**3)
+
+        # Leave a 1GB buffer for system processes
+        available_for_models = max(0.0, available_gb - 1.0)
+
+        logger.info(
+            f"Memory: {mem.total / (1024**3):.0f}GB total, "
+            f"{mem.available / (1024**3):.1f}GB available, "
+            f"{available_for_models:.1f}GB for models"
+        )
+        return available_for_models
+
+    except ImportError:
+        logger.warning("psutil not installed, using fallback memory detection")
+
+    # Fallback without psutil
+    try:
         import sys
 
         if sys.platform == "darwin":
-            # macOS: Get total RAM and current memory usage
-            # Using sysctl for total memory
-            total_result = subprocess.run(
+            import subprocess
+
+            # macOS fallback: use total memory * 0.5 as conservative estimate
+            result = subprocess.run(
                 ["sysctl", "-n", "hw.memsize"],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
-            total_bytes = int(total_result.stdout.strip())
+            total_bytes = int(result.stdout.strip())
             total_gb = total_bytes / (1024**3)
-
-            # Get swap usage - if swap is being used, we're already tight on memory
-            swap_result = subprocess.run(
-                ["sysctl", "-n", "vm.swapusage"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            # Output like: "total = 2048.00M  used = 512.00M  free = 1536.00M"
-            swap_used_gb = 0.0
-            if "used" in swap_result.stdout:
-                import re
-
-                match = re.search(r"used\s*=\s*([\d.]+)([MG])", swap_result.stdout)
-                if match:
-                    value = float(match.group(1))
-                    unit = match.group(2)
-                    swap_used_gb = value / 1024 if unit == "M" else value
-
-            # Get vm_stat for current memory state
-            vm_result = subprocess.run(
-                ["vm_stat"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            lines = vm_result.stdout.strip().split("\n")
-            page_size = 16384  # Default for Apple Silicon
-
-            if "page size of" in lines[0]:
-                import re
-
-                match = re.search(r"page size of (\d+) bytes", lines[0])
-                if match:
-                    page_size = int(match.group(1))
-
-            # Parse memory stats
-            stats: dict[str, int] = {}
-            for line in lines[1:]:
-                if ":" in line:
-                    key, value = line.split(":", 1)
-                    try:
-                        stats[key.strip()] = int(value.strip().rstrip("."))
-                    except ValueError:
-                        pass
-
-            # Calculate used memory (wired + active + compressed)
-            wired = stats.get("Pages wired down", 0) * page_size
-            active = stats.get("Pages active", 0) * page_size
-            compressed = stats.get("Pages occupied by compressor", 0) * page_size
-            used_gb = (wired + active + compressed) / (1024**3)
-
-            # Available = Total - Used - Buffer for system (2GB)
-            # Penalize if swap is being used (indicates memory pressure)
-            # But don't penalize too harshly - some swap is normal
-            swap_penalty = min(swap_used_gb, 4.0)  # Cap penalty at 4GB
-            available_gb = total_gb - used_gb - 2.0 - swap_penalty
-            available_gb = max(0.0, available_gb)
-
-            logger.info(
-                f"Memory: {total_gb:.0f}GB total, {used_gb:.1f}GB used, "
-                f"{swap_used_gb:.1f}GB swap, {available_gb:.1f}GB available for models"
-            )
-            return available_gb
-
+            return total_gb * 0.5  # Conservative: assume 50% available
         else:
-            # Linux/other: try /proc/meminfo
+            # Linux: try /proc/meminfo
             with open("/proc/meminfo") as f:
                 for line in f:
                     if line.startswith("MemAvailable:"):
-                        # Value is in kB
                         kb = int(line.split()[1])
                         return kb / (1024**2)
-            return 8.0  # Fallback
 
     except Exception as e:
         logger.warning(f"Failed to get free memory: {e}")
-        return 8.0  # Conservative fallback
+
+    return 8.0  # Conservative fallback
 
 
 def get_auto_whisper_model() -> str:
