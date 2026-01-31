@@ -265,6 +265,49 @@ def get_device() -> DeviceType:
 # =============================================================================
 
 
+def get_gpu_name() -> str | None:
+    """Get the GPU name/model.
+
+    Returns:
+        GPU name string (e.g., "NVIDIA GeForce RTX 4090", "Apple M2 Max")
+        or None if no GPU is available.
+    """
+    if has_cuda():
+        try:
+            import torch
+
+            return torch.cuda.get_device_name(0)
+        except Exception:
+            return None
+    elif is_apple_silicon():
+        try:
+            import subprocess
+
+            # Get chip name from system_profiler
+            result = subprocess.run(
+                ["sysctl", "-n", "machdep.cpu.brand_string"],
+                capture_output=True,
+                text=True,
+            )
+            cpu_brand = result.stdout.strip()
+            # Extract Apple chip name if present
+            if "Apple" in cpu_brand:
+                return cpu_brand
+            # Fallback: try to get from SPHardwareDataType
+            result = subprocess.run(
+                ["system_profiler", "SPHardwareDataType"],
+                capture_output=True,
+                text=True,
+            )
+            for line in result.stdout.split("\n"):
+                if "Chip:" in line:
+                    return line.split(":")[-1].strip()
+            return "Apple Silicon"
+        except Exception:
+            return "Apple Silicon"
+    return None
+
+
 @lru_cache(maxsize=1)
 def get_available_vram_gb() -> float:
     """Get available GPU memory in GB.
@@ -551,6 +594,7 @@ def get_vram_summary() -> dict:
 
     return {
         "device": str(device),
+        "gpu_name": get_gpu_name(),
         "vram_gb": round(vram, 1),
         "free_memory_gb": round(free_mem, 1),
         "auto_whisper_model": get_auto_whisper_model(),
