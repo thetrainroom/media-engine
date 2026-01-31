@@ -3,12 +3,17 @@
 import pytest
 
 from polybos_engine.extractors.faces import extract_faces
+from polybos_engine.extractors.frame_buffer import decode_frames
 
 
 @pytest.mark.slow
 def test_extract_faces(test_video_path):
     """Test face detection."""
-    faces = extract_faces(test_video_path, sample_fps=0.5)
+    # Decode frames first (new API requires frame_buffer)
+    timestamps = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+    frame_buffer = decode_frames(test_video_path, timestamps=timestamps)
+
+    faces = extract_faces(test_video_path, frame_buffer=frame_buffer)
 
     # Count and unique_estimate should be non-negative
     assert faces.count >= 0
@@ -25,7 +30,10 @@ def test_extract_faces(test_video_path):
 @pytest.mark.slow
 def test_faces_with_min_size(test_video_path):
     """Test face detection with minimum size filter."""
-    faces = extract_faces(test_video_path, sample_fps=0.5, min_face_size=100)
+    timestamps = [0.5, 1.0, 1.5, 2.0, 2.5, 3.0]
+    frame_buffer = decode_frames(test_video_path, timestamps=timestamps)
+
+    faces = extract_faces(test_video_path, frame_buffer=frame_buffer, min_face_size=100)
 
     # All detected faces should be at least 100px
     for detection in faces.detections:
@@ -34,7 +42,5 @@ def test_faces_with_min_size(test_video_path):
 
 def test_faces_file_not_found():
     """Test that decode_frames raises FileNotFoundError for non-existent files."""
-    from polybos_engine.extractors.frame_buffer import decode_frames
-
     with pytest.raises(FileNotFoundError):
         decode_frames("/nonexistent/video.mp4", timestamps=[1.0])

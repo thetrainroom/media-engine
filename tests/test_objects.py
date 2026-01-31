@@ -2,13 +2,18 @@
 
 import pytest
 
+from polybos_engine.extractors.frame_buffer import decode_frames
 from polybos_engine.extractors.objects import extract_objects
 
 
 @pytest.mark.slow
 def test_extract_objects(test_video_path):
     """Test object detection."""
-    objects = extract_objects(test_video_path, sample_fps=0.5)
+    # Decode frames first (new API requires frame_buffer)
+    timestamps = [0.5, 1.0, 1.5, 2.0]
+    frame_buffer = decode_frames(test_video_path, timestamps=timestamps)
+
+    objects = extract_objects(test_video_path, frame_buffer=frame_buffer)
 
     # Should have summary dict
     assert isinstance(objects.summary, dict)
@@ -25,10 +30,13 @@ def test_extract_objects(test_video_path):
 @pytest.mark.slow
 def test_objects_summary_matches_detections(test_video_path):
     """Test that summary counts match detections."""
-    objects = extract_objects(test_video_path, sample_fps=0.5)
+    timestamps = [0.5, 1.0, 1.5, 2.0]
+    frame_buffer = decode_frames(test_video_path, timestamps=timestamps)
+
+    objects = extract_objects(test_video_path, frame_buffer=frame_buffer)
 
     # Count detections by label
-    label_counts = {}
+    label_counts: dict[str, int] = {}
     for d in objects.detections:
         label_counts[d.label] = label_counts.get(d.label, 0) + 1
 
@@ -38,7 +46,5 @@ def test_objects_summary_matches_detections(test_video_path):
 
 def test_objects_file_not_found():
     """Test that decode_frames raises FileNotFoundError for non-existent files."""
-    from polybos_engine.extractors.frame_buffer import decode_frames
-
     with pytest.raises(FileNotFoundError):
         decode_frames("/nonexistent/video.mp4", timestamps=[1.0])

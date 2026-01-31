@@ -8,7 +8,7 @@ import logging
 from typing import Optional
 
 import httpx
-from langdetect import detect, LangDetectException
+from langdetect import LangDetectException, detect
 
 logger = logging.getLogger(__name__)
 

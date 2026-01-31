@@ -2,13 +2,18 @@
 
 import pytest
 
+from polybos_engine.extractors.frame_buffer import decode_frames
 from polybos_engine.extractors.ocr import extract_ocr
 
 
 @pytest.mark.slow
 def test_extract_ocr(test_video_path):
     """Test OCR extraction."""
-    result = extract_ocr(test_video_path, sample_fps=0.2)
+    # Decode frames first (new API requires frame_buffer)
+    timestamps = [0.5, 1.0, 1.5, 2.0]
+    frame_buffer = decode_frames(test_video_path, timestamps=timestamps)
+
+    result = extract_ocr(test_video_path, frame_buffer=frame_buffer)
 
     # Detections list should exist (may be empty if no text)
     assert isinstance(result.detections, list)
@@ -24,7 +29,5 @@ def test_extract_ocr(test_video_path):
 
 def test_ocr_file_not_found():
     """Test that decode_frames raises FileNotFoundError for non-existent files."""
-    from polybos_engine.extractors.frame_buffer import decode_frames
-
     with pytest.raises(FileNotFoundError):
         decode_frames("/nonexistent/video.mp4", timestamps=[1.0])
