@@ -7,7 +7,7 @@ import logging
 import sys
 import time
 
-from polybos_engine.extractors import (
+from media_engine.extractors import (
     analyze_motion,
     decode_frames,
     extract_faces,
@@ -76,11 +76,7 @@ def main():
             print()
             for i, face in enumerate(result.detections[:20], 1):  # Show first 20
                 bbox = face.bbox
-                print(
-                    f"  {i}: t={face.timestamp:.2f}s "
-                    f"box=({bbox.x},{bbox.y},{bbox.width}x{bbox.height}) "
-                    f"conf={face.confidence:.2f}"
-                )
+                print(f"  {i}: t={face.timestamp:.2f}s " f"box=({bbox.x},{bbox.y},{bbox.width}x{bbox.height}) " f"conf={face.confidence:.2f}")
             if result.count > 20:
                 print(f"  ... and {result.count - 20} more")
             print()

@@ -2,7 +2,7 @@
 
 import pytest
 
-from polybos_engine.extractors.metadata import extract_metadata
+from media_engine.extractors.metadata import extract_metadata
 
 
 def test_extract_metadata(test_video_path):

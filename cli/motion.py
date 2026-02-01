@@ -7,7 +7,7 @@ import logging
 import sys
 import time
 
-from polybos_engine.extractors import analyze_motion
+from media_engine.extractors import analyze_motion
 
 
 def main():
@@ -62,10 +62,7 @@ def main():
             print(f"Segments: {len(result.segments)}")
             print()
             for i, seg in enumerate(result.segments[:10], 1):  # Show first 10
-                print(
-                    f"  {i}: {seg.start:.2f}s-{seg.end:.2f}s "
-                    f"{seg.motion_type.value} (intensity: {seg.intensity:.2f})"
-                )
+                print(f"  {i}: {seg.start:.2f}s-{seg.end:.2f}s " f"{seg.motion_type.value} (intensity: {seg.intensity:.2f})")
             if len(result.segments) > 10:
                 print(f"  ... and {len(result.segments) - 10} more")
             print()

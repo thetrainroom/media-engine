@@ -333,11 +333,7 @@ def check_health(engine_url: str) -> bool:
 
 def get_enabled_extractors(config: dict) -> list[str]:
     """Get list of enabled extractor names from config."""
-    return [
-        k.replace("enable_", "")
-        for k, v in config.items()
-        if k.startswith("enable_") and v
-    ]
+    return [k.replace("enable_", "") for k, v in config.items() if k.startswith("enable_") and v]
 
 
 def run_stress_test(
@@ -418,9 +414,7 @@ def run_stress_test(
             if thorough:
                 batch_files, config = test_queue[iteration - 1]
             elif randomize:
-                batch_files = random.sample(
-                    videos, min(files_per_batch, len(videos))
-                )
+                batch_files = random.sample(videos, min(files_per_batch, len(videos)))
                 config = random.choice(configs)
             else:
                 batch_files = videos[:files_per_batch]
@@ -430,8 +424,7 @@ def run_stress_test(
             file_names = [Path(f).name for f in batch_files]
 
             print(
-                f"[{iteration:4d}] {', '.join(extractors):40s} | "
-                f"files: {', '.join(file_names)[:30]:30s}",
+                f"[{iteration:4d}] {', '.join(extractors):40s} | " f"files: {', '.join(file_names)[:30]:30s}",
                 end=" | ",
                 flush=True,
             )
@@ -463,12 +456,7 @@ def run_stress_test(
                 else:
                     status = "✓"
 
-                print(
-                    f"{batch_duration:5.1f}s | "
-                    f"mem: {test_result.memory_mb:4d}MB | "
-                    f"peak: {test_result.peak_memory_mb:4d}MB | "
-                    f"{status}"
-                )
+                print(f"{batch_duration:5.1f}s | " f"mem: {test_result.memory_mb:4d}MB | " f"peak: {test_result.peak_memory_mb:4d}MB | " f"{status}")
             else:
                 test_result = TestResult(
                     iteration=iteration,
@@ -583,27 +571,13 @@ def print_summary(results: list[TestResult], total_duration: float):
 
 def main():
     parser = argparse.ArgumentParser(description="Stress test for Polybos Media Engine")
-    parser.add_argument(
-        "--iterations", "-n", type=int, help="Number of iterations to run"
-    )
-    parser.add_argument(
-        "--duration", "-d", type=int, help="Max duration in seconds"
-    )
-    parser.add_argument(
-        "--video", "-v", type=str, help="Specific video file to use"
-    )
-    parser.add_argument(
-        "--heavy", action="store_true", help="Include heavy extractors (transcript)"
-    )
-    parser.add_argument(
-        "--files", "-f", type=int, default=1, help="Files per batch (default: 1)"
-    )
-    parser.add_argument(
-        "--url", type=str, default=DEFAULT_ENGINE_URL, help="Engine URL"
-    )
-    parser.add_argument(
-        "--sequential", action="store_true", help="Run configs sequentially (not random)"
-    )
+    parser.add_argument("--iterations", "-n", type=int, help="Number of iterations to run")
+    parser.add_argument("--duration", "-d", type=int, help="Max duration in seconds")
+    parser.add_argument("--video", "-v", type=str, help="Specific video file to use")
+    parser.add_argument("--heavy", action="store_true", help="Include heavy extractors (transcript)")
+    parser.add_argument("--files", "-f", type=int, default=1, help="Files per batch (default: 1)")
+    parser.add_argument("--url", type=str, default=DEFAULT_ENGINE_URL, help="Engine URL")
+    parser.add_argument("--sequential", action="store_true", help="Run configs sequentially (not random)")
     parser.add_argument(
         "--thorough",
         "-t",
@@ -617,7 +591,7 @@ def main():
     # Check engine is running
     if not check_health(engine_url):
         print(f"Error: Engine not running at {engine_url}")
-        print("Start the engine with: uvicorn polybos_engine.main:app --port 8001")
+        print("Start the engine with: uvicorn media_engine.main:app --port 8001")
         sys.exit(1)
 
     # Find videos

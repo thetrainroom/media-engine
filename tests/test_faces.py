@@ -2,8 +2,8 @@
 
 import pytest
 
-from polybos_engine.extractors.faces import extract_faces
-from polybos_engine.extractors.frame_buffer import decode_frames
+from media_engine.extractors.faces import extract_faces
+from media_engine.extractors.frame_buffer import decode_frames
 
 
 @pytest.mark.slow

@@ -63,3 +63,6 @@ Thumbs.db
 *.pt
 *.onnx
 *.safetensors
+
+# Generated version file (hatch-vcs)
+media_engine/_version.py

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Polybos Media Engine is an open-source (MIT), AI-powered video extraction API designed for small TV stations and content creators. It provides a "file in → JSON out" API that extracts metadata, transcripts, faces, scenes, objects, CLIP embeddings, OCR text, and device/shot type from video files.
+Media Engine is an open-source (MIT), AI-powered video extraction API designed for small TV stations and content creators. It provides a "file in → JSON out" API that extracts metadata, transcripts, faces, scenes, objects, CLIP embeddings, OCR text, and device/shot type from video files.
 
 **Business model**: Open-source backend with a commercial closed-source frontend (SvelteKit).
 
@@ -25,12 +25,12 @@ pip install -e ".[cpu]"     # CPU fallback
 pip install -e ".[dev]"     # Development tools
 
 # Run development server
-uvicorn polybos_engine.main:app --reload --port 8001
+uvicorn media_engine.main:app --reload --port 8001
 
 # Linting and type checking
-ruff check polybos_engine/              # Lint
-ruff check polybos_engine/ --fix        # Lint and auto-fix
-pyright polybos_engine/                 # Type check (strict)
+ruff check media_engine/              # Lint
+ruff check media_engine/ --fix        # Lint and auto-fix
+pyright media_engine/                 # Type check (strict)
 
 # Run tests (set TEST_VIDEO_PATH first)
 export TEST_VIDEO_PATH=/path/to/test.mp4
@@ -55,7 +55,7 @@ The demo frontend requires two servers:
 ./demo/run.sh start
 
 # Or manually:
-python3.12 -m uvicorn polybos_engine.main:app --port 8001
+python3.12 -m uvicorn media_engine.main:app --port 8001
 python3.12 demo/server.py
 ```
 
@@ -97,7 +97,7 @@ curl -X POST http://localhost:8001/batch \
 ### File Structure
 
 ```
-polybos_engine/
+media_engine/
 ├── __init__.py          # Version
 ├── main.py              # FastAPI app with /batch, /extract, /health
 ├── config.py            # Settings and platform detection
@@ -288,3 +288,38 @@ The stress test validates:
 - Metadata has required fields (duration, resolution, fps)
 - No memory leaks (compares first/second half memory averages)
 - Files without audio don't trigger transcript warnings
+
+## CI/CD
+
+### Pull Requests
+
+GitHub Actions automatically runs on every PR:
+- **Lint**: ruff check, ruff format, pyright
+- **Test**: pytest (unit tests without video files)
+- **Build**: Verify package builds correctly
+
+### Releasing to PyPI
+
+Releases are triggered by git tags. The version is automatically derived from the tag using `hatch-vcs`.
+
+```bash
+# Create and push a tag
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+This will:
+1. Run lint checks
+2. Build the package with version `0.2.0`
+3. Publish to PyPI (requires trusted publishing configured)
+4. Create a GitHub release with auto-generated notes
+
+### PyPI Trusted Publishing Setup
+
+Before the first release, configure trusted publishing at PyPI:
+1. Go to https://pypi.org/manage/project/media-engine/settings/publishing/
+2. Add a new publisher:
+   - Owner: `thetrainroom`
+   - Repository: `media-engine`
+   - Workflow: `release.yml`
+   - Environment: `pypi`

@@ -2,8 +2,8 @@
 
 import pytest
 
-from polybos_engine.extractors.frame_buffer import decode_frames
-from polybos_engine.extractors.objects import extract_objects
+from media_engine.extractors.frame_buffer import decode_frames
+from media_engine.extractors.objects import extract_objects
 
 
 @pytest.mark.slow

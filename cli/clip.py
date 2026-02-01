@@ -7,7 +7,7 @@ import logging
 import sys
 import time
 
-from polybos_engine.extractors import (
+from media_engine.extractors import (
     analyze_motion,
     decode_frames,
     extract_clip,

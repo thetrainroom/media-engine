@@ -7,7 +7,7 @@ import logging
 import sys
 import time
 
-from polybos_engine.extractors import extract_telemetry
+from media_engine.extractors import extract_telemetry
 
 
 def main():

@@ -4,12 +4,10 @@ import os
 
 import pytest
 
-from polybos_engine.extractors.transcribe import extract_audio, extract_transcript
+from media_engine.extractors.transcribe import extract_audio, extract_transcript
 
 # Use a video with speech for transcription tests
-SPEECH_VIDEO = os.path.join(
-    os.path.dirname(__file__), "..", "test_data", "video", "sample_with_speech.MP4"
-)
+SPEECH_VIDEO = os.path.join(os.path.dirname(__file__), "..", "test_data", "video", "sample_with_speech.MP4")
 
 
 @pytest.fixture
