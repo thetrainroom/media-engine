@@ -1,6 +1,24 @@
-# Polybos Media Engine
+# Media Engine
 
 AI-powered video metadata extraction API for small TV stations and content creators. Provides a "file in → JSON out" API that extracts metadata, transcripts, faces, scenes, objects, CLIP embeddings, OCR text, and camera motion from video files.
+
+## Installation
+
+```bash
+# Apple Silicon Mac
+pip install media-engine[mlx]
+
+# NVIDIA GPU
+pip install media-engine[cuda]
+
+# CPU only
+pip install media-engine[cpu]
+
+# Start the server
+meng-server
+```
+
+**Requirements**: Python 3.12+, ffmpeg
 
 ## Features
 
@@ -20,14 +38,14 @@ AI-powered video metadata extraction API for small TV stations and content creat
 
 ```bash
 # Clone and run
-git clone https://github.com/your-org/polybos-media-engine.git
-cd polybos-media-engine
+git clone https://github.com/thetrainroom/media-engine.git
+cd media-engine
 
 # Start the server
 docker compose up -d
 
 # Test
-curl http://localhost:8000/health
+curl http://localhost:8001/health
 ```
 
 Mount your media folder:
@@ -42,8 +60,8 @@ docker compose --profile gpu up -d
 
 Or build manually:
 ```bash
-docker build -f Dockerfile.cuda -t polybos-gpu .
-docker run -p 8000:8000 --gpus all -v /path/to/media:/media polybos-gpu
+docker build -f Dockerfile.cuda -t media-engine-gpu .
+docker run -p 8001:8001 --gpus all -v /path/to/media:/media media-engine-gpu
 ```
 
 ### Apple Silicon (Recommended: Native)
@@ -51,8 +69,8 @@ docker run -p 8000:8000 --gpus all -v /path/to/media:/media polybos-gpu
 Docker on macOS runs in a Linux VM without Metal/MPS access. For GPU acceleration on Apple Silicon, run natively:
 
 ```bash
-pip install -e ".[mlx]"
-uvicorn polybos_engine.main:app --port 8000
+pip install media-engine[mlx]
+meng-server
 ```
 
 A `Dockerfile.mlx` is provided for consistency, but will use CPU in Docker:
@@ -60,7 +78,7 @@ A `Dockerfile.mlx` is provided for consistency, but will use CPU in Docker:
 docker compose --profile mlx up -d
 ```
 
-### Local Installation
+### Development Installation
 
 ```bash
 # Mac Apple Silicon
@@ -72,18 +90,16 @@ pip install -e ".[cuda]"
 # CPU only
 pip install -e ".[cpu]"
 
-# Run server
-uvicorn polybos_engine.main:app --reload --port 8000
+# Run server with hot reload
+uvicorn media_engine.main:app --reload --port 8001
 ```
-
-**Requirements**: Python 3.12+, ffmpeg
 
 ## API Usage
 
 ### Extract metadata from a video
 
 ```bash
-curl -X POST http://localhost:8000/extract \
+curl -X POST http://localhost:8001/extract \
   -H "Content-Type: application/json" \
   -d '{
     "file": "/media/video.mp4",
@@ -122,12 +138,12 @@ The metadata extractor automatically detects camera/device type:
 | **Insta360** | X3, X4, ONE RS, GO 3 | 360 video detection |
 | **FFmpeg** | OBS, Handbrake, etc. | Encoder detection |
 
-Adding new manufacturers is easy - create a module in `polybos_engine/extractors/metadata/`.
+Adding new manufacturers is easy - create a module in `media_engine/extractors/metadata/`.
 
 ## Architecture
 
 ```
-polybos_engine/
+media_engine/
 ├── main.py              # FastAPI app
 ├── config.py            # Settings and platform detection
 ├── schemas.py           # Pydantic models
@@ -171,10 +187,10 @@ Set `hf_token` to enable speaker diarization (requires accepting license at [pya
 pip install -e ".[dev]"
 
 # Lint
-ruff check polybos_engine/
+ruff check media_engine/
 
 # Type check
-pyright polybos_engine/
+pyright media_engine/
 
 # Test
 export TEST_VIDEO_PATH=/path/to/test.mp4
@@ -185,7 +201,7 @@ pytest tests/
 
 Contributions welcome! To add support for a new camera manufacturer:
 
-1. Create `polybos_engine/extractors/metadata/yourmanufacturer.py`
+1. Create `media_engine/extractors/metadata/yourmanufacturer.py`
 2. Implement `detect()` and `extract()` methods
 3. Register with `register_extractor("name", YourExtractor())`
 4. Import in `metadata/__init__.py`

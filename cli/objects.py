@@ -7,7 +7,7 @@ import logging
 import sys
 import time
 
-from polybos_engine.extractors import (
+from media_engine.extractors import (
     analyze_motion,
     decode_frames,
     extract_objects,
@@ -78,9 +78,7 @@ def main():
             print(f"Detections: {len(result.detections)}")
             print()
             print("Summary:")
-            for label, count in sorted(
-                result.summary.items(), key=lambda x: x[1], reverse=True
-            )[:15]:
+            for label, count in sorted(result.summary.items(), key=lambda x: x[1], reverse=True)[:15]:
                 print(f"  {label}: {count}")
             if len(result.summary) > 15:
                 print(f"  ... and {len(result.summary) - 15} more types")

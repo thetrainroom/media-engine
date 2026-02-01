@@ -2,7 +2,7 @@
 
 import pytest
 
-from polybos_engine.extractors.scenes import extract_scenes
+from media_engine.extractors.scenes import extract_scenes
 
 
 def test_extract_scenes(test_video_path):

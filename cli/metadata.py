@@ -7,16 +7,14 @@ import logging
 import sys
 import time
 
-from polybos_engine.extractors import extract_metadata
+from media_engine.extractors import extract_metadata
 
 
 def main():
     parser = argparse.ArgumentParser(description="Extract metadata from video file")
     parser.add_argument("file", help="Path to video file")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
-    parser.add_argument(
-        "--json", action="store_true", help="Output as JSON (default: human-readable)"
-    )
+    parser.add_argument("--json", action="store_true", help="Output as JSON (default: human-readable)")
 
     args = parser.parse_args()
 

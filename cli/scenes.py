@@ -7,7 +7,7 @@ import logging
 import sys
 import time
 
-from polybos_engine.extractors import extract_scenes
+from media_engine.extractors import extract_scenes
 
 
 def main():

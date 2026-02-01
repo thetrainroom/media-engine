@@ -18,8 +18,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from polybos_engine import main
-from polybos_engine.main import app
+from media_engine import main
+from media_engine.main import app
 
 # Get project root (parent of tests/)
 _PROJECT_ROOT = Path(__file__).parent.parent
@@ -129,9 +129,7 @@ def test_videos():
     """Fixture providing test videos."""
     videos = get_test_videos(3)
     if not videos:
-        pytest.skip(
-            "No test videos found. Set TEST_VIDEO_PATH or mount /Volumes/Backup"
-        )
+        pytest.skip("No test videos found. Set TEST_VIDEO_PATH or mount /Volumes/Backup")
     return videos
 
 
@@ -638,17 +636,13 @@ class TestBatchMultipleExtractors:
             }
 
             response = api_client.post("/batch", json=request)
-            assert (
-                response.status_code == 200
-            ), f"Batch {i+1}/{num_runs} creation failed"
+            assert response.status_code == 200, f"Batch {i+1}/{num_runs} creation failed"
 
             data = response.json()
             batch_id = data["batch_id"]
 
             status = wait_for_batch(api_client, batch_id, timeout=120)
-            assert (
-                status["status"] == "completed"
-            ), f"Batch {i+1}/{num_runs} failed: {status}"
+            assert status["status"] == "completed", f"Batch {i+1}/{num_runs} failed: {status}"
 
             # Track memory and timing
             memory_history.append(
@@ -664,9 +658,7 @@ class TestBatchMultipleExtractors:
             # Print timing report
             print(f"\nBatch {i+1}/{num_runs}:")
             print(f"  Elapsed: {status.get('elapsed_seconds')}s")
-            print(
-                f"  Memory: {status.get('memory_mb')}MB (peak: {status.get('peak_memory_mb')}MB)"
-            )
+            print(f"  Memory: {status.get('memory_mb')}MB (peak: {status.get('peak_memory_mb')}MB)")
             for timing in status.get("extractor_timings", []):
                 print(f"  {timing['extractor']}: {timing['duration_seconds']}s")
 
@@ -677,9 +669,7 @@ class TestBatchMultipleExtractors:
         if memory_history[0]["peak_memory_mb"] and memory_history[-1]["peak_memory_mb"]:
             first_peak = memory_history[0]["peak_memory_mb"]
             last_peak = memory_history[-1]["peak_memory_mb"]
-            assert (
-                last_peak < first_peak * 1.5
-            ), f"Memory grew too much: {first_peak}MB -> {last_peak}MB"
+            assert last_peak < first_peak * 1.5, f"Memory grew too much: {first_peak}MB -> {last_peak}MB"
 
     @pytest.mark.slow
     def test_batch_repeated_runs_stress(self, api_client, test_videos):
@@ -726,17 +716,13 @@ class TestBatchMultipleExtractors:
                 }
 
             response = api_client.post("/batch", json=request)
-            assert (
-                response.status_code == 200
-            ), f"Batch {i+1}/{num_runs} creation failed"
+            assert response.status_code == 200, f"Batch {i+1}/{num_runs} creation failed"
 
             data = response.json()
             batch_id = data["batch_id"]
 
             status = wait_for_batch(api_client, batch_id, timeout=300)
-            assert (
-                status["status"] == "completed"
-            ), f"Batch {i+1}/{num_runs} failed: {status}"
+            assert status["status"] == "completed", f"Batch {i+1}/{num_runs} failed: {status}"
 
             # Track memory and timing
             memory_history.append(
@@ -751,9 +737,7 @@ class TestBatchMultipleExtractors:
             # Print timing report
             print(f"\nBatch {i+1}/{num_runs}:")
             print(f"  Elapsed: {status.get('elapsed_seconds')}s")
-            print(
-                f"  Memory: {status.get('memory_mb')}MB (peak: {status.get('peak_memory_mb')}MB)"
-            )
+            print(f"  Memory: {status.get('memory_mb')}MB (peak: {status.get('peak_memory_mb')}MB)")
             for timing in status.get("extractor_timings", []):
                 print(f"  {timing['extractor']}: {timing['duration_seconds']}s")
 

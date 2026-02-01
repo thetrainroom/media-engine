@@ -7,7 +7,7 @@ import logging
 import sys
 import time
 
-from polybos_engine.extractors import (
+from media_engine.extractors import (
     analyze_motion,
     decode_frames,
     extract_ocr,
@@ -78,7 +78,7 @@ def main():
             print(f"Text regions detected: {len(result.detections)}")
             print()
             for i, det in enumerate(result.detections[:20], 1):  # Show first 20
-                print(f"  {i}: t={det.timestamp:.2f}s \"{det.text}\" (conf={det.confidence:.2f})")
+                print(f'  {i}: t={det.timestamp:.2f}s "{det.text}" (conf={det.confidence:.2f})')
             if len(result.detections) > 20:
                 print(f"  ... and {len(result.detections) - 20} more")
             print()

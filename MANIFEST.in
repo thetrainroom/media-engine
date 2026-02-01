@@ -1,0 +1,6 @@
+include LICENSE
+include README.md
+exclude *.pt
+recursive-exclude * *.pt
+prune test_data
+prune demo

@@ -1,10 +1,22 @@
 [project]
-name = "polybos-media-engine"
-version = "0.1.0"
-description = "AI-powered video extraction API"
+name = "media-engine"
+dynamic = ["version"]
+description = "AI-powered video extraction API for metadata, transcripts, faces, scenes, objects, and more"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.12"
+keywords = ["video", "extraction", "metadata", "transcription", "ai", "ml", "faces", "scenes", "ocr"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Framework :: FastAPI",
+]
 dependencies = [
     "fastapi>=0.109.0",
     "uvicorn>=0.27.0",
@@ -20,6 +32,22 @@ dependencies = [
     "langdetect>=1.0.9",
     "httpx>=0.27.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/thetrainroom/media-engine"
+Issues = "https://github.com/thetrainroom/media-engine/issues"
+
+[project.scripts]
+meng-server = "media_engine.cli:run_server"
+meng-metadata = "cli.metadata:main"
+meng-transcript = "cli.transcript:main"
+meng-faces = "cli.faces:main"
+meng-scenes = "cli.scenes:main"
+meng-objects = "cli.objects:main"
+meng-ocr = "cli.ocr:main"
+meng-clip = "cli.clip:main"
+meng-motion = "cli.motion:main"
+meng-telemetry = "cli.telemetry:main"
 
 [project.optional-dependencies]
 cuda = [
@@ -53,21 +81,39 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "httpx>=0.27.0",
     "ruff>=0.3.0",
+    "pyright>=1.1.0",
+    "black>=24.0.0",
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "media_engine/_version.py"
+
 [tool.hatch.build.targets.wheel]
-packages = ["polybos_engine"]
+packages = ["media_engine", "cli"]
+
+[tool.black]
+line-length = 180
+target-version = ["py312"]
 
 [tool.ruff]
 target-version = "py312"
-line-length = 320  # Effectively disabled, Black handles line length
+line-length = 320  # High limit so ruff doesn't conflict with black
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+# _version.py is generated at build time by hatch-vcs
+ignore = ["media_engine/_version.py"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

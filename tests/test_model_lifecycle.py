@@ -65,9 +65,7 @@ def test_images():
     """Fixture providing test images."""
     images = get_test_images(10)
     if not images:
-        pytest.skip(
-            "No test images found. Set TEST_IMAGES_DIR or mount /Volumes/Backup"
-        )
+        pytest.skip("No test images found. Set TEST_IMAGES_DIR or mount /Volumes/Backup")
     return images
 
 
@@ -76,7 +74,7 @@ class TestYOLOModelLifecycle:
 
     def test_yolo_load_unload_cycle(self, test_images):
         """Test YOLO can be loaded, used, and unloaded multiple times."""
-        from polybos_engine.extractors.objects import _get_yolo_model, unload_yolo_model
+        from media_engine.extractors.objects import _get_yolo_model, unload_yolo_model
 
         for _ in range(3):
             # Load model
@@ -94,7 +92,7 @@ class TestYOLOModelLifecycle:
 
     def test_yolo_model_switching(self, test_images):
         """Test switching between YOLO models."""
-        from polybos_engine.extractors.objects import _get_yolo_model, unload_yolo_model
+        from media_engine.extractors.objects import _get_yolo_model, unload_yolo_model
 
         # Load nano model
         model1 = _get_yolo_model("yolov8n.pt")
@@ -117,7 +115,7 @@ class TestCLIPModelLifecycle:
 
     def test_clip_load_unload_cycle(self, test_images):
         """Test CLIP can be loaded, used, and unloaded multiple times."""
-        from polybos_engine.extractors.clip import get_clip_backend, unload_clip_model
+        from media_engine.extractors.clip import get_clip_backend, unload_clip_model
 
         for _ in range(3):
             # Load model
@@ -136,7 +134,7 @@ class TestCLIPModelLifecycle:
 
     def test_clip_embedding_consistency(self, test_images):
         """Test CLIP produces consistent embeddings across load cycles."""
-        from polybos_engine.extractors.clip import get_clip_backend, unload_clip_model
+        from media_engine.extractors.clip import get_clip_backend, unload_clip_model
 
         # First load - get embeddings
         backend1 = get_clip_backend()
@@ -151,9 +149,7 @@ class TestCLIPModelLifecycle:
 
         # Embeddings should be very similar (not exact due to potential float differences)
         similarity = sum(a * b for a, b in zip(embedding1, embedding2))
-        assert (
-            similarity > 0.99
-        ), f"Embeddings should be consistent, got similarity {similarity}"
+        assert similarity > 0.99, f"Embeddings should be consistent, got similarity {similarity}"
 
 
 class TestOCRModelLifecycle:
@@ -161,7 +157,7 @@ class TestOCRModelLifecycle:
 
     def test_ocr_load_unload_cycle(self, test_images):
         """Test OCR can be loaded, used, and unloaded multiple times."""
-        from polybos_engine.extractors.ocr import _get_ocr_reader, unload_ocr_model
+        from media_engine.extractors.ocr import _get_ocr_reader, unload_ocr_model
 
         for _ in range(3):
             # Load model
@@ -184,7 +180,7 @@ class TestFaceModelLifecycle:
 
     def test_face_unload_multiple_times(self):
         """Test face model unload can be called multiple times safely."""
-        from polybos_engine.extractors.faces import unload_face_model
+        from media_engine.extractors.faces import unload_face_model
 
         # Should not error even without loading
         for _ in range(5):
@@ -197,9 +193,9 @@ class TestMultiModelBatchCycle:
 
     def test_sequential_model_loading(self, test_images):
         """Test loading models sequentially like batch processing does."""
-        from polybos_engine.extractors.clip import get_clip_backend, unload_clip_model
-        from polybos_engine.extractors.objects import _get_yolo_model, unload_yolo_model
-        from polybos_engine.extractors.ocr import _get_ocr_reader, unload_ocr_model
+        from media_engine.extractors.clip import get_clip_backend, unload_clip_model
+        from media_engine.extractors.objects import _get_yolo_model, unload_yolo_model
+        from media_engine.extractors.ocr import _get_ocr_reader, unload_ocr_model
 
         for _ in range(2):
             # Stage 1: YOLO
@@ -225,9 +221,9 @@ class TestMultiModelBatchCycle:
 
     def test_batch_memory_stability(self, test_images):
         """Test that memory is released between batch cycles."""
-        from polybos_engine.config import get_available_memory_gb
-        from polybos_engine.extractors.clip import get_clip_backend, unload_clip_model
-        from polybos_engine.extractors.objects import _get_yolo_model, unload_yolo_model
+        from media_engine.config import get_available_memory_gb
+        from media_engine.extractors.clip import get_clip_backend, unload_clip_model
+        from media_engine.extractors.objects import _get_yolo_model, unload_yolo_model
 
         # Get baseline memory
         gc.collect()
@@ -258,9 +254,7 @@ class TestMultiModelBatchCycle:
         final_ram, _ = memory_readings[-1]
 
         # Allow 20% variance
-        assert (
-            final_ram > baseline_ram * 0.8
-        ), f"RAM decreased too much: {baseline_ram:.1f}GB -> {final_ram:.1f}GB"
+        assert final_ram > baseline_ram * 0.8, f"RAM decreased too much: {baseline_ram:.1f}GB -> {final_ram:.1f}GB"
 
 
 class TestConcurrentUnloads:
@@ -268,7 +262,7 @@ class TestConcurrentUnloads:
 
     def test_all_unloads_safe(self):
         """Test calling all unload functions in sequence."""
-        from polybos_engine.extractors import (
+        from media_engine.extractors import (
             unload_clip_model,
             unload_face_model,
             unload_ocr_model,
