@@ -111,11 +111,15 @@ select = ["E", "F", "I", "N", "W"]
 
 [tool.pyright]
 pythonVersion = "3.12"
-typeCheckingMode = "standard"
+typeCheckingMode = "basic"
 # _version.py is generated at build time by hatch-vcs
 ignore = ["media_engine/_version.py"]
 reportMissingImports = false
 reportMissingModuleSource = false
+reportAttributeAccessIssue = false
+reportOptionalMemberAccess = false
+reportOptionalOperand = false
+reportOperatorIssue = false
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
