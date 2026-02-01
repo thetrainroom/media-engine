@@ -33,22 +33,38 @@ def _run_model_checks(check_id: str) -> None:
     _model_check_status[check_id] = "running"
 
     try:
-        # Test Qwen 2B
-        logger.info("Testing Qwen 2B model...")
-        start = time.time()
+        # Test Qwen 2B (requires qwen extras: pip install media-engine[qwen])
         try:
-            _get_qwen_model("Qwen/Qwen2-VL-2B-Instruct")
-            results["qwen_2b"] = {
-                "canLoad": True,
-                "error": None,
-                "loadTimeSeconds": round(time.time() - start, 1),
-            }
-            unload_qwen_model()
+            import importlib.util
+
+            if importlib.util.find_spec("transformers") is None:
+                results["qwen_2b"] = {
+                    "canLoad": False,
+                    "error": "transformers not installed. Install with: pip install media-engine[qwen]",
+                    "loadTimeSeconds": 0,
+                }
+            else:
+                logger.info("Testing Qwen 2B model...")
+                start = time.time()
+                try:
+                    _get_qwen_model("Qwen/Qwen2-VL-2B-Instruct")
+                    results["qwen_2b"] = {
+                        "canLoad": True,
+                        "error": None,
+                        "loadTimeSeconds": round(time.time() - start, 1),
+                    }
+                    unload_qwen_model()
+                except Exception as e:
+                    results["qwen_2b"] = {
+                        "canLoad": False,
+                        "error": str(e),
+                        "loadTimeSeconds": round(time.time() - start, 1),
+                    }
         except Exception as e:
             results["qwen_2b"] = {
                 "canLoad": False,
                 "error": str(e),
-                "loadTimeSeconds": round(time.time() - start, 1),
+                "loadTimeSeconds": 0,
             }
 
         # Test Whisper large-v3

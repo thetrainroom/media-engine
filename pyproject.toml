@@ -25,6 +25,8 @@ dependencies = [
     "ffmpeg-python>=0.2.0",
     "scenedetect[opencv]>=0.6.0",
     "deepface>=0.0.79",
+    "tf-keras>=2.16.0",  # Required by deepface with TensorFlow 2.16+
+    "transformers>=4.40.0",  # Required for Qwen VLM
     "paddleocr>=2.7.0",
     "paddlepaddle>=2.5.0",
     "webrtcvad>=2.0.10",
@@ -70,7 +72,6 @@ cpu = [
     "ultralytics>=8.0.0",
 ]
 qwen = [
-    "transformers>=4.40.0",
     "accelerate>=0.30.0",
     "qwen-vl-utils>=0.0.8",
     "torch>=2.0.0",
