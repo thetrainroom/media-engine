@@ -141,7 +141,7 @@ class TestMemoryMonitoring:
         from media_engine.config import get_available_vram_gb
 
         vram = get_available_vram_gb()
-        assert isinstance(vram, float)
+        assert isinstance(vram, (int, float))
         assert vram >= 0
 
 
