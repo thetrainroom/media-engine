@@ -114,6 +114,8 @@ pythonVersion = "3.12"
 typeCheckingMode = "standard"
 # _version.py is generated at build time by hatch-vcs
 ignore = ["media_engine/_version.py"]
+reportMissingImports = false
+reportMissingModuleSource = false
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

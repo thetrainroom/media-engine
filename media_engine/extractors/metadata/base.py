@@ -70,7 +70,6 @@ class SidecarMetadata:
     device: Any | None = None  # DeviceInfo
     gps: GPS | None = None
     gps_track: Any | None = None  # GPSTrack
-    created_at: Any | None = None  # datetime
     color_space: ColorSpace | None = None
     lens: LensInfo | None = None
     created_at: datetime | None = None
