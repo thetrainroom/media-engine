@@ -432,43 +432,43 @@ def get_auto_whisper_model() -> str:
 
 
 def get_auto_qwen_model() -> str:
-    """Select Qwen2-VL model based on available VRAM.
+    """Select Qwen2-VL model based on available free memory.
 
-    | VRAM     | Model          | Size  | Quality |
-    |----------|----------------|-------|---------|
-    | <8GB     | (use YOLO)     | -     | Basic   |
-    | 8-16GB   | Qwen2-VL-2B    | ~5GB  | Good    |
-    | 16GB+    | Qwen2-VL-7B    | ~15GB | Best    |
+    | Free Memory | Model          | Size  | Quality |
+    |-------------|----------------|-------|---------|
+    | <8GB        | (use YOLO)     | -     | Basic   |
+    | 8-16GB      | Qwen2-VL-2B    | ~5GB  | Good    |
+    | 16GB+       | Qwen2-VL-7B    | ~15GB | Best    |
     """
-    vram = get_available_vram_gb()
+    free_mem = get_free_memory_gb()
 
-    if vram >= 16:
+    if free_mem >= 16:
         model = "Qwen/Qwen2-VL-7B-Instruct"
-    elif vram >= 8:
+    elif free_mem >= 8:
         model = "Qwen/Qwen2-VL-2B-Instruct"
     else:
-        # Not enough VRAM for Qwen, should use YOLO instead
+        # Not enough free memory for Qwen, should use YOLO instead
         model = "Qwen/Qwen2-VL-2B-Instruct"
-        logger.warning(f"Low VRAM ({vram:.1f}GB) - consider using YOLO instead of Qwen")
+        logger.warning(f"Low free memory ({free_mem:.1f}GB) - consider using YOLO instead of Qwen")
 
-    logger.info(f"Auto-selected Qwen model: {model} (VRAM: {vram:.1f}GB)")
+    logger.info(f"Auto-selected Qwen model: {model} (free memory: {free_mem:.1f}GB)")
     return model
 
 
 def get_auto_object_detector() -> ObjectDetector:
-    """Select object detector based on available VRAM.
+    """Select object detector based on available free memory.
 
     YOLO is faster and uses less memory.
-    Qwen provides better scene understanding but needs more VRAM.
+    Qwen provides better scene understanding but needs more memory.
     """
-    vram = get_available_vram_gb()
+    free_mem = get_free_memory_gb()
 
-    if vram >= 8:
+    if free_mem >= 8:
         detector = ObjectDetector.QWEN
     else:
         detector = ObjectDetector.YOLO
 
-    logger.info(f"Auto-selected object detector: {detector} (VRAM: {vram:.1f}GB)")
+    logger.info(f"Auto-selected object detector: {detector} (free memory: {free_mem:.1f}GB)")
     return detector
 
 
