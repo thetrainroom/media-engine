@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -13,6 +14,8 @@ import torch
 
 from media_engine.config import (
     DeviceType,
+    QwenStrategy,
+    get_auto_qwen_batch_size,
     get_device,
     get_free_memory_gb,
     get_settings,
@@ -334,6 +337,690 @@ Rules for description:
 Respond with JSON only, no other text."""
 
 
+def _build_context_prompt(
+    context: dict[str, str] | None = None,
+    previous_description: str | None = None,
+) -> str:
+    """Build prompt for CONTEXT strategy - includes previous frame description."""
+    base_prompt = _build_analysis_prompt(context)
+
+    if not previous_description:
+        return base_prompt
+
+    # Insert previous frame context before the analysis request
+    context_insert = f"""
+Previous frame showed: {previous_description}
+
+Describe what's happening NOW and how it relates to the previous frame.
+Focus on: objects visible, actions occurring, any changes from before.
+
+"""
+    # Modify the JSON format to include "change" field
+    modified_prompt = base_prompt.replace(
+        '{"objects": ["item1", "item2"], "description": "One or two sentences describing the scene."}',
+        '{"objects": ["item1", "item2"], "description": "What\'s happening now.", "change": "How this differs from the previous frame."}',
+    )
+
+    # Insert context after any existing context section but before "Look at this image"
+    if "Look at this image" in modified_prompt:
+        parts = modified_prompt.split("Look at this image")
+        return parts[0] + context_insert + "Look at this image" + parts[1]
+
+    return context_insert + modified_prompt
+
+
+def _build_batch_prompt(
+    context: dict[str, str] | None = None,
+    num_frames: int = 3,
+) -> str:
+    """Build prompt for BATCH strategy - analyzes multiple frames together."""
+    # Get person name from context for instructions
+    person_name = context.get("person", "") if context else ""
+
+    # Build context section if available
+    context_section = ""
+    if context:
+        context_lines = ["Known context about this video:"]
+        labels = {
+            "person": "Person identified",
+            "location": "Location",
+            "nearby_landmarks": "Nearby landmarks/POIs",
+            "activity": "Activity",
+            "language": "Language spoken",
+            "device": "Filmed with",
+        }
+        for key, value in context.items():
+            if value and key not in ("log_footage_note", "color_transfer"):
+                label = labels.get(key, key.replace("_", " ").title())
+                context_lines.append(f"- {label}: {value}")
+        context_section = "\n".join(context_lines) + "\n\n"
+
+    person_instruction = ""
+    if person_name:
+        person_instruction = f'Use "{person_name}" instead of "person" in objects and description.\n'
+
+    return f"""{context_section}These {num_frames} frames are from the same video in sequence.
+{person_instruction}
+Analyze what happens ACROSS these frames:
+1. What objects/people are visible throughout?
+2. What ACTION or movement occurs across the frames?
+3. How does the scene change from first to last frame?
+
+You MUST respond with ONLY this exact JSON format:
+{{"objects": ["item1", "item2"], "action": "The action happening across frames", "description": "Overall scene description"}}
+
+Rules:
+- List objects visible in ANY of the frames
+- Describe the ACTION that unfolds across frames (e.g., "person walks toward camera", "car turns left")
+- Keep description to 1-2 sentences summarizing the sequence
+
+Respond with JSON only, no other text."""
+
+
+def _build_batch_context_prompt(
+    context: dict[str, str] | None = None,
+    num_frames: int = 3,
+    group_context: str | None = None,
+) -> str:
+    """Build prompt for BATCH_CONTEXT strategy - batch with previous group context."""
+    base_prompt = _build_batch_prompt(context, num_frames)
+
+    if not group_context:
+        return base_prompt
+
+    context_insert = f"""Previous scene: {group_context}
+
+What happens next in these frames? How does it continue from before?
+
+"""
+    # Modify JSON format to include "continues" field
+    modified_prompt = base_prompt.replace(
+        '{"objects": ["item1", "item2"], "action": "The action happening across frames", "description": "Overall scene description"}',
+        '{"objects": ["item1", "item2"], "action": "The action in these frames", "description": "Scene description", "continues": "How this continues from the previous scene"}',
+    )
+
+    # Insert after context section but before "These X frames"
+    if "These " in modified_prompt and " frames are" in modified_prompt:
+        idx = modified_prompt.find("These ")
+        return modified_prompt[:idx] + context_insert + modified_prompt[idx:]
+
+    return context_insert + modified_prompt
+
+
+def _analyze_frames_single(
+    model: Any,
+    processor: Any,
+    torch_device: str,
+    frame_paths: list[str],
+    timestamps: list[float],
+    context: dict[str, str] | None,
+    progress_callback: ProgressCallback | None,
+) -> tuple[dict[str, int], list[ObjectDetection], list[str]]:
+    """Analyze frames one at a time without temporal context (original behavior)."""
+    from qwen_vl_utils import process_vision_info  # type: ignore[import-not-found]
+
+    all_objects: dict[str, int] = {}
+    detections: list[ObjectDetection] = []
+    descriptions: list[str] = []
+
+    total_frames = len([p for p in frame_paths if p])
+    frame_count = 0
+
+    for frame_path, timestamp in zip(frame_paths, timestamps):
+        if not frame_path or not os.path.exists(frame_path):
+            continue
+
+        frame_count += 1
+        if progress_callback:
+            progress_callback(
+                f"Analyzing frame {frame_count}/{total_frames}...",
+                frame_count,
+                total_frames,
+            )
+
+        try:
+            prompt = _build_analysis_prompt(context)
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": f"file://{frame_path}"},
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ]
+
+            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(torch_device)
+
+            with torch.no_grad():
+                generated_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    do_sample=False,
+                    repetition_penalty=1.2,
+                    no_repeat_ngram_size=3,
+                )
+            generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
+            output_text = processor.batch_decode(
+                generated_ids_trimmed,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0]
+
+            logger.info(f"Qwen raw output for {timestamp:.1f}s: {output_text[:500]}")
+            objects, description = _parse_objects_and_description(output_text)
+
+            for obj in objects:
+                obj_lower = obj.lower().strip()
+                all_objects[obj_lower] = all_objects.get(obj_lower, 0) + 1
+                detections.append(
+                    ObjectDetection(
+                        timestamp=round(timestamp, 2),
+                        label=obj_lower,
+                        confidence=0.95,
+                        bbox=BoundingBox(x=0, y=0, width=0, height=0),
+                    )
+                )
+
+            if description:
+                descriptions.append(description)
+                logger.info(f"Frame {timestamp:.1f}s description: {description}")
+
+            logger.info(f"Frame {timestamp:.1f}s objects: {objects}")
+
+            del inputs, generated_ids
+            if torch_device == "mps":
+                torch.mps.empty_cache()
+            elif torch_device == "cuda":
+                torch.cuda.empty_cache()
+
+        except Exception as e:
+            logger.error(f"Failed to process frame {frame_path}: {e}", exc_info=True)
+            if torch_device == "mps":
+                torch.mps.empty_cache()
+
+    return all_objects, detections, descriptions
+
+
+def _analyze_frames_with_context(
+    model: Any,
+    processor: Any,
+    torch_device: str,
+    frame_paths: list[str],
+    timestamps: list[float],
+    context: dict[str, str] | None,
+    progress_callback: ProgressCallback | None,
+) -> tuple[dict[str, int], list[ObjectDetection], list[str]]:
+    """Analyze frames sequentially, passing previous description as context."""
+    from qwen_vl_utils import process_vision_info  # type: ignore[import-not-found]
+
+    all_objects: dict[str, int] = {}
+    detections: list[ObjectDetection] = []
+    descriptions: list[str] = []
+
+    total_frames = len([p for p in frame_paths if p])
+    frame_count = 0
+    previous_description: str | None = None
+
+    for frame_path, timestamp in zip(frame_paths, timestamps):
+        if not frame_path or not os.path.exists(frame_path):
+            continue
+
+        frame_count += 1
+        if progress_callback:
+            progress_callback(
+                f"Analyzing frame {frame_count}/{total_frames} (with context)...",
+                frame_count,
+                total_frames,
+            )
+
+        try:
+            # Build prompt with previous frame's description as context
+            prompt = _build_context_prompt(context, previous_description)
+
+            if frame_count == 1:
+                logger.info(f"Qwen context prompt (first frame): {prompt[:500]}")
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": f"file://{frame_path}"},
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ]
+
+            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(torch_device)
+
+            with torch.no_grad():
+                generated_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    do_sample=False,
+                    repetition_penalty=1.2,
+                    no_repeat_ngram_size=3,
+                )
+            generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
+            output_text = processor.batch_decode(
+                generated_ids_trimmed,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0]
+
+            logger.info(f"Qwen raw output for {timestamp:.1f}s: {output_text[:500]}")
+            objects, description = _parse_objects_and_description(output_text)
+
+            for obj in objects:
+                obj_lower = obj.lower().strip()
+                all_objects[obj_lower] = all_objects.get(obj_lower, 0) + 1
+                detections.append(
+                    ObjectDetection(
+                        timestamp=round(timestamp, 2),
+                        label=obj_lower,
+                        confidence=0.95,
+                        bbox=BoundingBox(x=0, y=0, width=0, height=0),
+                    )
+                )
+
+            if description:
+                descriptions.append(description)
+                previous_description = description  # Pass to next frame
+                logger.info(f"Frame {timestamp:.1f}s description: {description}")
+
+            logger.info(f"Frame {timestamp:.1f}s objects: {objects}")
+
+            del inputs, generated_ids
+            if torch_device == "mps":
+                torch.mps.empty_cache()
+            elif torch_device == "cuda":
+                torch.cuda.empty_cache()
+
+        except Exception as e:
+            logger.error(f"Failed to process frame {frame_path}: {e}", exc_info=True)
+            if torch_device == "mps":
+                torch.mps.empty_cache()
+
+    return all_objects, detections, descriptions
+
+
+def _analyze_frames_batch(
+    model: Any,
+    processor: Any,
+    torch_device: str,
+    frame_paths: list[str],
+    timestamps: list[float],
+    context: dict[str, str] | None,
+    progress_callback: ProgressCallback | None,
+    batch_size: int | None = None,
+    overlap: bool = False,
+) -> tuple[dict[str, int], list[ObjectDetection], list[str]]:
+    """Analyze frames in batches for temporal understanding."""
+    from qwen_vl_utils import process_vision_info  # type: ignore[import-not-found]
+
+    all_objects: dict[str, int] = {}
+    detections: list[ObjectDetection] = []
+    descriptions: list[str] = []
+
+    # Auto-select batch size based on available memory
+    if batch_size is None:
+        batch_size = get_auto_qwen_batch_size()
+
+    # Filter to valid frames
+    valid_frames = [(p, t) for p, t in zip(frame_paths, timestamps) if p and os.path.exists(p)]
+    if not valid_frames:
+        return all_objects, detections, descriptions
+
+    # Group frames into batches
+    # With overlap: last frame of batch N = first frame of batch N+1 (visual continuity)
+    # Without overlap: sequential non-overlapping batches (faster)
+    batches: list[list[tuple[str, float]]] = []
+    step = max(1, batch_size - 1) if overlap else batch_size
+    for i in range(0, len(valid_frames), step):
+        batch = valid_frames[i : i + batch_size]
+        if overlap:
+            if len(batch) >= 2:  # Need at least 2 frames for temporal analysis
+                batches.append(batch)
+            elif not batches:  # Edge case: very few frames
+                batches.append(batch)
+        else:
+            batches.append(batch)
+
+    total_batches = len(batches)
+    overlap_str = "overlapping " if overlap else ""
+    logger.info(f"Processing {len(valid_frames)} frames in {total_batches} {overlap_str}batches (size={batch_size}, step={step})")
+
+    for batch_idx, batch in enumerate(batches):
+        if progress_callback:
+            progress_callback(
+                f"Analyzing batch {batch_idx + 1}/{total_batches}...",
+                batch_idx + 1,
+                total_batches,
+            )
+
+        try:
+            # Build multi-image message
+            prompt = _build_batch_prompt(context, len(batch))
+
+            if batch_idx == 0:
+                logger.info(f"Qwen batch prompt: {prompt[:500]}")
+
+            # Build content with all images in the batch
+            content: list[dict[str, str]] = []
+            for frame_path, _ in batch:
+                content.append({"type": "image", "image": f"file://{frame_path}"})
+            content.append({"type": "text", "text": prompt})
+
+            messages = [{"role": "user", "content": content}]
+
+            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(torch_device)
+
+            with torch.no_grad():
+                generated_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    do_sample=False,
+                    repetition_penalty=1.2,
+                    no_repeat_ngram_size=3,
+                )
+            generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
+            output_text = processor.batch_decode(
+                generated_ids_trimmed,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0]
+
+            logger.info(f"Qwen batch {batch_idx + 1} raw output: {output_text[:500]}")
+            objects, description = _parse_batch_response(output_text)
+
+            # Associate objects with the middle timestamp of the batch
+            batch_timestamps = [t for _, t in batch]
+            middle_timestamp = batch_timestamps[len(batch_timestamps) // 2]
+
+            for obj in objects:
+                obj_lower = obj.lower().strip()
+                all_objects[obj_lower] = all_objects.get(obj_lower, 0) + 1
+                detections.append(
+                    ObjectDetection(
+                        timestamp=round(middle_timestamp, 2),
+                        label=obj_lower,
+                        confidence=0.95,
+                        bbox=BoundingBox(x=0, y=0, width=0, height=0),
+                    )
+                )
+
+            if description:
+                descriptions.append(description)
+                logger.info(f"Batch {batch_idx + 1} description: {description}")
+
+            logger.info(f"Batch {batch_idx + 1} objects: {objects}")
+
+            del inputs, generated_ids
+            if torch_device == "mps":
+                torch.mps.empty_cache()
+            elif torch_device == "cuda":
+                torch.cuda.empty_cache()
+
+        except Exception as e:
+            logger.error(f"Failed to process batch {batch_idx + 1}: {e}", exc_info=True)
+            if torch_device == "mps":
+                torch.mps.empty_cache()
+
+    return all_objects, detections, descriptions
+
+
+def _analyze_frames_batch_context(
+    model: Any,
+    processor: Any,
+    torch_device: str,
+    frame_paths: list[str],
+    timestamps: list[float],
+    context: dict[str, str] | None,
+    progress_callback: ProgressCallback | None,
+    batch_size: int | None = None,
+    overlap: bool = False,
+) -> tuple[dict[str, int], list[ObjectDetection], list[str]]:
+    """Analyze frames in batches with context passed between batches."""
+    from qwen_vl_utils import process_vision_info  # type: ignore[import-not-found]
+
+    all_objects: dict[str, int] = {}
+    detections: list[ObjectDetection] = []
+    descriptions: list[str] = []
+
+    # Auto-select batch size based on available memory
+    if batch_size is None:
+        batch_size = get_auto_qwen_batch_size()
+
+    # Filter to valid frames
+    valid_frames = [(p, t) for p, t in zip(frame_paths, timestamps) if p and os.path.exists(p)]
+    if not valid_frames:
+        return all_objects, detections, descriptions
+
+    # Group frames into batches
+    # With overlap: last frame of batch N = first frame of batch N+1 (visual continuity)
+    # Without overlap: sequential non-overlapping batches (faster)
+    batches: list[list[tuple[str, float]]] = []
+    step = max(1, batch_size - 1) if overlap else batch_size
+    for i in range(0, len(valid_frames), step):
+        batch = valid_frames[i : i + batch_size]
+        if overlap:
+            if len(batch) >= 2:  # Need at least 2 frames for temporal analysis
+                batches.append(batch)
+            elif not batches:  # Edge case: very few frames
+                batches.append(batch)
+        else:
+            batches.append(batch)
+
+    total_batches = len(batches)
+    overlap_str = "overlapping " if overlap else ""
+    logger.info(f"Processing {len(valid_frames)} frames in {total_batches} {overlap_str}batches with context (size={batch_size}, step={step})")
+
+    group_context: str | None = None
+
+    for batch_idx, batch in enumerate(batches):
+        if progress_callback:
+            progress_callback(
+                f"Analyzing batch {batch_idx + 1}/{total_batches} (with context)...",
+                batch_idx + 1,
+                total_batches,
+            )
+
+        try:
+            # Build multi-image message with previous batch context
+            prompt = _build_batch_context_prompt(context, len(batch), group_context)
+
+            if batch_idx == 0:
+                logger.info(f"Qwen batch-context prompt: {prompt[:500]}")
+
+            # Build content with all images in the batch
+            content: list[dict[str, str]] = []
+            for frame_path, _ in batch:
+                content.append({"type": "image", "image": f"file://{frame_path}"})
+            content.append({"type": "text", "text": prompt})
+
+            messages = [{"role": "user", "content": content}]
+
+            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            image_inputs, video_inputs = process_vision_info(messages)
+            inputs = processor(
+                text=[text],
+                images=image_inputs,
+                videos=video_inputs,
+                padding=True,
+                return_tensors="pt",
+            )
+            inputs = inputs.to(torch_device)
+
+            with torch.no_grad():
+                generated_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    do_sample=False,
+                    repetition_penalty=1.2,
+                    no_repeat_ngram_size=3,
+                )
+            generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
+            output_text = processor.batch_decode(
+                generated_ids_trimmed,
+                skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
+            )[0]
+
+            logger.info(f"Qwen batch {batch_idx + 1} raw output: {output_text[:500]}")
+            objects, description = _parse_batch_response(output_text)
+
+            # Use description as context for next batch
+            if description:
+                group_context = description
+
+            # Associate objects with the middle timestamp of the batch
+            batch_timestamps = [t for _, t in batch]
+            middle_timestamp = batch_timestamps[len(batch_timestamps) // 2]
+
+            for obj in objects:
+                obj_lower = obj.lower().strip()
+                all_objects[obj_lower] = all_objects.get(obj_lower, 0) + 1
+                detections.append(
+                    ObjectDetection(
+                        timestamp=round(middle_timestamp, 2),
+                        label=obj_lower,
+                        confidence=0.95,
+                        bbox=BoundingBox(x=0, y=0, width=0, height=0),
+                    )
+                )
+
+            if description:
+                descriptions.append(description)
+                logger.info(f"Batch {batch_idx + 1} description: {description}")
+
+            logger.info(f"Batch {batch_idx + 1} objects: {objects}")
+
+            del inputs, generated_ids
+            if torch_device == "mps":
+                torch.mps.empty_cache()
+            elif torch_device == "cuda":
+                torch.cuda.empty_cache()
+
+        except Exception as e:
+            logger.error(f"Failed to process batch {batch_idx + 1}: {e}", exc_info=True)
+            if torch_device == "mps":
+                torch.mps.empty_cache()
+
+    return all_objects, detections, descriptions
+
+
+def _fix_malformed_json(text: str) -> str:
+    """Fix common JSON malformations from VLM output."""
+    # Remove markdown code blocks
+    text = text.replace("```json", "").replace("```", "").strip()
+
+    # Fix escaped quotes before colons: "action\": -> "action":
+    text = text.replace('\\":', '":')
+
+    # Replace single quotes with double quotes for keys and string values
+    # But be careful not to replace apostrophes within words
+    # First, handle keys: 'key': -> "key":
+    text = re.sub(r"'(\w+)'(\s*):", r'"\1"\2:', text)
+
+    # Handle string values: : 'value' -> : "value"
+    # This regex looks for : followed by optional whitespace and a single-quoted string
+    text = re.sub(r":\s*'([^']*)'", r': "\1"', text)
+
+    # Remove trailing commas before ] or }
+    text = re.sub(r",(\s*[\]\}])", r"\1", text)
+
+    return text
+
+
+def _parse_batch_response(response: str) -> tuple[list[str], str | None]:
+    """Parse objects and description from batch analysis response.
+
+    Handles both standard format and batch-specific format with action field.
+    """
+    objects: list[str] = []
+    description: str | None = None
+
+    try:
+        clean_response = _fix_malformed_json(response)
+
+        if "{" in clean_response:
+            start_brace = clean_response.find("{")
+            json_str = clean_response[start_brace : clean_response.rindex("}") + 1]
+            data = json.loads(json_str)
+
+            # Extract objects
+            raw_objects = data.get("objects", [])
+            for obj in raw_objects:
+                if isinstance(obj, str) and len(obj) < 100 and obj.strip():
+                    objects.append(obj)
+                elif isinstance(obj, dict):
+                    name = obj.get("name", "") or obj.get("label", "")
+                    if isinstance(name, str) and len(name) < 100 and name.strip():
+                        objects.append(name)
+
+            # Build description from available fields
+            desc_parts = []
+
+            # Action field (batch-specific)
+            action = data.get("action", "")
+            if isinstance(action, str) and action.strip():
+                desc_parts.append(action.strip())
+
+            # Standard description
+            desc = data.get("description", "")
+            if isinstance(desc, str) and desc.strip():
+                desc_parts.append(desc.strip())
+
+            # Continues field (batch-context specific)
+            continues = data.get("continues", "")
+            if isinstance(continues, str) and continues.strip():
+                desc_parts.append(continues.strip())
+
+            # Change field (context-specific)
+            change = data.get("change", "")
+            if isinstance(change, str) and change.strip():
+                desc_parts.append(f"Change: {change.strip()}")
+
+            if desc_parts:
+                description = " ".join(desc_parts)
+
+            return objects, description
+
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.warning(f"Failed to parse batch JSON from Qwen response: {e}")
+
+    # Fallback to standard parser
+    return _parse_objects_and_description(response)
+
+
 def extract_objects_qwen(
     file_path: str,
     timestamps: list[float] | None = None,
@@ -341,6 +1028,8 @@ def extract_objects_qwen(
     context: dict[str, str] | None = None,
     progress_callback: ProgressCallback | None = None,
     lut_path: str | None = None,
+    batch_overlap: bool = False,
+    strategy: str | None = None,
 ) -> ObjectsResult:
     """Extract objects using Qwen2-VL vision-language model.
 
@@ -359,12 +1048,19 @@ def extract_objects_qwen(
             - "topic": Subject matter of the video
         progress_callback: Optional callback for progress updates (message, current, total)
         lut_path: Optional path to a LUT file (.cube) to apply for log footage color correction
+        batch_overlap: If True, batches overlap by 1 frame for visual continuity.
+            Useful for unstable camera or videos with rapid scene changes.
+            Default False for faster processing.
+        strategy: Override Qwen strategy for this file. One of:
+            - "single": No temporal context (fastest)
+            - "context": Pass previous description as text
+            - "batch": Multi-frame batches
+            - "batch_context": Batches with text context between (richest)
+            If None, uses global setting from config.
 
     Returns:
         ObjectsResult with detected objects and contextual descriptions
     """
-    from qwen_vl_utils import process_vision_info  # type: ignore[import-not-found]
-
     logger.info(f"extract_objects_qwen called: file={file_path}, timestamps={timestamps}, context={context}")
 
     settings = get_settings()
@@ -384,7 +1080,7 @@ def extract_objects_qwen(
         if timestamps is None:
             duration = _get_video_duration(file_path)
             timestamps = [duration / 2]
-            logger.info(f"No timestamps provided, sampling from middle ({duration/2:.1f}s)")
+            logger.info(f"No timestamps provided, sampling from middle ({duration / 2:.1f}s)")
         else:
             logger.info(f"Analyzing {len(timestamps)} provided timestamps")
 
@@ -401,15 +1097,13 @@ def extract_objects_qwen(
         if lut_path and os.path.exists(lut_path):
             # LUT applied - colors are corrected but may still be slightly off
             context["log_footage_note"] = (
-                "This footage was recorded in LOG profile and color-corrected with a LUT. " "Colors shown are the corrected version but may still appear slightly desaturated."
+                "This footage was recorded in LOG profile and color-corrected with a LUT. Colors shown are the corrected version but may still appear slightly desaturated."
             )
             logger.info("Added log footage context hint (with LUT)")
         elif is_log_footage:
             # LOG detected but no LUT - colors are definitely off
             context["log_footage_note"] = (
-                f"This footage appears to be in LOG/flat color profile ({color_transfer}). "
-                "Colors are desaturated and not representative of the actual scene. "
-                "Focus on describing content and action, not colors."
+                f"This footage appears to be in LOG/flat color profile ({color_transfer}). Colors are desaturated and not representative of the actual scene. Focus on describing content and action, not colors."
             )
             logger.info(f"Added log footage context hint (no LUT, color_transfer={color_transfer})")
 
@@ -431,7 +1125,7 @@ def extract_objects_qwen(
         except (RuntimeError, MemoryError, OSError) as e:
             error_msg = str(e).lower()
             if "out of memory" in error_msg or "cannot allocate" in error_msg:
-                logger.error(f"Out of memory loading Qwen model. " f"Close other apps or use a cloud vision API. Error: {e}")
+                logger.error(f"Out of memory loading Qwen model. Close other apps or use a cloud vision API. Error: {e}")
                 # Return empty result - frontend can fall back to cloud API if configured
                 return ObjectsResult(
                     summary={},
@@ -443,108 +1137,41 @@ def extract_objects_qwen(
 
         logger.info(f"Processing {total_frames} frames for Qwen analysis")
 
-        all_objects: dict[str, int] = {}
-        detections: list[ObjectDetection] = []
-        descriptions: list[str] = []
-        frame_count = 0
+        # Get strategy for multi-frame analysis (use override if provided)
+        if strategy is not None:
+            resolved_strategy = QwenStrategy(strategy)
+            logger.info(f"Using Qwen strategy override: {resolved_strategy}")
+        else:
+            resolved_strategy = settings.get_qwen_strategy()
+            logger.info(f"Using Qwen strategy from config: {resolved_strategy}")
 
-        for frame_path, timestamp in zip(frame_paths, timestamps):
-            if not frame_path or not os.path.exists(frame_path):
-                logger.warning(f"Skipping missing frame at {timestamp}s: {frame_path}")
-                continue
-
-            frame_count += 1
-            if progress_callback:
-                progress_callback(
-                    f"Analyzing frame {frame_count}/{total_frames}...",
-                    frame_count,
-                    total_frames,
-                )
-
-            try:
-                # Build the prompt with optional context
-                prompt = _build_analysis_prompt(context)
-
-                # Log prompt on first frame for debugging
-                if frame_count == 1:
-                    logger.info(f"Qwen prompt: {prompt[:500]}")
-
-                # Prepare message for Qwen - ask for both objects and description
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image", "image": f"file://{frame_path}"},
-                            {"type": "text", "text": prompt},
-                        ],
-                    }
-                ]
-
-                # Process inputs
-                text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-                image_inputs, video_inputs = process_vision_info(messages)
-                inputs = processor(
-                    text=[text],
-                    images=image_inputs,
-                    videos=video_inputs,
-                    padding=True,
-                    return_tensors="pt",
-                )
-                inputs = inputs.to(torch_device)
-
-                # Generate response with repetition penalty to prevent loops
-                with torch.no_grad():
-                    generated_ids = model.generate(
-                        **inputs,
-                        max_new_tokens=512,
-                        do_sample=False,  # Greedy decoding for consistent JSON
-                        repetition_penalty=1.2,  # Penalize repetition
-                        no_repeat_ngram_size=3,  # Prevent 3-gram repetition
-                    )
-                generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
-                output_text = processor.batch_decode(
-                    generated_ids_trimmed,
-                    skip_special_tokens=True,
-                    clean_up_tokenization_spaces=False,
-                )[0]
-
-                # Parse response
-                logger.info(f"Qwen raw output for {timestamp:.1f}s: {output_text[:500]}")
-                objects, description = _parse_objects_and_description(output_text)
-                if not description:
-                    logger.warning(f"No description parsed from Qwen output at {timestamp:.1f}s")
-                for obj in objects:
-                    obj_lower = obj.lower().strip()
-                    all_objects[obj_lower] = all_objects.get(obj_lower, 0) + 1
-
-                    detections.append(
-                        ObjectDetection(
-                            timestamp=round(timestamp, 2),
-                            label=obj_lower,
-                            confidence=0.95,  # VLM confidence is generally high
-                            bbox=BoundingBox(x=0, y=0, width=0, height=0),  # No bbox from VLM
-                        )
-                    )
-
-                if description:
-                    descriptions.append(description)
-                    logger.info(f"Frame {timestamp:.1f}s description: {description}")
-
-                logger.info(f"Frame {timestamp:.1f}s objects: {objects}")
-
-                # Clear memory after each frame
-                del inputs, generated_ids
-                if torch_device == "mps":
-                    torch.mps.empty_cache()
-                elif torch_device == "cuda":
-                    torch.cuda.empty_cache()
-
-            except Exception as e:
-                logger.error(f"Failed to process frame {frame_path}: {e}", exc_info=True)
-                # Try to recover memory
-                if torch_device == "mps":
-                    torch.mps.empty_cache()
-                continue
+        # Dispatch to appropriate strategy implementation
+        if resolved_strategy == QwenStrategy.SINGLE:
+            all_objects, detections, descriptions = _analyze_frames_single(model, processor, torch_device, frame_paths, timestamps, context, progress_callback)
+        elif resolved_strategy == QwenStrategy.CONTEXT:
+            all_objects, detections, descriptions = _analyze_frames_with_context(model, processor, torch_device, frame_paths, timestamps, context, progress_callback)
+        elif resolved_strategy == QwenStrategy.BATCH:
+            all_objects, detections, descriptions = _analyze_frames_batch(
+                model,
+                processor,
+                torch_device,
+                frame_paths,
+                timestamps,
+                context,
+                progress_callback,
+                overlap=batch_overlap,
+            )
+        else:  # BATCH_CONTEXT
+            all_objects, detections, descriptions = _analyze_frames_batch_context(
+                model,
+                processor,
+                torch_device,
+                frame_paths,
+                timestamps,
+                context,
+                progress_callback,
+                overlap=batch_overlap,
+            )
 
         # Deduplicate - count unique objects per type
         unique_objects = _deduplicate_objects(all_objects)
@@ -667,8 +1294,7 @@ def _parse_objects_and_description(response: str) -> tuple[list[str], str | None
 
     # Try to find and parse JSON
     try:
-        # Remove markdown code block markers
-        clean_response = response.replace("```json", "").replace("```", "").strip()
+        clean_response = _fix_malformed_json(response)
 
         # Try to parse as JSON (could be object or array)
         if "[" in clean_response or "{" in clean_response:

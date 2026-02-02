@@ -530,6 +530,7 @@ class SettingsResponse(BaseModel):
     # Object detection
     object_detector: str
     qwen_model: str
+    qwen_strategy: str  # "auto", "single", "context", "batch", "batch_context"
     qwen_frames_per_scene: int
     yolo_model: str
 
@@ -568,6 +569,7 @@ class SettingsUpdate(BaseModel):
     # Object detection
     object_detector: str | None = None
     qwen_model: str | None = None
+    qwen_strategy: str | None = None  # "auto", "single", "context", "batch", "batch_context"
     qwen_frames_per_scene: int | None = None
     yolo_model: str | None = None
 

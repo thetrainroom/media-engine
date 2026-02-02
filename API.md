@@ -37,7 +37,14 @@ Create a new batch extraction job.
   "visual_timestamps": {
     "/path/to/video1.mp4": [10.0, 30.0, 60.0],
     "/path/to/video2.mp4": [5.0, 15.0]
-  }
+  },
+  "visual_strategy": {
+    "/path/to/video2.mp4": "batch_context"
+  },
+  "visual_batch_overlap": {
+    "/path/to/video2.mp4": true
+  },
+  "lut_path": "/path/to/color.cube"
 }
 ```
 
@@ -59,6 +66,9 @@ Create a new batch extraction job.
 | `language_hints` | string[] | null | Language hints (currently unused) |
 | `context_hint` | string | null | Context hint for Whisper initial prompt |
 | `visual_timestamps` | object | null | Per-file timestamps for visual/VLM analysis (file path -> float[]) |
+| `visual_strategy` | object | null | Per-file Qwen strategy override (file path -> strategy string) |
+| `visual_batch_overlap` | object | null | Per-file batch overlap setting (file path -> bool). Enable for unstable camera. |
+| `lut_path` | string | null | Path to LUT file (.cube) for log footage color correction |
 
 **Note:** Model selection (whisper_model, yolo_model, qwen_model, clip_model) is configured via `PUT /settings`. This keeps hardware-dependent configuration in one place.
 
@@ -258,8 +268,10 @@ Get hardware capabilities and auto-selected models.
 {
   "device": "mps",
   "vram_gb": 24.0,
+  "free_memory_gb": 18.5,
   "auto_whisper_model": "large-v3",
   "auto_qwen_model": "Qwen/Qwen2-VL-2B-Instruct",
+  "auto_qwen_strategy": "batch_context",
   "auto_yolo_model": "yolov8m.pt",
   "auto_clip_model": "ViT-L-14",
   "auto_object_detector": "qwen",
@@ -293,6 +305,7 @@ Get current settings. Sensitive values (like HuggingFace token) are masked.
   "min_face_size": 80,
   "object_detector": "auto",
   "qwen_model": "auto",
+  "qwen_strategy": "auto",
   "qwen_frames_per_scene": 3,
   "yolo_model": "auto",
   "clip_model": "auto",
@@ -334,6 +347,7 @@ Update settings. Only provided fields are updated. Changes persist to `~/.config
 | `min_face_size` | int | Minimum face size in pixels |
 | `object_detector` | string | "auto", "yolo", or "qwen" |
 | `qwen_model` | string | Qwen model name or "auto" |
+| `qwen_strategy` | string | "auto", "single", "context", "batch", or "batch_context" |
 | `qwen_frames_per_scene` | int | Frames per scene for Qwen |
 | `yolo_model` | string | YOLO model name or "auto" |
 | `clip_model` | string | CLIP model name or "auto" |
@@ -381,6 +395,30 @@ All model fields support `"auto"` for automatic selection based on available VRA
 | 4-8GB | small | yolov8s | ViT-B-32 | yolo |
 | 8-16GB | medium | yolov8m | ViT-L-14 | qwen |
 | 16GB+ | large-v3 | yolov8l | ViT-L-14 | qwen |
+
+### Qwen Strategy Selection
+
+The `qwen_strategy` setting controls how Qwen analyzes multiple frames for temporal context:
+
+| Strategy | Description | Memory | Use Case |
+|----------|-------------|--------|----------|
+| `single` | Each frame analyzed independently | Lowest | Fast processing, no temporal context needed |
+| `context` | Previous frame's description passed as text | Low | Basic temporal awareness |
+| `batch` | 2-6 frames analyzed together | Medium | Action detection, scene understanding |
+| `batch_context` | Batches with text context between groups | Higher | Richest temporal understanding |
+
+**Auto-selection based on free memory:**
+
+| Free Memory | Strategy | Batch Size |
+|-------------|----------|------------|
+| <8GB | context | 1 (single frames) |
+| 8-10GB | batch | 2-3 |
+| 10-15GB | batch | 3 |
+| 15-25GB | batch_context | 4 |
+| 25-40GB | batch_context | 5 |
+| 40GB+ | batch_context | 6 |
+
+**Batch overlap:** When `visual_batch_overlap` is enabled for a file, batches overlap by 1 frame for visual continuity. Useful for videos with unstable camera or rapid scene changes.
 
 ---
 

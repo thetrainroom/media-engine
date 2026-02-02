@@ -85,7 +85,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
     yolo_model = settings.get_yolo_model()
     clip_model = settings.get_clip_model()
 
-    logger.info(f"Batch {batch_id} models: whisper={whisper_model}, qwen={qwen_model}, " f"yolo={yolo_model}, clip={clip_model}")
+    logger.info(f"Batch {batch_id} models: whisper={whisper_model}, qwen={qwen_model}, yolo={yolo_model}, clip={clip_model}")
 
     batch_start_time = time.time()
     peak_memory = get_memory_mb()
@@ -117,7 +117,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
         # Add time for remaining extractors (after current one)
         remaining_extractors = EXTRACTOR_ORDER[current_ext_idx + 1 :]
-        logger.info(f"ETA calc: current={current_extractor}, remaining={remaining_extractors}, " f"enabled={enabled_extractors}")
+        logger.info(f"ETA calc: current={current_extractor}, remaining={remaining_extractors}, enabled={enabled_extractors}")
 
         for ext in remaining_extractors:
             if ext not in enabled_extractors:
@@ -210,7 +210,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
         # Debug logging for ETA calculation (use INFO level to see it)
         if total_eta and total_eta > 0:
-            logger.info(f"ETA: {extractor} stage={eta}s, total={total_eta}s, " f"subs={enabled_sub_extractors}, files={len(file_durations)}")
+            logger.info(f"ETA: {extractor} stage={eta}s, total={total_eta}s, subs={enabled_sub_extractors}, files={len(file_durations)}")
 
         # Calculate queue ETA (for all queued batches)
         queue_eta, queued_count = calculate_queue_eta()
@@ -565,7 +565,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             }
                             update_file_status(i, "running", "motion", motion_result)
                             update_extractor_status(i, "motion", "completed")
-                            logger.info(f"Motion for {fname}: stable={motion.is_stable}, " f"timestamps={len(adaptive_timestamps[i])}")
+                            logger.info(f"Motion for {fname}: stable={motion.is_stable}, timestamps={len(adaptive_timestamps[i])}")
                     except Exception as e:
                         logger.warning(f"Motion analysis failed for {file_path}: {e}")
                         update_extractor_status(i, "motion", "failed")
@@ -743,7 +743,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                                 face_buffer = decode_frames(file_path, timestamps=face_timestamps)
                                 faces = extract_faces(file_path, frame_buffer=face_buffer)
                                 face_frame_count = len(face_buffer.frames)
-                                logger.info(f"Face detection on {face_frame_count} frames for {fname} " f"(short video, {face_fps} FPS)")
+                                logger.info(f"Face detection on {face_frame_count} frames for {fname} (short video, {face_fps} FPS)")
                         else:
                             # Long video - use adaptive batching
                             current_time = 0.0
@@ -802,14 +802,14 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                                             known_embeddings.extend(new_embs)
                                             consistent_batches = 0
                                             if in_verification_mode:
-                                                logger.info(f"New face detected at {current_time:.1f}s, " "exiting verification mode")
+                                                logger.info(f"New face detected at {current_time:.1f}s, exiting verification mode")
                                                 in_verification_mode = False
                                         elif all_known and known_embeddings:
                                             # All faces are known
                                             consistent_batches += 1
                                             if consistent_batches >= min_consistent_batches and not in_verification_mode:
                                                 in_verification_mode = True
-                                                logger.info(f"Faces stable after {current_time:.1f}s, " "switching to verification mode (every 10s)")
+                                                logger.info(f"Faces stable after {current_time:.1f}s, switching to verification mode (every 10s)")
                                     elif not known_embeddings:
                                         # No faces in this batch and no known faces yet
                                         consistent_batches += 1
@@ -841,15 +841,13 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                                 )
 
                             mode_info = "verification" if in_verification_mode else "normal"
-                            logger.info(
-                                f"Face detection on {total_frames} frames for {fname} " f"(adaptive batching, {len(known_embeddings)} unique, " f"ended in {mode_info} mode)"
-                            )
+                            logger.info(f"Face detection on {total_frames} frames for {fname} (adaptive batching, {len(known_embeddings)} unique, ended in {mode_info} mode)")
 
                         # Fallback if no duration info
                         if faces is None and buffer is not None:
                             faces = extract_faces(file_path, frame_buffer=buffer)
                             face_frame_count = len(buffer.frames)
-                            logger.info(f"Face detection on {len(buffer.frames)} frames for {fname} " "(using shared buffer)")
+                            logger.info(f"Face detection on {len(buffer.frames)} frames for {fname} (using shared buffer)")
 
                         if faces:
                             faces_data = {
@@ -966,13 +964,17 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         timestamps = get_sample_timestamps(motion, max_samples=5)
 
                     file_context = request.contexts.get(file_path) if request.contexts else None
-                    logger.info(f"Calling Qwen with context for {fname}: {file_context}, lut_path={request.lut_path}")
+                    file_batch_overlap = request.visual_batch_overlap.get(file_path, False) if request.visual_batch_overlap else False
+                    file_strategy = request.visual_strategy.get(file_path) if request.visual_strategy else None
+                    logger.info(f"Calling Qwen for {fname}: context={file_context}, lut_path={request.lut_path}, batch_overlap={file_batch_overlap}, strategy={file_strategy}")
                     visual_result = extract_objects_qwen(
                         file_path,
                         timestamps=timestamps,
                         model_name=qwen_model,
                         context=file_context,
                         lut_path=request.lut_path,
+                        batch_overlap=file_batch_overlap,
+                        strategy=file_strategy,
                     )
                     visual_data: dict[str, Any] = {"summary": visual_result.summary}
                     if visual_result.descriptions:

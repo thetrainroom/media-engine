@@ -81,6 +81,15 @@ class ObjectDetector(StrEnum):
     QWEN = "qwen"
 
 
+class QwenStrategy(StrEnum):
+    """Qwen temporal context strategy for multi-frame analysis."""
+
+    SINGLE = "single"  # No context (current behavior)
+    CONTEXT = "context"  # Pass previous description as text
+    BATCH = "batch"  # Multi-frame batch (2-3 frames together)
+    BATCH_CONTEXT = "batch_context"  # Batch + pass context between groups
+
+
 # =============================================================================
 # Settings (loaded from JSON config file)
 # =============================================================================
@@ -120,6 +129,7 @@ class Settings(BaseModel):
     object_detector: str = DEFAULT_OBJECT_DETECTOR  # "auto", "yolo", or "qwen"
     qwen_model: str = DEFAULT_QWEN_MODEL
     qwen_frames_per_scene: int = DEFAULT_QWEN_FRAMES_PER_SCENE
+    qwen_strategy: str = "auto"  # "auto", "single", "context", "batch", "batch_context"
 
     # YOLO model ("auto" = select based on VRAM)
     yolo_model: str = "auto"
@@ -162,6 +172,12 @@ class Settings(BaseModel):
         if self.object_detector == "auto":
             return get_auto_object_detector()
         return ObjectDetector(self.object_detector)
+
+    def get_qwen_strategy(self) -> "QwenStrategy":
+        """Get resolved Qwen strategy (handles 'auto')."""
+        if self.qwen_strategy == "auto":
+            return get_auto_qwen_strategy()
+        return QwenStrategy(self.qwen_strategy)
 
 
 def get_config_path() -> Path:
@@ -369,7 +385,7 @@ def get_free_memory_gb() -> float:
         # Leave a 1GB buffer for system processes
         available_for_models = max(0.0, available_gb - 1.0)
 
-        logger.info(f"Memory: {mem.total / (1024**3):.0f}GB total, " f"{mem.available / (1024**3):.1f}GB available, " f"{available_for_models:.1f}GB for models")
+        logger.info(f"Memory: {mem.total / (1024**3):.0f}GB total, {mem.available / (1024**3):.1f}GB available, {available_for_models:.1f}GB for models")
         return available_for_models
 
     except ImportError:
@@ -472,6 +488,61 @@ def get_auto_object_detector() -> ObjectDetector:
     return detector
 
 
+def get_auto_qwen_strategy() -> QwenStrategy:
+    """Select Qwen temporal context strategy based on available free memory.
+
+    Thresholds based on Qwen 2B with 1080p images (max 1280px width).
+
+    | Free Memory | Strategy      | Frames per Call | Description              |
+    |-------------|---------------|-----------------|--------------------------|
+    | <8GB        | CONTEXT       | 1               | Text context only        |
+    | 8-12GB      | BATCH         | 2-3             | Multi-frame batches      |
+    | 12GB+       | BATCH_CONTEXT | 2-3             | Batches + text context   |
+    """
+    free_mem = get_free_memory_gb()
+
+    if free_mem >= 12:
+        strategy = QwenStrategy.BATCH_CONTEXT
+    elif free_mem >= 8:
+        strategy = QwenStrategy.BATCH
+    else:
+        strategy = QwenStrategy.CONTEXT
+
+    logger.info(f"Auto-selected Qwen strategy: {strategy} (free memory: {free_mem:.1f}GB)")
+    return strategy
+
+
+def get_auto_qwen_batch_size() -> int:
+    """Select Qwen batch size based on available free memory.
+
+    Larger batches provide better temporal context but use more memory.
+    Each additional frame in a batch adds ~0.5-1GB memory overhead.
+
+    | Free Memory | Batch Size | Notes                    |
+    |-------------|------------|--------------------------|
+    | <10GB       | 2          | Minimal batching         |
+    | 10-15GB     | 3          | Default batch size       |
+    | 15-25GB     | 4          | Good temporal context    |
+    | 25-40GB     | 5          | Rich temporal context    |
+    | 40GB+       | 6          | Maximum temporal context |
+    """
+    free_mem = get_free_memory_gb()
+
+    if free_mem >= 40:
+        batch_size = 6
+    elif free_mem >= 25:
+        batch_size = 5
+    elif free_mem >= 15:
+        batch_size = 4
+    elif free_mem >= 10:
+        batch_size = 3
+    else:
+        batch_size = 2
+
+    logger.info(f"Auto-selected Qwen batch size: {batch_size} (free memory: {free_mem:.1f}GB)")
+    return batch_size
+
+
 def get_auto_yolo_model() -> str:
     """Select YOLO model based on available VRAM.
 
@@ -546,6 +617,7 @@ def get_vram_summary() -> dict:
         "free_memory_gb": round(free_mem, 1),
         "auto_whisper_model": get_auto_whisper_model(),
         "auto_qwen_model": get_auto_qwen_model() if vram >= 8 else None,
+        "auto_qwen_strategy": str(get_auto_qwen_strategy()),
         "auto_yolo_model": get_auto_yolo_model(),
         "auto_clip_model": get_auto_clip_model(),
         "auto_object_detector": str(get_auto_object_detector()),
@@ -654,7 +726,7 @@ def check_memory_before_load(model_name: str, clear_memory_func: Any | None = No
     available = vram if device != DeviceType.CPU else ram
 
     if available < required_gb:
-        logger.warning(f"Low memory ({available:.1f}GB available) for {model_name} " f"({required_gb:.1f}GB required)")
+        logger.warning(f"Low memory ({available:.1f}GB available) for {model_name} ({required_gb:.1f}GB required)")
 
         # Try to free memory
         if clear_memory_func is not None:

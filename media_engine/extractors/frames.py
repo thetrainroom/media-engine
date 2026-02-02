@@ -99,7 +99,7 @@ class FrameExtractor:
                 pixels = self._width * self._height
                 max_dim = max(self._width, self._height)
                 if pixels > HIGH_RES_THRESHOLD and max_dim > self.max_dimension:
-                    logger.info(f"High-res video ({self._width}x{self._height}), " f"using FFmpeg decode at {self.max_dimension}px")
+                    logger.info(f"High-res video ({self._width}x{self._height}), using FFmpeg decode at {self.max_dimension}px")
                     self._use_ffmpeg_decode = True
                     # Release opencv capture - we'll use FFmpeg instead
                     self.cap.release()
@@ -279,7 +279,7 @@ class FrameExtractor:
         try:
             # Scale filter that maintains aspect ratio
             # scale=W:H:force_original_aspect_ratio=decrease
-            scale_filter = f"scale={self.max_dimension}:{self.max_dimension}" f":force_original_aspect_ratio=decrease"
+            scale_filter = f"scale={self.max_dimension}:{self.max_dimension}:force_original_aspect_ratio=decrease"
 
             cmd = [
                 "ffmpeg",

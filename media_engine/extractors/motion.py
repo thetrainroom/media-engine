@@ -377,7 +377,7 @@ def analyze_motion(
         total_flow_time += time.perf_counter() - flow_start
 
     # Log timing breakdown
-    logger.info(f"Motion analysis timing: decode={total_load_time:.2f}s, " f"optical_flow={total_flow_time:.2f}s, frames={global_frame_idx}")
+    logger.info(f"Motion analysis timing: decode={total_load_time:.2f}s, optical_flow={total_flow_time:.2f}s, frames={global_frame_idx}")
 
     if not frame_motions:
         return MotionAnalysis(
@@ -693,7 +693,7 @@ def get_adaptive_timestamps(
                 motion.duration * 0.5,
                 motion.duration * 0.85,
             ]
-        logger.info(f"Stable video optimization: {len(timestamps)} frames only " f"(avg_intensity={motion.avg_intensity:.1f})")
+        logger.info(f"Stable video optimization: {len(timestamps)} frames only (avg_intensity={motion.avg_intensity:.1f})")
         return timestamps
 
     if motion.is_stable:
@@ -704,7 +704,7 @@ def get_adaptive_timestamps(
         else:
             step = motion.duration / (num_samples + 1)
             timestamps = [step * (i + 1) for i in range(num_samples)]
-        logger.info(f"Stable video: {len(timestamps)} frames " f"(avg_intensity={motion.avg_intensity:.1f})")
+        logger.info(f"Stable video: {len(timestamps)} frames (avg_intensity={motion.avg_intensity:.1f})")
         return timestamps
 
     if not motion.segments:
@@ -753,7 +753,7 @@ def get_adaptive_timestamps(
     # Ensure timestamps are within video bounds
     timestamps = [max(0.1, min(t, motion.duration - 0.1)) for t in timestamps]
 
-    logger.info(f"Adaptive sampling: {len(timestamps)} frames " f"(avg_intensity={motion.avg_intensity:.1f}, stable={motion.is_stable})")
+    logger.info(f"Adaptive sampling: {len(timestamps)} frames (avg_intensity={motion.avg_intensity:.1f}, stable={motion.is_stable})")
 
     return timestamps
 

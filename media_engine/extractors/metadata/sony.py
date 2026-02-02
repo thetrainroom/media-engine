@@ -416,7 +416,7 @@ class SonyExtractor:
                     total_duration=recording.total_duration,
                     file_index=file_index,
                 )
-                logger.info(f"Detected spanned recording: file {file_index + 1} of {len(recording.clips)}, " f"total duration {recording.total_duration:.1f}s")
+                logger.info(f"Detected spanned recording: file {file_index + 1} of {len(recording.clips)}, total duration {recording.total_duration:.1f}s")
 
         return Metadata(
             duration=base_metadata.duration,

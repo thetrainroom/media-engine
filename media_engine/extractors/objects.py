@@ -157,7 +157,7 @@ def extract_objects(
     # Deduplicate - track unique objects
     unique_detections, summary = _deduplicate_objects(raw_detections)
 
-    logger.info(f"Detected {len(raw_detections)} objects, " f"{len(unique_detections)} unique across {len(summary)} types")
+    logger.info(f"Detected {len(raw_detections)} objects, {len(unique_detections)} unique across {len(summary)} types")
 
     return ObjectsResult(
         summary=summary,
