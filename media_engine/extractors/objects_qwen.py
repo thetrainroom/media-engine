@@ -237,24 +237,18 @@ def _get_qwen_model(
 
 def _build_analysis_prompt(context: dict[str, str] | None = None) -> str:
     """Build the analysis prompt, optionally including context."""
-    base_prompt = """Look at this image carefully and describe what you see.
+    base_prompt = """Describe what you see in this image. List main objects and write a short description.
 
-List all visible objects and write a brief description of the scene.
+JSON format:
+{"objects": ["object1", "object2"], "description": "scene description"}
 
-You MUST respond with ONLY this exact JSON format:
-{"objects": ["item1", "item2"], "description": "One or two sentences describing the scene."}
+If the image is unclear, use:
+{"objects": [], "description": "unknown", "error": "reason why"}
 
-Rules for objects:
-- Be specific: "scissors" not "tool", "laptop" not "device"
-- Include people as "person" or "man"/"woman"
-- Only list clearly visible objects
+Example:
+{"objects": ["mountain", "ocean", "lighthouse"], "description": "A lighthouse on a rocky coast with mountains in the background."}
 
-Rules for description:
-- Describe what's happening
-- Mention the setting/environment
-- Keep it to 1-2 sentences
-
-Respond with JSON only, no other text."""
+Respond with JSON only. Describe what you CAN see."""
 
     if not context:
         return base_prompt
@@ -314,9 +308,17 @@ NOTE: {log_footage_note}
 - Focus on describing the content and action, not the color grading
 """
 
+    # Add topic/activity instruction if provided
+    topic = context.get("topic", "") or context.get("activity", "")
+    topic_instruction = ""
+    if topic:
+        topic_instruction = f"""
+IMPORTANT: This video shows "{topic}". Use this context to interpret the action.
+"""
+
     # Enhanced prompt with context
     return f"""{context_section}
-{person_instruction}{landmark_instruction}{log_instruction}
+{person_instruction}{landmark_instruction}{log_instruction}{topic_instruction}
 Look at this image carefully and describe what you see.
 
 You MUST respond with ONLY this exact JSON format:
@@ -379,6 +381,7 @@ def _build_batch_prompt(
 
     # Build context section if available
     context_section = ""
+    topic_hint = ""
     if context:
         context_lines = ["Known context about this video:"]
         labels = {
@@ -386,6 +389,7 @@ def _build_batch_prompt(
             "location": "Location",
             "nearby_landmarks": "Nearby landmarks/POIs",
             "activity": "Activity",
+            "topic": "Activity/Subject",
             "language": "Language spoken",
             "device": "Filmed with",
         }
@@ -393,28 +397,34 @@ def _build_batch_prompt(
             if value and key not in ("log_footage_note", "color_transfer"):
                 label = labels.get(key, key.replace("_", " ").title())
                 context_lines.append(f"- {label}: {value}")
+                # Capture topic for special instruction
+                if key in ("topic", "activity") and value:
+                    topic_hint = value
         context_section = "\n".join(context_lines) + "\n\n"
 
     person_instruction = ""
     if person_name:
         person_instruction = f'Use "{person_name}" instead of "person" in objects and description.\n'
 
-    return f"""{context_section}These {num_frames} frames are from the same video in sequence.
-{person_instruction}
-Analyze what happens ACROSS these frames:
-1. What objects/people are visible throughout?
-2. What ACTION or movement occurs across the frames?
-3. How does the scene change from first to last frame?
+    # Add topic instruction if provided
+    topic_instruction = ""
+    if topic_hint:
+        topic_instruction = f'IMPORTANT: This video shows "{topic_hint}". Use this context to interpret what you see.\n'
 
-You MUST respond with ONLY this exact JSON format:
-{{"objects": ["item1", "item2"], "action": "The action happening across frames", "description": "Overall scene description"}}
+    return f"""{context_section}These {num_frames} frames are from a video.
+{person_instruction}{topic_instruction}
+Describe what you see. List main objects and write a short description.
 
-Rules:
-- List objects visible in ANY of the frames
-- Describe the ACTION that unfolds across frames (e.g., "person walks toward camera", "car turns left")
-- Keep description to 1-2 sentences summarizing the sequence
+JSON format:
+{{"objects": ["object1", "object2"], "action": "what is happening", "description": "scene description"}}
 
-Respond with JSON only, no other text."""
+If the image is unclear or you cannot identify content, use:
+{{"objects": [], "action": "unknown", "description": "unknown", "error": "reason why"}}
+
+Example:
+{{"objects": ["bus", "road", "mountain"], "action": "bus driving", "description": "A bus on a coastal road with mountains."}}
+
+Respond with JSON only. Describe what you CAN see, even if partial."""
 
 
 def _build_batch_context_prompt(
@@ -862,9 +872,16 @@ def _analyze_frames_batch_context(
 
             # Build content with all images in the batch
             content: list[dict[str, str]] = []
-            for frame_path, _ in batch:
+            for frame_path, ts in batch:
+                # Verify frame exists and log size
+                if os.path.exists(frame_path):
+                    size_kb = os.path.getsize(frame_path) / 1024
+                    logger.info(f"Batch frame {ts:.1f}s: {size_kb:.1f}KB")
+                else:
+                    logger.warning(f"Batch frame missing: {frame_path}")
                 content.append({"type": "image", "image": f"file://{frame_path}"})
             content.append({"type": "text", "text": prompt})
+            logger.info(f"Batch {batch_idx + 1}: sending {len(batch)} images to Qwen")
 
             messages = [{"role": "user", "content": content}]
 
@@ -942,8 +959,17 @@ def _fix_malformed_json(text: str) -> str:
     # Remove markdown code blocks
     text = text.replace("```json", "").replace("```", "").strip()
 
+    # Remove invalid control characters (keep newlines and tabs for readability)
+    # Control chars are 0x00-0x1F except \t (0x09), \n (0x0A), \r (0x0D)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+
     # Fix escaped quotes before colons: "action\": -> "action":
     text = text.replace('\\":', '":')
+
+    # Fix markdown bold in JSON keys: "action**: -> "action":
+    # Model sometimes outputs "key**: "value" instead of "key": "value"
+    text = re.sub(r'"\*+:', '":', text)
+    text = re.sub(r"(\w)\*+:", r'\1":', text)  # action**: -> action":
 
     # Replace single quotes with double quotes for keys and string values
     # But be careful not to replace apostrophes within words
@@ -1009,6 +1035,11 @@ def _parse_batch_response(response: str) -> tuple[list[str], str | None]:
             if isinstance(change, str) and change.strip():
                 desc_parts.append(f"Change: {change.strip()}")
 
+            # Check for error field (model couldn't fully analyze)
+            error = data.get("error", "")
+            if isinstance(error, str) and error.strip():
+                logger.warning(f"Qwen reported issue: {error}")
+
             if desc_parts:
                 description = " ".join(desc_parts)
 
@@ -1016,6 +1047,33 @@ def _parse_batch_response(response: str) -> tuple[list[str], str | None]:
 
     except (json.JSONDecodeError, ValueError) as e:
         logger.warning(f"Failed to parse batch JSON from Qwen response: {e}")
+
+        # Try to extract objects from partial/truncated JSON using regex
+        # Look for "name": "value" patterns in the objects array
+        name_matches = re.findall(r'"name"\s*:\s*"([^"]+)"', response)
+        if name_matches:
+            objects = [n for n in name_matches if len(n) < 100 and n.strip()]
+            logger.info(f"Extracted {len(objects)} objects from partial JSON: {objects}")
+            if objects:
+                return objects, None
+
+        # Look for simple string arrays: ["item1", "item2"]
+        array_match = re.search(r'"objects"\s*:\s*\[([^\]]*)', response)
+        if array_match:
+            items = re.findall(r'"([^"]+)"', array_match.group(1))
+            objects = [i for i in items if len(i) < 100 and i.strip() and i not in ("name", "color", "location")]
+            if objects:
+                logger.info(f"Extracted {len(objects)} objects from array: {objects}")
+
+        # Try to extract description from malformed JSON
+        desc_match = re.search(r'"description["\*]*\s*:\s*"([^"]+)"', response)
+        if desc_match:
+            description = desc_match.group(1).strip()
+            logger.info(f"Extracted description from partial JSON: {description}")
+            return objects, description
+
+        if objects:
+            return objects, None
 
     # Fallback to standard parser
     return _parse_objects_and_description(response)
@@ -1061,7 +1119,7 @@ def extract_objects_qwen(
     Returns:
         ObjectsResult with detected objects and contextual descriptions
     """
-    logger.info(f"extract_objects_qwen called: file={file_path}, timestamps={timestamps}, context={context}")
+    logger.info(f"extract_objects_qwen called: file={file_path}, lut_path={lut_path}, timestamps={timestamps}")
 
     settings = get_settings()
     # Resolve model name (handles "auto")
@@ -1094,24 +1152,22 @@ def extract_objects_qwen(
         else:
             context = context.copy()  # Don't modify the original
 
-        if lut_path and os.path.exists(lut_path):
-            # LUT applied - colors are corrected but may still be slightly off
-            context["log_footage_note"] = (
-                "This footage was recorded in LOG profile and color-corrected with a LUT. Colors shown are the corrected version but may still appear slightly desaturated."
-            )
-            logger.info("Added log footage context hint (with LUT)")
-        elif is_log_footage:
-            # LOG detected but no LUT - colors are definitely off
-            context["log_footage_note"] = (
-                f"This footage appears to be in LOG/flat color profile ({color_transfer}). Colors are desaturated and not representative of the actual scene. Focus on describing content and action, not colors."
-            )
-            logger.info(f"Added log footage context hint (no LUT, color_transfer={color_transfer})")
+        # Determine if we need auto-normalization (LOG footage without LUT)
+        has_lut = lut_path and os.path.exists(lut_path)
+        auto_normalize = is_log_footage and not has_lut
+
+        if has_lut:
+            # LUT applied - colors are corrected
+            logger.info(f"LOG footage detected, applying LUT: {lut_path}")
+        elif auto_normalize:
+            # LOG detected, no LUT - will apply auto-normalization
+            logger.info(f"LOG footage detected ({color_transfer}), applying auto-normalization")
 
         # IMPORTANT: Extract frames BEFORE loading the model!
         # ffmpeg can crash (SIGABRT) when forked from a process with MPS/Metal loaded.
         if progress_callback:
             progress_callback("Extracting frames...", None, None)
-        frame_paths = _extract_frames_at_timestamps(file_path, temp_dir, timestamps, lut_path=lut_path)
+        frame_paths = _extract_frames_at_timestamps(file_path, temp_dir, timestamps, lut_path=lut_path, auto_normalize=auto_normalize)
         total_frames = len([p for p in frame_paths if p])
 
         if total_frames == 0:
@@ -1201,6 +1257,7 @@ def _extract_frames_at_timestamps(
     timestamps: list[float],
     max_width: int = 1280,
     lut_path: str | None = None,
+    auto_normalize: bool = False,
 ) -> list[str]:
     """Extract frames at specific timestamps, resized for VLM inference.
 
@@ -1214,6 +1271,8 @@ def _extract_frames_at_timestamps(
         timestamps: List of timestamps to extract (in seconds)
         max_width: Maximum width for scaling (default 1280)
         lut_path: Optional path to a .cube LUT file for color correction
+        auto_normalize: If True and no LUT, apply automatic color normalization
+            for LOG footage (boosts contrast and saturation)
     """
     import subprocess
 
@@ -1223,16 +1282,28 @@ def _extract_frames_at_timestamps(
 
     logger.info(f"Extracting {len(timestamps)} frames from {file_path} at timestamps {timestamps}")
 
-    # If LUT is provided, use ffmpeg directly for extraction with LUT applied
-    if lut_path and os.path.exists(lut_path):
-        logger.info(f"Applying LUT: {lut_path}")
+    # Use ffmpeg with color correction if LUT provided OR auto-normalize requested
+    use_ffmpeg_color = (lut_path and os.path.exists(lut_path)) or auto_normalize
+
+    if use_ffmpeg_color:
+        # Build color correction filter
+        if lut_path and os.path.exists(lut_path):
+            logger.info(f"Applying LUT: {lut_path}")
+            color_filter = f"lut3d='{lut_path}'"
+        else:
+            # Auto-normalize for LOG footage: apply S-curve + saturation boost
+            # This converts flat LOG footage to a more viewable range for VLM analysis
+            # curves: S-curve to add contrast (lift shadows, compress highlights)
+            # eq: boost saturation since LOG footage is very desaturated
+            logger.info("Applying auto-normalization for LOG footage (no LUT configured)")
+            color_filter = "curves=master='0/0 0.15/0.30 0.5/0.5 0.85/0.70 1/1',eq=saturation=1.4:contrast=1.1"
+
         for i, ts in enumerate(timestamps):
             output_path = os.path.join(output_dir, f"frame_{i:04d}.jpg")
             try:
-                # Build filter chain: LUT + scale
+                # Build filter chain: color correction + scale
                 scale_filter = f"scale={max_width}:{max_width}:force_original_aspect_ratio=decrease"
-                lut_filter = f"lut3d='{lut_path}'"
-                vf = f"{lut_filter},{scale_filter}"
+                vf = f"{color_filter},{scale_filter}"
 
                 cmd = [
                     "ffmpeg",
@@ -1255,9 +1326,10 @@ def _extract_frames_at_timestamps(
 
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                     frame_paths.append(output_path)
-                    logger.info(f"Extracted frame {i} at {ts:.2f}s with LUT: {output_path}")
+                    correction_type = "LUT" if (lut_path and os.path.exists(lut_path)) else "auto-normalized"
+                    logger.info(f"Extracted frame {i} at {ts:.2f}s ({correction_type}): {output_path}")
                 else:
-                    logger.warning(f"Frame at {ts:.2f}s: could not extract with LUT")
+                    logger.warning(f"Frame at {ts:.2f}s: could not extract with color correction")
                     frame_paths.append("")
             except subprocess.CalledProcessError as e:
                 logger.warning(f"Frame at {ts:.2f}s: ffmpeg failed: {e}")
