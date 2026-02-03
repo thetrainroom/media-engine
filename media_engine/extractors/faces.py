@@ -200,7 +200,7 @@ def extract_faces(
         unique_faces, unique_estimate = _deduplicate_faces(detections, all_embeddings, frame_size=frame_size)
 
         needs_review = sum(1 for f in unique_faces if f.needs_review)
-        logger.info(f"Detected {len(detections)} faces, {unique_estimate} unique, " f"{needs_review} need review")
+        logger.info(f"Detected {len(detections)} faces, {unique_estimate} unique, {needs_review} need review")
 
         return FacesResult(
             count=len(detections),

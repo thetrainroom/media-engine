@@ -261,7 +261,7 @@ def extract_ocr(
     # Log stats
     if frames_checked > 0:
         skip_pct = (frames_skipped / frames_checked) * 100
-        logger.info(f"OCR: {frames_checked} frames checked, {frames_skipped} skipped ({skip_pct:.0f}%), " f"{frames_with_text} processed, {len(detections)} text regions found")
+        logger.info(f"OCR: {frames_checked} frames checked, {frames_skipped} skipped ({skip_pct:.0f}%), {frames_with_text} processed, {len(detections)} text regions found")
     else:
         logger.info("OCR: no frames to process")
 

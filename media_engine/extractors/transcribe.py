@@ -251,7 +251,7 @@ def get_transcription_backend() -> TranscriptionBackend:
         logger.info("Using openai-whisper backend (CPU)")
         return _backend
     except ImportError:
-        raise RuntimeError("No Whisper backend available. Install one of: " "mlx-whisper, faster-whisper, openai-whisper")
+        raise RuntimeError("No Whisper backend available. Install one of: mlx-whisper, faster-whisper, openai-whisper")
 
 
 def unload_whisper_model() -> None:

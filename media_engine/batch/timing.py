@@ -126,7 +126,7 @@ def record_timing(
         _timing_history_dirty = True
 
         unit_label = "/unit" if units else "s"
-        logger.debug(f"Recorded timing: {extractor}@{resolution_bucket} = {rate:.2f}{unit_label} " f"(avg: {avg:.2f}{unit_label} from {sample_count} samples)")
+        logger.debug(f"Recorded timing: {extractor}@{resolution_bucket} = {rate:.2f}{unit_label} (avg: {avg:.2f}{unit_label} from {sample_count} samples)")
     # Save periodically (not on every update to reduce disk I/O)
     if _timing_history_dirty and time.time() - _timing_history_last_save > _TIMING_SAVE_INTERVAL:
         save_timing_history()

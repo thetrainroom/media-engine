@@ -286,7 +286,7 @@ def decode_frames(
     out_width = out_width - (out_width % 2)
     out_height = out_height - (out_height % 2)
 
-    logger.info(f"Decoding {len(timestamps)} frames from {file_path} " f"at {out_width}x{out_height}" + (f" (hwaccel={hwaccel})" if hwaccel else ""))
+    logger.info(f"Decoding {len(timestamps)} frames from {file_path} at {out_width}x{out_height}" + (f" (hwaccel={hwaccel})" if hwaccel else ""))
 
     frames: dict[float, SharedFrame] = {}
 

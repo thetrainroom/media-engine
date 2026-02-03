@@ -57,6 +57,15 @@ class BatchRequest(BaseModel):
     # Optional LUT path for visual analysis (e.g., for log footage color correction)
     # Applied to extracted frames before sending to Qwen
     lut_path: str | None = None
+    # Per-file batch overlap setting for visual analysis (file path -> bool)
+    # When True, batches overlap by 1 frame for visual continuity (useful for unstable camera)
+    # Example: {"/path/shaky_video.mp4": True}
+    visual_batch_overlap: dict[str, bool] | None = None
+    # Per-file Qwen strategy override (file path -> strategy)
+    # Overrides global qwen_strategy setting for specific files
+    # Values: "single", "context", "batch", "batch_context"
+    # Example: {"/path/action_video.mp4": "batch_context"}
+    visual_strategy: dict[str, str] | None = None
 
 
 class BatchFileStatus(BaseModel):

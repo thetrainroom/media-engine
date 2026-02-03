@@ -248,7 +248,7 @@ def detect_voice_activity(
         # Audio present but no speech detected (silent, ambient, or music)
         audio_content = AudioContent.AUDIO
 
-    logger.info(f"VAD result for {path.name}: {audio_content} " f"(speech_ratio={speech_ratio:.2%}, duration={total_speech_duration:.1f}s)")
+    logger.info(f"VAD result for {path.name}: {audio_content} (speech_ratio={speech_ratio:.2%}, duration={total_speech_duration:.1f}s)")
 
     return {
         "audio_content": str(audio_content),
