@@ -969,7 +969,7 @@ def _fix_malformed_json(text: str) -> str:
     # Fix markdown bold in JSON keys: "action**: -> "action":
     # Model sometimes outputs "key**: "value" instead of "key": "value"
     text = re.sub(r'"\*+:', '":', text)
-    text = re.sub(r'(\w)\*+:', r'\1":', text)  # action**: -> action":
+    text = re.sub(r"(\w)\*+:", r'\1":', text)  # action**: -> action":
 
     # Replace single quotes with double quotes for keys and string values
     # But be careful not to replace apostrophes within words
@@ -1167,9 +1167,7 @@ def extract_objects_qwen(
         # ffmpeg can crash (SIGABRT) when forked from a process with MPS/Metal loaded.
         if progress_callback:
             progress_callback("Extracting frames...", None, None)
-        frame_paths = _extract_frames_at_timestamps(
-            file_path, temp_dir, timestamps, lut_path=lut_path, auto_normalize=auto_normalize
-        )
+        frame_paths = _extract_frames_at_timestamps(file_path, temp_dir, timestamps, lut_path=lut_path, auto_normalize=auto_normalize)
         total_frames = len([p for p in frame_paths if p])
 
         if total_frames == 0:
