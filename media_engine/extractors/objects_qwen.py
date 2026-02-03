@@ -239,19 +239,20 @@ def _build_analysis_prompt(context: dict[str, str] | None = None) -> str:
     """Build the analysis prompt, optionally including context."""
     base_prompt = """Look at this image carefully and describe what you see.
 
-List all visible objects and write a brief description of the scene.
+List visible elements and write a brief description of the scene.
 
 You MUST respond with ONLY this exact JSON format:
 {"objects": ["item1", "item2"], "description": "One or two sentences describing the scene."}
 
 Rules for objects:
+- Include people, vehicles, buildings, animals, and distinct objects
+- Include landscape features: mountains, water, trees, sky, roads, fields, etc.
 - Be specific: "scissors" not "tool", "laptop" not "device"
 - Include people as "person" or "man"/"woman"
-- Only list clearly visible objects
 
 Rules for description:
-- Describe what's happening
-- Mention the setting/environment
+- ALWAYS provide a description, even for static landscape/scenery
+- Describe what's visible and the setting/environment
 - Keep it to 1-2 sentences
 
 Respond with JSON only, no other text."""
@@ -401,18 +402,19 @@ def _build_batch_prompt(
 
     return f"""{context_section}These {num_frames} frames are from the same video in sequence.
 {person_instruction}
-Analyze what happens ACROSS these frames:
-1. What objects/people are visible throughout?
-2. What ACTION or movement occurs across the frames?
-3. How does the scene change from first to last frame?
+Analyze these frames:
+1. What is visible? (people, objects, landscape features, buildings, vehicles, nature)
+2. What is happening? (action, movement, or "static shot" if nothing moves)
+3. Describe the overall scene in 1-2 sentences.
 
 You MUST respond with ONLY this exact JSON format:
-{{"objects": ["item1", "item2"], "action": "The action happening across frames", "description": "Overall scene description"}}
+{{"objects": ["item1", "item2"], "action": "What is happening or 'static shot'", "description": "Overall scene description"}}
 
 Rules:
-- List objects visible in ANY of the frames
-- Describe the ACTION that unfolds across frames (e.g., "person walks toward camera", "car turns left")
-- Keep description to 1-2 sentences summarizing the sequence
+- List what's visible: people, objects, landscape features (mountains, water, trees, sky, etc.)
+- For action: describe movement if any, otherwise say "static shot" or "slow pan"
+- ALWAYS provide a description, even for static landscape shots
+- Keep description to 1-2 sentences
 
 Respond with JSON only, no other text."""
 
@@ -862,9 +864,16 @@ def _analyze_frames_batch_context(
 
             # Build content with all images in the batch
             content: list[dict[str, str]] = []
-            for frame_path, _ in batch:
+            for frame_path, ts in batch:
+                # Verify frame exists and log size
+                if os.path.exists(frame_path):
+                    size_kb = os.path.getsize(frame_path) / 1024
+                    logger.info(f"Batch frame {ts:.1f}s: {size_kb:.1f}KB")
+                else:
+                    logger.warning(f"Batch frame missing: {frame_path}")
                 content.append({"type": "image", "image": f"file://{frame_path}"})
             content.append({"type": "text", "text": prompt})
+            logger.info(f"Batch {batch_idx + 1}: sending {len(batch)} images to Qwen")
 
             messages = [{"role": "user", "content": content}]
 
