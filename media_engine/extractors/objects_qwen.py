@@ -308,9 +308,17 @@ NOTE: {log_footage_note}
 - Focus on describing the content and action, not the color grading
 """
 
+    # Add topic/activity instruction if provided
+    topic = context.get("topic", "") or context.get("activity", "")
+    topic_instruction = ""
+    if topic:
+        topic_instruction = f"""
+IMPORTANT: This video shows "{topic}". Use this context to interpret the action.
+"""
+
     # Enhanced prompt with context
     return f"""{context_section}
-{person_instruction}{landmark_instruction}{log_instruction}
+{person_instruction}{landmark_instruction}{log_instruction}{topic_instruction}
 Look at this image carefully and describe what you see.
 
 You MUST respond with ONLY this exact JSON format:
@@ -373,6 +381,7 @@ def _build_batch_prompt(
 
     # Build context section if available
     context_section = ""
+    topic_hint = ""
     if context:
         context_lines = ["Known context about this video:"]
         labels = {
@@ -380,6 +389,7 @@ def _build_batch_prompt(
             "location": "Location",
             "nearby_landmarks": "Nearby landmarks/POIs",
             "activity": "Activity",
+            "topic": "Activity/Subject",
             "language": "Language spoken",
             "device": "Filmed with",
         }
@@ -387,14 +397,22 @@ def _build_batch_prompt(
             if value and key not in ("log_footage_note", "color_transfer"):
                 label = labels.get(key, key.replace("_", " ").title())
                 context_lines.append(f"- {label}: {value}")
+                # Capture topic for special instruction
+                if key in ("topic", "activity") and value:
+                    topic_hint = value
         context_section = "\n".join(context_lines) + "\n\n"
 
     person_instruction = ""
     if person_name:
         person_instruction = f'Use "{person_name}" instead of "person" in objects and description.\n'
 
+    # Add topic instruction if provided
+    topic_instruction = ""
+    if topic_hint:
+        topic_instruction = f'IMPORTANT: This video shows "{topic_hint}". Use this context to interpret what you see.\n'
+
     return f"""{context_section}These {num_frames} frames are from a video.
-{person_instruction}
+{person_instruction}{topic_instruction}
 Describe what you see. List main objects and write a short description.
 
 JSON format:
@@ -948,6 +966,11 @@ def _fix_malformed_json(text: str) -> str:
     # Fix escaped quotes before colons: "action\": -> "action":
     text = text.replace('\\":', '":')
 
+    # Fix markdown bold in JSON keys: "action**: -> "action":
+    # Model sometimes outputs "key**: "value" instead of "key": "value"
+    text = re.sub(r'"\*+:', '":', text)
+    text = re.sub(r'(\w)\*+:', r'\1":', text)  # action**: -> action":
+
     # Replace single quotes with double quotes for keys and string values
     # But be careful not to replace apostrophes within words
     # First, handle keys: 'key': -> "key":
@@ -1041,7 +1064,16 @@ def _parse_batch_response(response: str) -> tuple[list[str], str | None]:
             objects = [i for i in items if len(i) < 100 and i.strip() and i not in ("name", "color", "location")]
             if objects:
                 logger.info(f"Extracted {len(objects)} objects from array: {objects}")
-                return objects, None
+
+        # Try to extract description from malformed JSON
+        desc_match = re.search(r'"description["\*]*\s*:\s*"([^"]+)"', response)
+        if desc_match:
+            description = desc_match.group(1).strip()
+            logger.info(f"Extracted description from partial JSON: {description}")
+            return objects, description
+
+        if objects:
+            return objects, None
 
     # Fallback to standard parser
     return _parse_objects_and_description(response)
