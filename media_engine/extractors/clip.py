@@ -129,30 +129,51 @@ class OpenCLIPBackend(CLIPBackend):
 
 
 class MLXCLIPBackend(CLIPBackend):
-    """MLX-CLIP backend for Apple Silicon."""
+    """MLX-CLIP backend for Apple Silicon.
+
+    Uses mlx_clip library which requires converting HuggingFace weights
+    to MLX format first. Falls back to transformers if mlx_clip is not available.
+    """
 
     def __init__(self, model_name: str = "openai/clip-vit-base-patch32") -> None:
-        # Lazy import for Apple Silicon only
         self._model: Any = None
-        self._processor: Any = None
+        self._processor: Any = None  # Image processor (mlx_clip) or CLIPProcessor (transformers)
+        self._tokenizer: Any = None  # Tokenizer for mlx_clip
         self._model_name = model_name
+        self._use_mlx_clip = False
+
+    def _get_mlx_cache_path(self) -> Path:
+        """Get the local cache path for converted MLX weights."""
+        cache_dir = Path.home() / ".cache" / "mlx_clip"
+        safe_name = self._model_name.replace("/", "_")
+        return cache_dir / safe_name
 
     def _load_model(self) -> None:
-        if self._model is None:
-            try:
-                # Try mlx-clip first
-                import mlx_clip  # type: ignore[import-not-found]
+        if self._model is not None:
+            return
 
-                self._model = mlx_clip.load(self._model_name)
-                self._processor = None  # MLX-CLIP handles preprocessing
-                logger.info(f"Loaded MLX-CLIP model: {self._model_name}")
-            except ImportError:
-                # Fall back to transformers + mlx
-                from transformers import CLIPModel, CLIPProcessor  # type: ignore[import-not-found]
+        try:
+            from mlx_clip import CLIPModel, CLIPImageProcessor, CLIPTokenizer  # type: ignore[import-not-found]
+            from mlx_clip import convert_weights  # type: ignore[import-not-found]
 
-                self._processor = CLIPProcessor.from_pretrained(self._model_name)
-                self._model = CLIPModel.from_pretrained(self._model_name)
-                logger.info(f"Loaded transformers CLIP model: {self._model_name}")
+            mlx_path = self._get_mlx_cache_path()
+            if not mlx_path.exists():
+                logger.info(f"Converting {self._model_name} to MLX format at {mlx_path}")
+                convert_weights(hf_repo=self._model_name, mlx_path=str(mlx_path))
+
+            self._model = CLIPModel.from_pretrained(str(mlx_path))
+            self._processor = CLIPImageProcessor.from_pretrained(str(mlx_path))
+            self._tokenizer = CLIPTokenizer.from_pretrained(str(mlx_path))
+            self._use_mlx_clip = True
+            logger.info(f"Loaded MLX-CLIP model: {self._model_name}")
+        except (ImportError, Exception) as e:
+            logger.warning(f"MLX-CLIP not available ({e}), falling back to transformers")
+            from transformers import CLIPModel, CLIPProcessor  # type: ignore[import-not-found]
+
+            self._processor = CLIPProcessor.from_pretrained(self._model_name)
+            self._model = CLIPModel.from_pretrained(self._model_name)
+            self._use_mlx_clip = False
+            logger.info(f"Loaded transformers CLIP model: {self._model_name}")
 
     def encode_image(self, image_path: str) -> Embedding:
         rgb_array = _load_image_rgb(image_path)
@@ -162,19 +183,28 @@ class MLXCLIPBackend(CLIPBackend):
         from PIL import Image
 
         self._load_model()
-
         image = Image.fromarray(rgb_array)
 
-        if self._processor is not None:
-            # Using transformers
-            inputs = self._processor(images=image, return_tensors="pt")
-            outputs = self._model.get_image_features(**inputs)
-            embedding = outputs / outputs.norm(dim=-1, keepdim=True)
-            return embedding.detach().numpy().flatten().tolist()
+        if self._use_mlx_clip:
+            import mlx.core as mx  # type: ignore[import-not-found]
+
+            pixel_values = self._processor([image])  # Expects list of images
+            features = self._model.get_image_features(pixel_values)
+            # Normalize
+            features = features / mx.linalg.norm(features, axis=-1, keepdims=True)
+            return np.array(features).flatten().tolist()
         else:
-            # Using mlx-clip
-            embedding = self._model.encode_image(image)
-            return embedding.tolist()
+            import torch
+
+            inputs = self._processor(images=image, return_tensors="pt")
+            with torch.no_grad():
+                outputs = self._model.get_image_features(pixel_values=inputs["pixel_values"])
+                if hasattr(outputs, "pooler_output"):
+                    outputs = outputs.pooler_output
+                elif hasattr(outputs, "last_hidden_state"):
+                    outputs = outputs.last_hidden_state[:, 0]
+                embedding = outputs / outputs.norm(dim=-1, keepdim=True)
+            return embedding.numpy().flatten().tolist()
 
     def get_model_name(self) -> str:
         return self._model_name
@@ -182,16 +212,29 @@ class MLXCLIPBackend(CLIPBackend):
     def encode_text(self, text: str) -> Embedding:
         self._load_model()
 
-        if self._processor is not None:
-            # Using transformers
-            inputs = self._processor(text=text, return_tensors="pt")
-            outputs = self._model.get_text_features(**inputs)
-            embedding = outputs / outputs.norm(dim=-1, keepdim=True)
-            return embedding.detach().numpy().flatten().tolist()
+        if self._use_mlx_clip:
+            import mlx.core as mx  # type: ignore[import-not-found]
+
+            tokens = self._tokenizer.tokenize(text)
+            tokens = mx.expand_dims(mx.array(tokens), axis=0)  # Add batch dim
+            features = self._model.get_text_features(tokens)
+            features = features / mx.linalg.norm(features, axis=-1, keepdims=True)
+            return np.array(features).flatten().tolist()
         else:
-            # Using mlx-clip
-            embedding = self._model.encode_text(text)
-            return embedding.tolist()
+            import torch
+
+            inputs = self._processor(text=text, return_tensors="pt", padding=True)
+            with torch.no_grad():
+                outputs = self._model.get_text_features(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs.get("attention_mask"),
+                )
+                if hasattr(outputs, "pooler_output"):
+                    outputs = outputs.pooler_output
+                elif hasattr(outputs, "last_hidden_state"):
+                    outputs = outputs.last_hidden_state[:, 0]
+                embedding = outputs / outputs.norm(dim=-1, keepdim=True)
+            return embedding.numpy().flatten().tolist()
 
 
 # Singleton backend instance

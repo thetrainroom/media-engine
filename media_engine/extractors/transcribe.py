@@ -309,7 +309,7 @@ def get_diarization_pipeline() -> Any:
         logger.info(f"Loading diarization model: {settings.diarization_model}")
         _diarization_pipeline = Pipeline.from_pretrained(
             settings.diarization_model,
-            use_auth_token=settings.hf_token,
+            token=settings.hf_token,
         )
 
         # Move to appropriate device
@@ -350,7 +350,10 @@ def run_diarization(audio_path: str) -> DiarizationResult | None:
         segments: list[SpeakerSegment] = []
         speakers: set[str] = set()
 
-        for turn, _, speaker in diarization.itertracks(yield_label=True):
+        # pyannote v4 returns DiarizeOutput dataclass; v3 returns Annotation directly
+        annotation = getattr(diarization, "speaker_diarization", diarization)
+
+        for turn, _, speaker in annotation.itertracks(yield_label=True):
             segments.append(
                 SpeakerSegment(
                     start=turn.start,

@@ -14,11 +14,17 @@ pip install media-engine[cuda]
 # CPU only
 pip install media-engine[cpu]
 
+# Speaker diarization (optional, run after platform install)
+pip install pyannote-audio
+pip install --upgrade torch torchaudio torchvision
+
 # Start the server
 meng-server
 ```
 
 **Requirements**: Python 3.12+, ffmpeg
+
+> **Note:** Speaker diarization requires a [HuggingFace token](https://huggingface.co/pyannote/speaker-diarization-3.1) with access to the pyannote models. Set `hf_token` in `~/.config/polybos/config.json`. pyannote-audio pins an older torch version, so the two-step install above prevents a torch downgrade.
 
 ## Features
 
@@ -82,16 +88,27 @@ docker compose --profile mlx up -d
 
 ```bash
 # Mac Apple Silicon
-pip install -e ".[mlx]"
+make install-mlx
 
 # NVIDIA GPU
-pip install -e ".[cuda]"
+make install-cuda
 
 # CPU only
-pip install -e ".[cpu]"
+make install-cpu
+
+# Speaker diarization (optional)
+make install-diarization
 
 # Run server with hot reload
 uvicorn media_engine.main:app --reload --port 8001
+```
+
+Or without Make:
+
+```bash
+pip install -e ".[mlx]"          # or cuda, cpu
+pip install pyannote-audio       # optional: speaker diarization
+pip install --upgrade torch torchaudio torchvision  # restore torch version
 ```
 
 ## API Usage
