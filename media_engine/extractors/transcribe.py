@@ -330,6 +330,12 @@ def get_diarization_pipeline() -> Any:
 
             _diarization_pipeline.to(torch.device("cuda"))
             logger.info("Diarization pipeline moved to CUDA")
+        elif is_apple_silicon():
+            import torch
+
+            if torch.backends.mps.is_available():
+                _diarization_pipeline.to(torch.device("mps"))
+                logger.info("Diarization pipeline moved to MPS (Apple Silicon)")
 
         logger.info("Diarization pipeline loaded successfully")
         return _diarization_pipeline
