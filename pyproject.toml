@@ -61,7 +61,8 @@ cuda = [
 mlx = [
     "mlx-whisper>=0.4.0",
     "mlx>=0.5.0",
-    "mlx_clip @ https://github.com/harperreed/mlx_clip/archive/refs/heads/main.zip",
+    # mlx_clip must be installed separately (not on PyPI):
+    #   pip install https://github.com/harperreed/mlx_clip/archive/refs/heads/main.zip
     "torch>=2.0.0",
     "ultralytics>=8.0.0",
 ]

@@ -7,6 +7,7 @@ AI-powered video metadata extraction API for small TV stations and content creat
 ```bash
 # Apple Silicon Mac
 pip install media-engine[mlx]
+pip install https://github.com/harperreed/mlx_clip/archive/refs/heads/main.zip
 
 # NVIDIA GPU
 pip install media-engine[cuda]
@@ -76,6 +77,7 @@ Docker on macOS runs in a Linux VM without Metal/MPS access. For GPU acceleratio
 
 ```bash
 pip install media-engine[mlx]
+pip install https://github.com/harperreed/mlx_clip/archive/refs/heads/main.zip
 meng-server
 ```
 
@@ -107,6 +109,7 @@ Or without Make:
 
 ```bash
 pip install -e ".[mlx]"          # or cuda, cpu
+pip install https://github.com/harperreed/mlx_clip/archive/refs/heads/main.zip  # mlx only
 pip install pyannote-audio       # optional: speaker diarization
 pip install --upgrade torch torchaudio torchvision  # restore torch version
 ```
