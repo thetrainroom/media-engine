@@ -153,8 +153,12 @@ class MLXCLIPBackend(CLIPBackend):
             return
 
         try:
-            from mlx_clip import CLIPModel, CLIPImageProcessor, CLIPTokenizer  # type: ignore[import-not-found]
-            from mlx_clip import convert_weights  # type: ignore[import-not-found]
+            from mlx_clip import (  # type: ignore[import-not-found]
+                CLIPImageProcessor,
+                CLIPModel,
+                CLIPTokenizer,
+                convert_weights,  # type: ignore[import-not-found]
+            )
 
             mlx_path = self._get_mlx_cache_path()
             if not mlx_path.exists():

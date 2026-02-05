@@ -381,7 +381,6 @@ def run_diarization(audio_path: str) -> DiarizationResult | None:
         raw_embeddings = getattr(diarization, "speaker_embeddings", None)
         if raw_embeddings is not None:
             try:
-                import numpy as np
 
                 # Labels are in the same order as rows in the embeddings array
                 sorted_speakers = sorted(speakers)
