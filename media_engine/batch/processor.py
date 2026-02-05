@@ -635,12 +635,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     # into the initial decode so we only decode once
                     duration = file_durations.get(i, 0.0)
                     face_base_ts: list[float] = []
-                    if (
-                        request.enable_faces
-                        and duration > 0
-                        and duration <= 60.0
-                        and media_type != MediaType.IMAGE
-                    ):
+                    if request.enable_faces and duration > 0 and duration <= 60.0 and media_type != MediaType.IMAGE:
                         intensity = motion.avg_intensity if motion else 0.0
                         face_base_ts = compute_face_base_timestamps(duration, intensity)
                         if face_base_ts:
@@ -651,10 +646,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             for ts in all_ts:
                                 if not merged_ts or ts - merged_ts[-1] >= 0.3:
                                     merged_ts.append(ts)
-                            logger.info(
-                                f"Merged timestamps: {adaptive_count} adaptive + {len(face_base_ts)} face base "
-                                f"= {len(merged_ts)} total (after dedup) for {fname}"
-                            )
+                            logger.info(f"Merged timestamps: {adaptive_count} adaptive + {len(face_base_ts)} face base " f"= {len(merged_ts)} total (after dedup) for {fname}")
                             timestamps = merged_ts
 
                     if timestamps:
@@ -809,8 +801,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                                             new_ts.append(ts)
 
                                     # Start with reusable frames from shared buffer
-                                    batch_buffer = buffer.subset(reusable_ts, tolerance=0.35) if reusable_ts else SharedFrameBuffer(
-                                        file_path=file_path, frames={}, width=buffer.width, height=buffer.height
+                                    batch_buffer = (
+                                        buffer.subset(reusable_ts, tolerance=0.35)
+                                        if reusable_ts
+                                        else SharedFrameBuffer(file_path=file_path, frames={}, width=buffer.width, height=buffer.height)
                                     )
 
                                     # Decode only the new timestamps
@@ -895,7 +889,9 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
                             mode_info = "verification" if in_verification_mode else "normal"
                             reuse_info = f", {reused_frames_total} reused from shared buffer" if reused_frames_total > 0 else ""
-                            logger.info(f"Face detection on {total_frames} frames for {fname} (adaptive batching, {len(known_embeddings)} unique, ended in {mode_info} mode{reuse_info})")
+                            logger.info(
+                                f"Face detection on {total_frames} frames for {fname} (adaptive batching, {len(known_embeddings)} unique, ended in {mode_info} mode{reuse_info})"
+                            )
 
                         # Fallback if no duration info
                         if faces is None and buffer is not None:

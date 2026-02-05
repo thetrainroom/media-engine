@@ -390,9 +390,7 @@ def run_diarization(audio_path: str) -> DiarizationResult | None:
                         embeddings.append(SpeakerEmbedding(label=label, embedding=embedding_vec))
                     logger.info(f"Extracted {len(embeddings)} speaker embeddings ({raw_embeddings.shape[1]}-dim)")
                 else:
-                    logger.warning(
-                        f"Speaker count mismatch: {len(sorted_speakers)} labels vs {raw_embeddings.shape[0]} embeddings"
-                    )
+                    logger.warning(f"Speaker count mismatch: {len(sorted_speakers)} labels vs {raw_embeddings.shape[0]} embeddings")
             except Exception as e:
                 logger.warning(f"Failed to extract speaker embeddings: {e}")
 
