@@ -149,6 +149,56 @@ class SharedFrameBuffer:
         """Get sorted list of all timestamps."""
         return sorted(self.frames.keys())
 
+    def subset(self, timestamps: list[float], tolerance: float = 0.05) -> "SharedFrameBuffer":
+        """Return a new buffer with only frames at/near the specified timestamps.
+
+        Performs shallow copy of SharedFrame references (no pixel data duplication).
+
+        Args:
+            timestamps: Desired timestamps to include
+            tolerance: Maximum time difference to consider a match (seconds)
+
+        Returns:
+            New SharedFrameBuffer with matching frames
+        """
+        subset_frames: dict[float, SharedFrame] = {}
+        sorted_keys = sorted(self.frames.keys())
+
+        for target_ts in timestamps:
+            # Binary search would be faster, but frame counts are small enough
+            best_ts = None
+            best_diff = float("inf")
+            for ts in sorted_keys:
+                diff = abs(ts - target_ts)
+                if diff < best_diff:
+                    best_diff = diff
+                    best_ts = ts
+                elif ts > target_ts + tolerance:
+                    break  # sorted, no point continuing
+
+            if best_ts is not None and best_diff <= tolerance:
+                subset_frames[best_ts] = self.frames[best_ts]
+
+        return SharedFrameBuffer(
+            file_path=self.file_path,
+            frames=subset_frames,
+            width=self.width,
+            height=self.height,
+        )
+
+    def merge(self, other: "SharedFrameBuffer") -> None:
+        """Add frames from another buffer into this one.
+
+        Existing timestamps are kept (no overwrite). Only adds frames
+        at timestamps not already present.
+
+        Args:
+            other: Another SharedFrameBuffer to merge frames from
+        """
+        for ts, frame in other.frames.items():
+            if ts not in self.frames:
+                self.frames[ts] = frame
+
 
 def _extract_single_frame(
     file_path: str,
@@ -349,3 +399,33 @@ def get_extractor_timestamps(
 
     # Dynamic footage - use all timestamps
     return base_timestamps
+
+
+def compute_face_base_timestamps(duration: float, avg_intensity: float) -> list[float]:
+    """Compute uniform face sampling timestamps based on motion intensity.
+
+    Higher motion intensity produces denser sampling (higher FPS) to catch
+    faces in fast-moving footage.
+
+    Args:
+        duration: Video duration in seconds
+        avg_intensity: Average motion intensity from motion analysis
+
+    Returns:
+        List of uniformly-spaced timestamps at the appropriate face FPS
+    """
+    if duration <= 0:
+        return []
+
+    if avg_intensity >= 10.0:
+        face_fps = 3.0
+    elif avg_intensity >= 6.0:
+        face_fps = 2.0
+    elif avg_intensity >= 2.0:
+        face_fps = 1.5
+    else:
+        face_fps = 1.0
+
+    num_samples = max(1, int(duration * face_fps))
+    step = duration / (num_samples + 1)
+    return [step * (j + 1) for j in range(num_samples)]

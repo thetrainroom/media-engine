@@ -5,6 +5,7 @@ from .faces import check_faces_are_known, extract_faces, unload_face_model
 from .frame_buffer import (
     SharedFrame,
     SharedFrameBuffer,
+    compute_face_base_timestamps,
     decode_frames,
     get_extractor_timestamps,
 )
@@ -72,4 +73,5 @@ __all__ = [
     "SharedFrameBuffer",
     "decode_frames",
     "get_extractor_timestamps",
+    "compute_face_base_timestamps",
 ]

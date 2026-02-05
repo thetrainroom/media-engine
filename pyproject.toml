@@ -61,7 +61,7 @@ cuda = [
 mlx = [
     "mlx-whisper>=0.4.0",
     "mlx>=0.5.0",
-    "open-clip-torch>=2.24.0",
+    "mlx_clip @ https://github.com/harperreed/mlx_clip/archive/refs/heads/main.zip",
     "torch>=2.0.0",
     "ultralytics>=8.0.0",
 ]
@@ -89,6 +89,9 @@ dev = [
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.version]
 source = "vcs"
