@@ -45,6 +45,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         SharedFrameBuffer,
         analyze_motion,
         check_faces_are_known,
+        compute_face_base_timestamps,
         decode_frames,
         detect_voice_activity,
         extract_clip,
@@ -57,7 +58,6 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         extract_telemetry,
         extract_transcript,
         get_adaptive_timestamps,
-        get_extractor_timestamps,
         get_sample_timestamps,
         run_ffprobe_batch,
         unload_clip_model,
@@ -627,13 +627,35 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         if file_timestamps:
                             timestamps = file_timestamps
 
-                    # Apply motion-based filtering for stable footage
-                    if motion and motion.is_stable and timestamps:
-                        timestamps = get_extractor_timestamps(motion.is_stable, motion.avg_intensity, timestamps)
-
                     # For images, use timestamp 0
                     if media_type == MediaType.IMAGE:
                         timestamps = [0.0]
+
+                    # For short videos with faces enabled, merge face base timestamps
+                    # into the initial decode so we only decode once
+                    duration = file_durations.get(i, 0.0)
+                    face_base_ts: list[float] = []
+                    if (
+                        request.enable_faces
+                        and duration > 0
+                        and duration <= 60.0
+                        and media_type != MediaType.IMAGE
+                    ):
+                        intensity = motion.avg_intensity if motion else 0.0
+                        face_base_ts = compute_face_base_timestamps(duration, intensity)
+                        if face_base_ts:
+                            adaptive_count = len(timestamps)
+                            # Merge and deduplicate (within 0.3s)
+                            all_ts = sorted(set(timestamps + face_base_ts))
+                            merged_ts: list[float] = []
+                            for ts in all_ts:
+                                if not merged_ts or ts - merged_ts[-1] >= 0.3:
+                                    merged_ts.append(ts)
+                            logger.info(
+                                f"Merged timestamps: {adaptive_count} adaptive + {len(face_base_ts)} face base "
+                                f"= {len(merged_ts)} total (after dedup) for {fname}"
+                            )
+                            timestamps = merged_ts
 
                     if timestamps:
                         try:
@@ -725,29 +747,29 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         in_verification_mode = False
 
                         if duration <= 60.0:
-                            # Short video - process all at once
-                            num_samples = max(1, int(duration * face_fps))
-                            step = duration / (num_samples + 1)
-                            face_timestamps = [step * (j + 1) for j in range(num_samples)]
+                            # Short video - face base timestamps were already merged
+                            # into the initial decode, so use buffer.subset()
+                            face_timestamps = compute_face_base_timestamps(duration, intensity)
 
                             # Merge with YOLO person timestamps
                             if person_ts:
                                 all_ts = sorted(set(person_ts + face_timestamps))
-                                merged_ts: list[float] = []
+                                merged_face_ts: list[float] = []
                                 for ts in all_ts:
-                                    if not merged_ts or ts - merged_ts[-1] >= 0.3:
-                                        merged_ts.append(ts)
-                                face_timestamps = merged_ts
+                                    if not merged_face_ts or ts - merged_face_ts[-1] >= 0.3:
+                                        merged_face_ts.append(ts)
+                                face_timestamps = merged_face_ts
 
-                            if face_timestamps:
-                                face_buffer = decode_frames(file_path, timestamps=face_timestamps)
+                            if face_timestamps and buffer is not None:
+                                face_buffer = buffer.subset(face_timestamps, tolerance=0.35)
                                 faces = extract_faces(file_path, frame_buffer=face_buffer)
                                 face_frame_count = len(face_buffer.frames)
-                                logger.info(f"Face detection on {face_frame_count} frames for {fname} (short video, {face_fps} FPS)")
+                                logger.info(f"Face detection on {face_frame_count} frames for {fname} (subset of shared buffer, {face_fps} FPS)")
                         else:
-                            # Long video - use adaptive batching
+                            # Long video - use adaptive batching with shared buffer reuse
                             current_time = 0.0
                             total_frames = 0
+                            reused_frames_total = 0
 
                             while current_time < duration:
                                 # Determine batch parameters
@@ -773,48 +795,79 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                                                 merged_ts.append(ts)
                                         batch_timestamps = merged_ts
 
-                                # Process this batch
-                                if batch_timestamps:
+                                # Process this batch - reuse frames from shared buffer when possible
+                                if batch_timestamps and buffer is not None:
+                                    # Split into reusable (already decoded) and new timestamps
+                                    reusable_ts = []
+                                    new_ts = []
+                                    for ts in batch_timestamps:
+                                        # Check if this timestamp has a match in the shared buffer
+                                        nearest = min(buffer.frames.keys(), key=lambda t: abs(t - ts), default=None)
+                                        if nearest is not None and abs(nearest - ts) <= 0.35:
+                                            reusable_ts.append(ts)
+                                        else:
+                                            new_ts.append(ts)
+
+                                    # Start with reusable frames from shared buffer
+                                    batch_buffer = buffer.subset(reusable_ts, tolerance=0.35) if reusable_ts else SharedFrameBuffer(
+                                        file_path=file_path, frames={}, width=buffer.width, height=buffer.height
+                                    )
+
+                                    # Decode only the new timestamps
+                                    if new_ts:
+                                        additional = decode_frames(file_path, timestamps=new_ts)
+                                        batch_buffer.merge(additional)
+
+                                    if reusable_ts:
+                                        reused_frames_total += len(batch_buffer.subset(reusable_ts, tolerance=0.35))
+                                        logger.debug(f"Reused {len(reusable_ts)} frames from shared buffer, decoded {len(new_ts)} new")
+
+                                    batch_faces = extract_faces(file_path, frame_buffer=batch_buffer)
+                                    total_frames += len(batch_buffer.frames)
+                                elif batch_timestamps:
+                                    # No shared buffer available, decode all
                                     batch_buffer = decode_frames(file_path, timestamps=batch_timestamps)
                                     batch_faces = extract_faces(file_path, frame_buffer=batch_buffer)
                                     total_frames += len(batch_buffer.frames)
+                                else:
+                                    batch_faces = None
 
-                                    if batch_faces and batch_faces.detections:
-                                        # Add detections to our collection
-                                        for d in batch_faces.detections:
-                                            all_detections.append(
-                                                {
-                                                    "timestamp": d.timestamp,
-                                                    "bbox": d.bbox.model_dump(),
-                                                    "confidence": d.confidence,
-                                                    "embedding": d.embedding,
-                                                    "image_base64": d.image_base64,
-                                                    "needs_review": d.needs_review,
-                                                    "review_reason": d.review_reason,
-                                                }
-                                            )
+                                if batch_faces and batch_faces.detections:
+                                    # Add detections to our collection
+                                    for d in batch_faces.detections:
+                                        all_detections.append(
+                                            {
+                                                "timestamp": d.timestamp,
+                                                "bbox": d.bbox.model_dump(),
+                                                "confidence": d.confidence,
+                                                "embedding": d.embedding,
+                                                "image_base64": d.image_base64,
+                                                "needs_review": d.needs_review,
+                                                "review_reason": d.review_reason,
+                                            }
+                                        )
 
-                                        # Check if faces are all known
-                                        all_known, new_embs = check_faces_are_known(batch_faces, known_embeddings)
+                                    # Check if faces are all known
+                                    all_known, new_embs = check_faces_are_known(batch_faces, known_embeddings)
 
-                                        if new_embs:
-                                            # New faces found - add to known and reset consistency
-                                            known_embeddings.extend(new_embs)
-                                            consistent_batches = 0
-                                            if in_verification_mode:
-                                                logger.info(f"New face detected at {current_time:.1f}s, exiting verification mode")
-                                                in_verification_mode = False
-                                        elif all_known and known_embeddings:
-                                            # All faces are known
-                                            consistent_batches += 1
-                                            if consistent_batches >= min_consistent_batches and not in_verification_mode:
-                                                in_verification_mode = True
-                                                logger.info(f"Faces stable after {current_time:.1f}s, switching to verification mode (every 10s)")
-                                    elif not known_embeddings:
-                                        # No faces in this batch and no known faces yet
+                                    if new_embs:
+                                        # New faces found - add to known and reset consistency
+                                        known_embeddings.extend(new_embs)
+                                        consistent_batches = 0
+                                        if in_verification_mode:
+                                            logger.info(f"New face detected at {current_time:.1f}s, exiting verification mode")
+                                            in_verification_mode = False
+                                    elif all_known and known_embeddings:
+                                        # All faces are known
                                         consistent_batches += 1
-                                        if consistent_batches >= min_consistent_batches:
+                                        if consistent_batches >= min_consistent_batches and not in_verification_mode:
                                             in_verification_mode = True
+                                            logger.info(f"Faces stable after {current_time:.1f}s, switching to verification mode (every 10s)")
+                                elif not known_embeddings:
+                                    # No faces in this batch and no known faces yet
+                                    consistent_batches += 1
+                                    if consistent_batches >= min_consistent_batches:
+                                        in_verification_mode = True
 
                                 current_time = batch_end
 
@@ -841,7 +894,8 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                                 )
 
                             mode_info = "verification" if in_verification_mode else "normal"
-                            logger.info(f"Face detection on {total_frames} frames for {fname} (adaptive batching, {len(known_embeddings)} unique, ended in {mode_info} mode)")
+                            reuse_info = f", {reused_frames_total} reused from shared buffer" if reused_frames_total > 0 else ""
+                            logger.info(f"Face detection on {total_frames} frames for {fname} (adaptive batching, {len(known_embeddings)} unique, ended in {mode_info} mode{reuse_info})")
 
                         # Fallback if no duration info
                         if faces is None and buffer is not None:
