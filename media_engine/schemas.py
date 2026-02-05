@@ -327,6 +327,14 @@ class TranscriptHints(BaseModel):
     fallback_applied: bool = False
 
 
+class SpeakerInfo(BaseModel):
+    """Speaker information with voice embedding from diarization."""
+
+    label: str  # Speaker label (e.g., "SPEAKER_00")
+    embedding: list[float]  # Voice embedding centroid (256-dim from pyannote)
+    total_duration: float  # Total speaking time in seconds
+
+
 class Transcript(BaseModel):
     """Full transcript result."""
 
@@ -334,6 +342,7 @@ class Transcript(BaseModel):
     confidence: float
     duration: float
     speaker_count: int | None = None  # Number of speakers detected (None if diarization disabled)
+    speakers: list[SpeakerInfo] | None = None  # Speaker info with embeddings
     hints_used: TranscriptHints
     segments: list[TranscriptSegment]
 

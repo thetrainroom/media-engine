@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from media_engine.config import get_settings, has_cuda, is_apple_silicon
-from media_engine.schemas import Transcript, TranscriptHints, TranscriptSegment
+from media_engine.schemas import SpeakerInfo, Transcript, TranscriptHints, TranscriptSegment
 
 # Progress callback type: (message, current, total) -> None
 ProgressCallback = Callable[[str, int | None, int | None], None]
@@ -54,6 +54,17 @@ class SpeakerSegment:
 
 
 @dataclass(slots=True)
+class SpeakerEmbedding:
+    """Speaker embedding centroid from diarization.
+
+    Uses slots=True to reduce memory overhead per instance.
+    """
+
+    label: str
+    embedding: list[float]  # 256-dim centroid from pyannote
+
+
+@dataclass(slots=True)
 class DiarizationResult:
     """Result from speaker diarization.
 
@@ -62,6 +73,7 @@ class DiarizationResult:
 
     segments: list[SpeakerSegment] = field(default_factory=list)
     speaker_count: int = 0
+    speaker_embeddings: list[SpeakerEmbedding] = field(default_factory=list)
 
 
 logger = logging.getLogger(__name__)
@@ -363,11 +375,34 @@ def run_diarization(audio_path: str) -> DiarizationResult | None:
             )
             speakers.add(speaker)
 
+        # Extract speaker embeddings (centroids) from DiarizeOutput
+        # pyannote v4 DiarizeOutput has speaker_embeddings attribute (np.ndarray, shape: num_speakers × 256)
+        embeddings: list[SpeakerEmbedding] = []
+        raw_embeddings = getattr(diarization, "speaker_embeddings", None)
+        if raw_embeddings is not None:
+            try:
+                import numpy as np
+
+                # Labels are in the same order as rows in the embeddings array
+                sorted_speakers = sorted(speakers)
+                if len(sorted_speakers) == raw_embeddings.shape[0]:
+                    for i, label in enumerate(sorted_speakers):
+                        embedding_vec = raw_embeddings[i].tolist()
+                        embeddings.append(SpeakerEmbedding(label=label, embedding=embedding_vec))
+                    logger.info(f"Extracted {len(embeddings)} speaker embeddings ({raw_embeddings.shape[1]}-dim)")
+                else:
+                    logger.warning(
+                        f"Speaker count mismatch: {len(sorted_speakers)} labels vs {raw_embeddings.shape[0]} embeddings"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to extract speaker embeddings: {e}")
+
         logger.info(f"Diarization complete: {len(speakers)} speakers, {len(segments)} segments")
 
         return DiarizationResult(
             segments=segments,
             speaker_count=len(speakers),
+            speaker_embeddings=embeddings,
         )
 
     except Exception as e:
@@ -534,12 +569,31 @@ def extract_transcript(
         diarization = run_diarization(audio_path)
         speaker_count: int | None = None
 
+        speakers: list[SpeakerInfo] | None = None
+
         if diarization is not None:
             # Assign speakers to segments
             segments_with_speakers = assign_speakers_to_segments(result.segments, diarization)
             segments = [TranscriptSegment(start=s.start, end=s.end, text=s.text, speaker=speaker) for s, speaker in segments_with_speakers]
             speaker_count = diarization.speaker_count
             logger.info(f"Diarization complete: {speaker_count} speakers detected")
+
+            # Build SpeakerInfo list with embeddings and per-speaker durations
+            if diarization.speaker_embeddings:
+                # Calculate per-speaker total duration from diarization segments
+                speaker_durations: dict[str, float] = {}
+                for seg in diarization.segments:
+                    speaker_durations[seg.speaker] = speaker_durations.get(seg.speaker, 0.0) + (seg.end - seg.start)
+
+                speakers = [
+                    SpeakerInfo(
+                        label=se.label,
+                        embedding=se.embedding,
+                        total_duration=speaker_durations.get(se.label, 0.0),
+                    )
+                    for se in diarization.speaker_embeddings
+                ]
+                logger.info(f"Built {len(speakers)} SpeakerInfo entries with embeddings")
         else:
             segments = [TranscriptSegment(start=s.start, end=s.end, text=s.text) for s in result.segments]
 
@@ -548,6 +602,7 @@ def extract_transcript(
             confidence=result.language_probability,
             duration=audio_duration,
             speaker_count=speaker_count,
+            speakers=speakers,
             hints_used=TranscriptHints(
                 language_hints=language_hints or [],
                 context_hint=context_hint,
