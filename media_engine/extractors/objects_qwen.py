@@ -151,6 +151,7 @@ def _get_qwen_model(
     # Log memory status (informational only - let PyTorch handle OOM)
     free_memory = get_free_memory_gb()
     from media_engine.config import MODEL_MEMORY_REQUIREMENTS
+
     model_memory_gb = MODEL_MEMORY_REQUIREMENTS.get(model_name, 5.0)
     logger.info(f"Free memory: {free_memory:.1f}GB, model needs: ~{model_memory_gb:.0f}GB")
 
@@ -202,19 +203,23 @@ def _get_qwen_model(
 
     if is_qwen3_vl:
         from transformers import Qwen3VLForConditionalGeneration  # type: ignore[import-not-found]
+
         model_class = Qwen3VLForConditionalGeneration
         logger.info("Using Qwen3VLForConditionalGeneration")
     elif is_qwen3_5:
         from transformers import AutoModelForCausalLM  # type: ignore[import-not-found]
+
         model_class = AutoModelForCausalLM
         logger.info("Using AutoModelForCausalLM (Qwen3.5 early-fusion)")
     elif is_qwen2_vl:
         from transformers import Qwen2VLForConditionalGeneration  # type: ignore[import-not-found]
+
         model_class = Qwen2VLForConditionalGeneration
         logger.info("Using Qwen2VLForConditionalGeneration (legacy)")
     else:
         # Default to AutoModelForCausalLM for unknown models
         from transformers import AutoModelForCausalLM  # type: ignore[import-not-found]
+
         model_class = AutoModelForCausalLM
         logger.info(f"Using AutoModelForCausalLM for unknown model: {model_name}")
 
@@ -228,6 +233,7 @@ def _get_qwen_model(
         if is_qwen3_5 and "27B" in model_name:
             try:
                 from transformers import BitsAndBytesConfig  # type: ignore[import-not-found]
+
                 load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True)
                 logger.info("Using 4-bit quantization for Qwen3.5-27B")
             except ImportError:
@@ -240,9 +246,7 @@ def _get_qwen_model(
             logger.info("Moving model to MPS...")
             _qwen_model = _qwen_model.to("mps")
         elif torch_device == "cuda":
-            _qwen_model = model_class.from_pretrained(
-                model_name, device_map="cuda", **load_kwargs
-            )
+            _qwen_model = model_class.from_pretrained(model_name, device_map="cuda", **load_kwargs)
         else:
             _qwen_model = model_class.from_pretrained(model_name, **load_kwargs)
 
@@ -261,9 +265,7 @@ def _get_qwen_model(
 
 def _is_qwen2_vl() -> bool:
     """Check if the currently loaded model is a legacy Qwen2-VL model."""
-    return _qwen_model_name is not None and (
-        "Qwen2-VL" in _qwen_model_name or "Qwen2.5-VL" in _qwen_model_name
-    )
+    return _qwen_model_name is not None and ("Qwen2-VL" in _qwen_model_name or "Qwen2.5-VL" in _qwen_model_name)
 
 
 def _make_image_content(frame_path: str) -> dict[str, Any]:
@@ -325,9 +327,7 @@ def _run_inference(
             repetition_penalty=1.2,
             no_repeat_ngram_size=3,
         )
-    generated_ids_trimmed = [
-        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)
-    ]
+    generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)]
     output_text = processor.batch_decode(
         generated_ids_trimmed,
         skip_special_tokens=True,
