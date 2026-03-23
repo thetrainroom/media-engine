@@ -1,4 +1,4 @@
-"""Object detection using Qwen2-VL vision-language model."""
+"""Object detection using Qwen VLM (supports Qwen3-VL, Qwen3.5, and legacy Qwen2-VL)."""
 
 import json
 import logging
@@ -150,7 +150,8 @@ def _get_qwen_model(
 
     # Log memory status (informational only - let PyTorch handle OOM)
     free_memory = get_free_memory_gb()
-    model_memory_gb = 15.0 if "7B" in model_name else 5.0
+    from media_engine.config import MODEL_MEMORY_REQUIREMENTS
+    model_memory_gb = MODEL_MEMORY_REQUIREMENTS.get(model_name, 5.0)
     logger.info(f"Free memory: {free_memory:.1f}GB, model needs: ~{model_memory_gb:.0f}GB")
 
     # Clear existing GPU memory before loading
@@ -168,7 +169,7 @@ def _get_qwen_model(
             logger.warning(f"Failed to clear MPS cache: {e}")
     gc.collect()
 
-    from transformers import AutoProcessor, Qwen2VLForConditionalGeneration  # type: ignore[import-not-found]
+    from transformers import AutoProcessor  # type: ignore[import-not-found]
 
     # Determine device
     device = get_device()
@@ -182,7 +183,7 @@ def _get_qwen_model(
         torch_device = "cpu"
         torch_dtype = torch.float32
 
-    logger.info(f"Loading Qwen2-VL model: {model_name} on {torch_device}")
+    logger.info(f"Loading Qwen VLM model: {model_name} on {torch_device}")
     if progress_callback:
         progress_callback("Loading Qwen model...", None, None)
 
@@ -194,33 +195,56 @@ def _get_qwen_model(
     os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
     os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 
+    # Select the right model class based on model name
+    is_qwen3_vl = "Qwen3-VL" in model_name
+    is_qwen3_5 = "Qwen3.5" in model_name
+    is_qwen2_vl = "Qwen2-VL" in model_name or "Qwen2.5-VL" in model_name
+
+    if is_qwen3_vl:
+        from transformers import Qwen3VLForConditionalGeneration  # type: ignore[import-not-found]
+        model_class = Qwen3VLForConditionalGeneration
+        logger.info("Using Qwen3VLForConditionalGeneration")
+    elif is_qwen3_5:
+        from transformers import AutoModelForCausalLM  # type: ignore[import-not-found]
+        model_class = AutoModelForCausalLM
+        logger.info("Using AutoModelForCausalLM (Qwen3.5 early-fusion)")
+    elif is_qwen2_vl:
+        from transformers import Qwen2VLForConditionalGeneration  # type: ignore[import-not-found]
+        model_class = Qwen2VLForConditionalGeneration
+        logger.info("Using Qwen2VLForConditionalGeneration (legacy)")
+    else:
+        # Default to AutoModelForCausalLM for unknown models
+        from transformers import AutoModelForCausalLM  # type: ignore[import-not-found]
+        model_class = AutoModelForCausalLM
+        logger.info(f"Using AutoModelForCausalLM for unknown model: {model_name}")
+
     # Load model and processor with detailed error handling
     try:
-        logger.info("Loading Qwen2VLForConditionalGeneration...")
+        logger.info(f"Loading {model_class.__name__}...")
+
+        load_kwargs: dict[str, Any] = {"torch_dtype": torch_dtype}
+
+        # Qwen3.5-27B: use 4-bit quantization to fit in memory
+        if is_qwen3_5 and "27B" in model_name:
+            try:
+                from transformers import BitsAndBytesConfig  # type: ignore[import-not-found]
+                load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True)
+                logger.info("Using 4-bit quantization for Qwen3.5-27B")
+            except ImportError:
+                logger.warning("bitsandbytes not available, loading without quantization")
 
         # For MPS (Apple Silicon), don't use device_map at all
         # device_map triggers accelerate's meta tensor handling which fails on MPS
         if torch_device == "mps":
-            _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                # No device_map - load directly to CPU without accelerate dispatch
-            )
+            _qwen_model = model_class.from_pretrained(model_name, **load_kwargs)
             logger.info("Moving model to MPS...")
             _qwen_model = _qwen_model.to("mps")
         elif torch_device == "cuda":
-            # CUDA works fine with device_map
-            _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                device_map="cuda",
+            _qwen_model = model_class.from_pretrained(
+                model_name, device_map="cuda", **load_kwargs
             )
         else:
-            # CPU - no device_map needed
-            _qwen_model = Qwen2VLForConditionalGeneration.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-            )
+            _qwen_model = model_class.from_pretrained(model_name, **load_kwargs)
 
         logger.info("Qwen model loaded, loading processor...")
         _qwen_processor = AutoProcessor.from_pretrained(model_name)
@@ -233,6 +257,83 @@ def _get_qwen_model(
     _qwen_device = torch_device
 
     return _qwen_model, _qwen_processor, torch_device
+
+
+def _is_qwen2_vl() -> bool:
+    """Check if the currently loaded model is a legacy Qwen2-VL model."""
+    return _qwen_model_name is not None and (
+        "Qwen2-VL" in _qwen_model_name or "Qwen2.5-VL" in _qwen_model_name
+    )
+
+
+def _make_image_content(frame_path: str) -> dict[str, Any]:
+    """Build an image content block compatible with the loaded model family.
+
+    Qwen2-VL uses: {"type": "image", "image": "file:///path"}
+    Qwen3-VL/3.5 use: {"type": "image", "url": "file:///path"}
+    """
+    if _is_qwen2_vl():
+        return {"type": "image", "image": f"file://{frame_path}"}
+    else:
+        return {"type": "image", "url": f"file://{frame_path}"}
+
+
+def _run_inference(
+    model: Any,
+    processor: Any,
+    torch_device: str,
+    messages: list[dict[str, Any]],
+    max_new_tokens: int = 512,
+) -> str:
+    """Run inference on messages, handling differences between Qwen model families.
+
+    Qwen2-VL: uses qwen_vl_utils.process_vision_info() for image preprocessing
+    Qwen3-VL/3.5: uses processor.apply_chat_template() with return_dict=True
+    """
+    if _is_qwen2_vl():
+        from qwen_vl_utils import process_vision_info  # type: ignore[import-not-found]
+
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        )
+    else:
+        # Qwen3-VL and Qwen3.5: apply_chat_template handles everything
+        inputs = processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+        )
+        # Remove token_type_ids if present (not needed for generation)
+        if isinstance(inputs, dict):
+            inputs.pop("token_type_ids", None)
+
+    inputs = inputs.to(torch_device)
+
+    with torch.no_grad():
+        generated_ids = model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            repetition_penalty=1.2,
+            no_repeat_ngram_size=3,
+        )
+    generated_ids_trimmed = [
+        out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs["input_ids"], generated_ids)
+    ]
+    output_text = processor.batch_decode(
+        generated_ids_trimmed,
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )[0]
+    return output_text
 
 
 def _build_analysis_prompt(context: dict[str, str] | None = None) -> str:
@@ -467,8 +568,6 @@ def _analyze_frames_single(
     progress_callback: ProgressCallback | None,
 ) -> tuple[dict[str, int], list[ObjectDetection], list[str]]:
     """Analyze frames one at a time without temporal context (original behavior)."""
-    from qwen_vl_utils import process_vision_info  # type: ignore[import-not-found]
-
     all_objects: dict[str, int] = {}
     detections: list[ObjectDetection] = []
     descriptions: list[str] = []
@@ -495,37 +594,13 @@ def _analyze_frames_single(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image", "image": f"file://{frame_path}"},
+                        _make_image_content(frame_path),
                         {"type": "text", "text": prompt},
                     ],
                 }
             ]
 
-            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            image_inputs, video_inputs = process_vision_info(messages)
-            inputs = processor(
-                text=[text],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt",
-            )
-            inputs = inputs.to(torch_device)
-
-            with torch.no_grad():
-                generated_ids = model.generate(
-                    **inputs,
-                    max_new_tokens=512,
-                    do_sample=False,
-                    repetition_penalty=1.2,
-                    no_repeat_ngram_size=3,
-                )
-            generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
-            output_text = processor.batch_decode(
-                generated_ids_trimmed,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
-            )[0]
+            output_text = _run_inference(model, processor, torch_device, messages)
 
             logger.info(f"Qwen raw output for {timestamp:.1f}s: {output_text[:500]}")
             objects, description = _parse_objects_and_description(output_text)
@@ -548,7 +623,6 @@ def _analyze_frames_single(
 
             logger.info(f"Frame {timestamp:.1f}s objects: {objects}")
 
-            del inputs, generated_ids
             if torch_device == "mps":
                 torch.mps.empty_cache()
             elif torch_device == "cuda":
@@ -572,8 +646,6 @@ def _analyze_frames_with_context(
     progress_callback: ProgressCallback | None,
 ) -> tuple[dict[str, int], list[ObjectDetection], list[str]]:
     """Analyze frames sequentially, passing previous description as context."""
-    from qwen_vl_utils import process_vision_info  # type: ignore[import-not-found]
-
     all_objects: dict[str, int] = {}
     detections: list[ObjectDetection] = []
     descriptions: list[str] = []
@@ -605,37 +677,13 @@ def _analyze_frames_with_context(
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image", "image": f"file://{frame_path}"},
+                        _make_image_content(frame_path),
                         {"type": "text", "text": prompt},
                     ],
                 }
             ]
 
-            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            image_inputs, video_inputs = process_vision_info(messages)
-            inputs = processor(
-                text=[text],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt",
-            )
-            inputs = inputs.to(torch_device)
-
-            with torch.no_grad():
-                generated_ids = model.generate(
-                    **inputs,
-                    max_new_tokens=512,
-                    do_sample=False,
-                    repetition_penalty=1.2,
-                    no_repeat_ngram_size=3,
-                )
-            generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
-            output_text = processor.batch_decode(
-                generated_ids_trimmed,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
-            )[0]
+            output_text = _run_inference(model, processor, torch_device, messages)
 
             logger.info(f"Qwen raw output for {timestamp:.1f}s: {output_text[:500]}")
             objects, description = _parse_objects_and_description(output_text)
@@ -659,7 +707,6 @@ def _analyze_frames_with_context(
 
             logger.info(f"Frame {timestamp:.1f}s objects: {objects}")
 
-            del inputs, generated_ids
             if torch_device == "mps":
                 torch.mps.empty_cache()
             elif torch_device == "cuda":
@@ -685,8 +732,6 @@ def _analyze_frames_batch(
     overlap: bool = False,
 ) -> tuple[dict[str, int], list[ObjectDetection], list[str]]:
     """Analyze frames in batches for temporal understanding."""
-    from qwen_vl_utils import process_vision_info  # type: ignore[import-not-found]
-
     all_objects: dict[str, int] = {}
     detections: list[ObjectDetection] = []
     descriptions: list[str] = []
@@ -735,38 +780,14 @@ def _analyze_frames_batch(
                 logger.info(f"Qwen batch prompt: {prompt[:500]}")
 
             # Build content with all images in the batch
-            content: list[dict[str, str]] = []
+            content: list[dict[str, Any]] = []
             for frame_path, _ in batch:
-                content.append({"type": "image", "image": f"file://{frame_path}"})
+                content.append(_make_image_content(frame_path))
             content.append({"type": "text", "text": prompt})
 
             messages = [{"role": "user", "content": content}]
 
-            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            image_inputs, video_inputs = process_vision_info(messages)
-            inputs = processor(
-                text=[text],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt",
-            )
-            inputs = inputs.to(torch_device)
-
-            with torch.no_grad():
-                generated_ids = model.generate(
-                    **inputs,
-                    max_new_tokens=512,
-                    do_sample=False,
-                    repetition_penalty=1.2,
-                    no_repeat_ngram_size=3,
-                )
-            generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
-            output_text = processor.batch_decode(
-                generated_ids_trimmed,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
-            )[0]
+            output_text = _run_inference(model, processor, torch_device, messages)
 
             logger.info(f"Qwen batch {batch_idx + 1} raw output: {output_text[:500]}")
             objects, description = _parse_batch_response(output_text)
@@ -793,7 +814,6 @@ def _analyze_frames_batch(
 
             logger.info(f"Batch {batch_idx + 1} objects: {objects}")
 
-            del inputs, generated_ids
             if torch_device == "mps":
                 torch.mps.empty_cache()
             elif torch_device == "cuda":
@@ -819,8 +839,6 @@ def _analyze_frames_batch_context(
     overlap: bool = False,
 ) -> tuple[dict[str, int], list[ObjectDetection], list[str]]:
     """Analyze frames in batches with context passed between batches."""
-    from qwen_vl_utils import process_vision_info  # type: ignore[import-not-found]
-
     all_objects: dict[str, int] = {}
     detections: list[ObjectDetection] = []
     descriptions: list[str] = []
@@ -871,7 +889,7 @@ def _analyze_frames_batch_context(
                 logger.info(f"Qwen batch-context prompt: {prompt[:500]}")
 
             # Build content with all images in the batch
-            content: list[dict[str, str]] = []
+            content: list[dict[str, Any]] = []
             for frame_path, ts in batch:
                 # Verify frame exists and log size
                 if os.path.exists(frame_path):
@@ -879,37 +897,13 @@ def _analyze_frames_batch_context(
                     logger.info(f"Batch frame {ts:.1f}s: {size_kb:.1f}KB")
                 else:
                     logger.warning(f"Batch frame missing: {frame_path}")
-                content.append({"type": "image", "image": f"file://{frame_path}"})
+                content.append(_make_image_content(frame_path))
             content.append({"type": "text", "text": prompt})
             logger.info(f"Batch {batch_idx + 1}: sending {len(batch)} images to Qwen")
 
             messages = [{"role": "user", "content": content}]
 
-            text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            image_inputs, video_inputs = process_vision_info(messages)
-            inputs = processor(
-                text=[text],
-                images=image_inputs,
-                videos=video_inputs,
-                padding=True,
-                return_tensors="pt",
-            )
-            inputs = inputs.to(torch_device)
-
-            with torch.no_grad():
-                generated_ids = model.generate(
-                    **inputs,
-                    max_new_tokens=512,
-                    do_sample=False,
-                    repetition_penalty=1.2,
-                    no_repeat_ngram_size=3,
-                )
-            generated_ids_trimmed = [out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)]
-            output_text = processor.batch_decode(
-                generated_ids_trimmed,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=False,
-            )[0]
+            output_text = _run_inference(model, processor, torch_device, messages)
 
             logger.info(f"Qwen batch {batch_idx + 1} raw output: {output_text[:500]}")
             objects, description = _parse_batch_response(output_text)
@@ -940,7 +934,6 @@ def _analyze_frames_batch_context(
 
             logger.info(f"Batch {batch_idx + 1} objects: {objects}")
 
-            del inputs, generated_ids
             if torch_device == "mps":
                 torch.mps.empty_cache()
             elif torch_device == "cuda":

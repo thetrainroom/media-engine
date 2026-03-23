@@ -448,23 +448,29 @@ def get_auto_whisper_model() -> str:
 
 
 def get_auto_qwen_model() -> str:
-    """Select Qwen2-VL model based on available free memory.
+    """Select Qwen VLM model based on available free memory.
 
-    | Free Memory | Model          | Size  | Quality |
-    |-------------|----------------|-------|---------|
-    | <8GB        | (use YOLO)     | -     | Basic   |
-    | 8-16GB      | Qwen2-VL-2B    | ~5GB  | Good    |
-    | 16GB+       | Qwen2-VL-7B    | ~15GB | Best    |
+    Prefers Qwen3-VL (better visual understanding) over Qwen2-VL.
+    Falls back to Qwen2-VL if Qwen3-VL is not available.
+
+    | Free Memory | Model             | Size   | Quality |
+    |-------------|-------------------|--------|---------|
+    | <8GB        | (use YOLO)        | -      | Basic   |
+    | 8-16GB      | Qwen3-VL-2B      | ~5GB   | Good    |
+    | 16-24GB     | Qwen3-VL-8B      | ~17GB  | Great   |
+    | 24GB+       | Qwen3.5-27B (4b) | ~16GB  | Best    |
     """
     free_mem = get_free_memory_gb()
 
-    if free_mem >= 16:
-        model = "Qwen/Qwen2-VL-7B-Instruct"
+    if free_mem >= 24:
+        model = "Qwen/Qwen3.5-27B"
+    elif free_mem >= 16:
+        model = "Qwen/Qwen3-VL-8B-Instruct"
     elif free_mem >= 8:
-        model = "Qwen/Qwen2-VL-2B-Instruct"
+        model = "Qwen/Qwen3-VL-2B-Instruct"
     else:
         # Not enough free memory for Qwen, should use YOLO instead
-        model = "Qwen/Qwen2-VL-2B-Instruct"
+        model = "Qwen/Qwen3-VL-2B-Instruct"
         logger.warning(f"Low free memory ({free_mem:.1f}GB) - consider using YOLO instead of Qwen")
 
     logger.info(f"Auto-selected Qwen model: {model} (free memory: {free_mem:.1f}GB)")
@@ -607,7 +613,8 @@ def get_vram_summary() -> dict:
 
     # Model memory requirements
     qwen_2b_needs = 5.0
-    qwen_7b_needs = 15.0
+    qwen_8b_needs = 17.0
+    qwen_27b_needs = 16.0  # 4-bit quantized
     whisper_large_needs = 6.0
 
     return {
@@ -625,14 +632,16 @@ def get_vram_summary() -> dict:
         "recommendations": {
             "can_use_large_whisper": vram >= 10,
             "can_use_qwen": vram >= 8,
-            "can_use_qwen_7b": vram >= 16,
+            "can_use_qwen_8b": vram >= 17,
+            "can_use_qwen_27b": vram >= 24,
             "can_use_clip_l14": vram >= 4,
             "can_use_yolo_xlarge": vram >= 16,
         },
         # What can load RIGHT NOW (based on free memory)
         "available_now": {
             "qwen_2b": free_mem >= qwen_2b_needs,
-            "qwen_7b": free_mem >= qwen_7b_needs,
+            "qwen_8b": free_mem >= qwen_8b_needs,
+            "qwen_27b": free_mem >= qwen_27b_needs,
             "whisper_large": free_mem >= whisper_large_needs,
             "whisper_medium": free_mem >= 4.0,
             "whisper_small": free_mem >= 2.0,
@@ -659,7 +668,11 @@ MODEL_MEMORY_REQUIREMENTS: dict[str, float] = {
     "yolov8m.pt": 0.5,
     "yolov8l.pt": 0.8,
     "yolov8x.pt": 1.2,
-    # Qwen VLM
+    # Qwen VLM (Qwen3-VL and Qwen3.5 models)
+    "Qwen/Qwen3-VL-2B-Instruct": 5.0,
+    "Qwen/Qwen3-VL-8B-Instruct": 17.0,
+    "Qwen/Qwen3.5-27B": 16.0,  # 4-bit quantized
+    # Legacy Qwen2-VL models
     "Qwen/Qwen2-VL-2B-Instruct": 6.0,
     "Qwen/Qwen2-VL-7B-Instruct": 16.0,
     # CLIP
