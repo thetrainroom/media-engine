@@ -11,10 +11,7 @@ import wave
 from enum import StrEnum
 from pathlib import Path
 
-try:
-    import webrtcvad  # type: ignore[import-not-found]
-except ImportError:
-    webrtcvad = None  # type: ignore[assignment]
+import webrtcvad  # type: ignore[import-not-found]
 
 logger = logging.getLogger(__name__)
 
@@ -153,14 +150,6 @@ def detect_voice_activity(
         }
 
     # Create VAD instance
-    if webrtcvad is None:
-        logger.warning("webrtcvad not available (missing pkg_resources/setuptools), skipping VAD")
-        return {
-            "audio_content": str(AudioContent.UNKNOWN),
-            "speech_ratio": 0.0,
-            "speech_segments": [],
-            "total_duration": 0.0,
-        }
     vad = webrtcvad.Vad(aggressiveness)
     frame_duration_ms = 30  # 30ms frames
 
