@@ -30,7 +30,7 @@ dependencies = [
     "paddleocr>=2.7.0",
     "paddlepaddle>=2.5.0",
     "webrtcvad>=2.0.10",
-    "setuptools",  # webrtcvad uses pkg_resources at import time
+    "setuptools<75",  # webrtcvad uses pkg_resources (removed in setuptools 75+)
     "psutil>=5.9.0",
     "langdetect>=1.0.9",
     "httpx>=0.27.0",
