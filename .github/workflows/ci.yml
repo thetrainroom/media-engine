@@ -47,7 +47,6 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install setuptools  # webrtcvad needs pkg_resources
           pip install -e ".[cpu,dev]"
 
       - name: Run tests

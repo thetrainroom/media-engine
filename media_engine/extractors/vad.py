@@ -1,20 +1,19 @@
-"""Voice Activity Detection using WebRTC VAD.
+"""Voice Activity Detection.
 
 Fast detection of speech presence in audio files.
 Used to skip Whisper transcription for silent/ambient clips.
+
+Uses a simple energy + zero-crossing-rate heuristic that works on raw PCM
+frames — no C extensions, no compilation, no Xcode tools required.
 """
 
 import logging
+import struct
 import subprocess
 import tempfile
 import wave
 from enum import StrEnum
 from pathlib import Path
-
-try:
-    import webrtcvad  # type: ignore[import-not-found]
-except ImportError:
-    webrtcvad = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +32,39 @@ class AudioContent(StrEnum):
     SPEECH = "speech"
     AUDIO = "audio"  # Has audio but no speech (ambient, music, or silent)
     UNKNOWN = "unknown"
+
+
+def _frame_energy(frame: bytes) -> float:
+    """Calculate RMS energy of a 16-bit PCM frame."""
+    n_samples = len(frame) // 2
+    if n_samples == 0:
+        return 0.0
+    samples = struct.unpack(f"<{n_samples}h", frame)
+    sum_sq = sum(s * s for s in samples)
+    return (sum_sq / n_samples) ** 0.5
+
+
+def _frame_zcr(frame: bytes) -> float:
+    """Calculate zero-crossing rate of a 16-bit PCM frame."""
+    n_samples = len(frame) // 2
+    if n_samples < 2:
+        return 0.0
+    samples = struct.unpack(f"<{n_samples}h", frame)
+    crossings = sum(1 for i in range(1, n_samples) if (samples[i] >= 0) != (samples[i - 1] >= 0))
+    return crossings / (n_samples - 1)
+
+
+def _is_speech_frame(frame: bytes, energy_threshold: float = 300.0, zcr_range: tuple[float, float] = (0.05, 0.5)) -> bool:
+    """Detect whether a PCM frame likely contains speech.
+
+    Speech typically has moderate-to-high energy and a zero-crossing rate
+    between pure silence (very low ZCR) and high-frequency noise (very high ZCR).
+    """
+    energy = _frame_energy(frame)
+    if energy < energy_threshold:
+        return False
+    zcr = _frame_zcr(frame)
+    return zcr_range[0] <= zcr <= zcr_range[1]
 
 
 def _extract_audio(video_path: str, output_path: str, sample_rate: int = 16000) -> bool:
@@ -96,8 +128,6 @@ def _read_wav_frames(
         n_channels = wf.getnchannels()
         sample_width = wf.getsampwidth()
 
-        if sample_rate not in (8000, 16000, 32000, 48000):
-            raise ValueError(f"Unsupported sample rate: {sample_rate}")
         if n_channels != 1:
             raise ValueError(f"Expected mono audio, got {n_channels} channels")
         if sample_width != 2:
@@ -127,11 +157,13 @@ def detect_voice_activity(
     min_speech_duration: float = 0.5,
     sample_limit_seconds: float = 120.0,
 ) -> dict:
-    """Detect voice activity in a video/audio file using WebRTC VAD.
+    """Detect voice activity in a video/audio file.
+
+    Uses energy + zero-crossing-rate heuristic on PCM frames.
 
     Args:
         file_path: Path to video or audio file
-        aggressiveness: VAD aggressiveness (0-3, higher = less sensitive to speech)
+        aggressiveness: Detection sensitivity (0-3, higher = less sensitive to speech)
         min_speech_duration: Minimum seconds of speech to classify as "speech"
         sample_limit_seconds: Maximum seconds to analyze (for long files)
 
@@ -152,16 +184,10 @@ def detect_voice_activity(
             "total_duration": 0.0,
         }
 
-    # Create VAD instance
-    if webrtcvad is None:
-        logger.warning("webrtcvad not available (missing pkg_resources/setuptools), skipping VAD")
-        return {
-            "audio_content": str(AudioContent.UNKNOWN),
-            "speech_ratio": 0.0,
-            "speech_segments": [],
-            "total_duration": 0.0,
-        }
-    vad = webrtcvad.Vad(aggressiveness)
+    # Map aggressiveness to energy threshold (higher = needs more energy = less sensitive)
+    energy_thresholds = {0: 150.0, 1: 250.0, 2: 350.0, 3: 500.0}
+    energy_threshold = energy_thresholds.get(aggressiveness, 350.0)
+
     frame_duration_ms = 30  # 30ms frames
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -181,7 +207,7 @@ def detect_voice_activity(
                 }
             wav_path = str(audio_path)
         elif path.suffix.lower() in audio_extensions:
-            # Convert to WAV format for webrtcvad
+            # Convert to WAV format
             audio_path = Path(tmpdir) / "audio.wav"
             if not _extract_audio(file_path, str(audio_path)):
                 logger.warning(f"Could not convert audio from {file_path}")
@@ -225,7 +251,7 @@ def detect_voice_activity(
         speech_frames = []
         for frame in frames:
             try:
-                is_speech = vad.is_speech(frame, sample_rate)
+                is_speech = _is_speech_frame(frame, energy_threshold=energy_threshold)
                 speech_frames.append(is_speech)
             except Exception:
                 speech_frames.append(False)
@@ -270,5 +296,5 @@ def detect_voice_activity(
 
 
 def unload_vad_model():
-    """No-op for WebRTC VAD (no model to unload)."""
+    """No-op for energy-based VAD (no model to unload)."""
     pass

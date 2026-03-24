@@ -26,7 +26,6 @@ class TestBaseDependencies:
             "transformers",
             "paddleocr",
             "paddle",
-            "webrtcvad",
             "psutil",
             "langdetect",
             "httpx",
