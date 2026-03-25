@@ -2,6 +2,7 @@
 
 import gc
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -68,8 +69,18 @@ def _get_yolo_model(model_name: str) -> Any:
     if _yolo_model is None:
         from ultralytics import YOLO  # type: ignore[import-not-found]
 
-        logger.info(f"Loading YOLO model: {model_name}")
-        _yolo_model = YOLO(model_name)
+        # Resolve model path to a writable directory — when running inside a
+        # macOS .app bundle the CWD is read-only, so bare filenames like
+        # "yolov8m.pt" would fail to download.
+        model_path = model_name
+        if not os.path.isabs(model_name) and not os.path.exists(model_name):
+            weights_dir = os.environ.get("TORCH_HOME", os.path.join(os.path.expanduser("~"), ".cache", "torch"))
+            weights_dir = os.path.join(weights_dir, "ultralytics")
+            os.makedirs(weights_dir, exist_ok=True)
+            model_path = os.path.join(weights_dir, model_name)
+
+        logger.info(f"Loading YOLO model: {model_path}")
+        _yolo_model = YOLO(model_path)
         _yolo_model_name = model_name
 
     return _yolo_model
