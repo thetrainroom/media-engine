@@ -38,7 +38,7 @@ from media_engine.schemas import (
 )
 
 from .avchd import get_recording_for_file
-from .avchd_gps import extract_avchd_gps, extract_avchd_gps_track
+from .avchd_gps import extract_avchd_datetime, extract_avchd_gps, extract_avchd_gps_track
 from .base import SidecarMetadata, parse_dms_coordinate
 from .registry import get_tags_lower, register_extractor
 
@@ -385,13 +385,19 @@ class SonyExtractor:
         else:
             lens = base_metadata.lens
 
-        # Try to extract GPS from AVCHD SEI if not already found
+        # Try to extract GPS and date/time from AVCHD SEI if not already found
         gps_track = None
         if gps is None:
             gps = extract_avchd_gps(file_path)
-            # Also extract full track if GPS was found
             if gps is not None:
                 gps_track = extract_avchd_gps_track(file_path)
+
+        # Extract recording date from AVCHD MDPM if ffprobe didn't find it
+        created_at = base_metadata.created_at
+        if created_at is None:
+            avchd_dt = extract_avchd_datetime(file_path)
+            if avchd_dt is not None:
+                created_at = avchd_dt.isoformat()
 
         # Check for spanned recordings (AVCHD files split at 2GB)
         spanned_recording = None
@@ -428,7 +434,7 @@ class SonyExtractor:
             bitrate=base_metadata.bitrate,
             file_size=base_metadata.file_size,
             timecode=base_metadata.timecode,
-            created_at=base_metadata.created_at,
+            created_at=created_at,
             device=device,
             gps=gps,
             gps_track=gps_track,

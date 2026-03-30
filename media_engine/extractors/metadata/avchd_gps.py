@@ -22,10 +22,18 @@ GPS tags (from ExifTool H264.pm):
 - 0xC2: GPSSpeed
 - 0xCA: GPSDateStamp
 
+Date/time tags (from ExifTool H264.pm):
+- 0x18: DateTimeOriginal (4 bytes BCD: YY YY MM DD e.g. 02 20 12 08 = 2012-08-xx wait no)
+         Actually stored as BCD digits: byte0 byte1 = year, byte2 = month, byte3 = day
+         Example: 02 20 12 08 -> "2012" "08" "06"... the encoding is 4 BCD nibbles for year,
+         2 BCD nibbles for month, 2 BCD nibbles for day
+- 0x19: DateTimeOriginal time (4 bytes BCD: HH MM SS FF)
+
 Each tag is 1 byte followed by 4 bytes of value data (typically rational).
 """
 
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from media_engine.schemas import GPS, GPSTrack, GPSTrackPoint
@@ -34,6 +42,58 @@ logger = logging.getLogger(__name__)
 
 # MDPM UUID used by Sony for embedded metadata in H.264 SEI
 MDPM_UUID = bytes.fromhex("17ee8c60f84d11d98cd60800200c9a66")
+
+
+def _bcd_to_int(byte: int) -> int:
+    """Decode a BCD-encoded byte to integer (e.g., 0x12 -> 12)."""
+    return ((byte >> 4) & 0x0F) * 10 + (byte & 0x0F)
+
+
+def _extract_datetime_from_mdpm_block(mdpm_data: bytes) -> datetime | None:
+    """Extract recording date/time from MDPM tags 0x18 and 0x19.
+
+    Tag 0x18: [flag] [year_hi_BCD] [year_lo_BCD] [month_BCD]
+    Tag 0x19: [day_BCD] [hour_BCD] [minute_BCD] [second_BCD]
+    """
+    date_value: bytes | None = None
+    time_value: bytes | None = None
+
+    i = 0
+    while i < len(mdpm_data) - 5:
+        tag = mdpm_data[i]
+        if tag == 0x00:
+            i += 1
+            continue
+        value = mdpm_data[i + 1 : i + 5]
+        if tag == 0x18:
+            date_value = value
+        elif tag == 0x19:
+            time_value = value
+        # Stop once we have both, or if we've passed the date section
+        if date_value and time_value:
+            break
+        if tag > 0x30 and date_value is None:
+            # Passed the date section without finding tag 0x18
+            break
+        i += 5
+
+    if date_value is None or time_value is None:
+        return None
+
+    try:
+        year_hi = _bcd_to_int(date_value[1])  # e.g., 0x20 -> 20
+        year_lo = _bcd_to_int(date_value[2])  # e.g., 0x12 -> 12
+        year = year_hi * 100 + year_lo         # -> 2012
+        month = _bcd_to_int(date_value[3])
+
+        day = _bcd_to_int(time_value[0])
+        hour = _bcd_to_int(time_value[1])
+        minute = _bcd_to_int(time_value[2])
+        second = _bcd_to_int(time_value[3])
+
+        return datetime(year, month, day, hour, minute, second)
+    except (ValueError, IndexError):
+        return None
 
 
 def _parse_rational(value_bytes: bytes) -> float:
@@ -203,6 +263,45 @@ def extract_avchd_gps(file_path: str) -> GPS | None:
 
     except Exception as e:
         logger.warning(f"Failed to extract AVCHD GPS from {file_path}: {e}")
+        return None
+
+
+def extract_avchd_datetime(file_path: str) -> datetime | None:
+    """Extract recording date/time from AVCHD file embedded in H.264 SEI MDPM.
+
+    Sony AVCHD cameras store the recording date/time in MDPM tags 0x18/0x19
+    as BCD-encoded values. This is often the only source of date information
+    for .MTS files since ffprobe cannot read it from the transport stream.
+
+    Args:
+        file_path: Path to MTS/M2TS file
+
+    Returns:
+        datetime object with recording date/time, or None if not found.
+    """
+    path = Path(file_path)
+
+    if path.suffix.upper() not in (".MTS", ".M2TS"):
+        return None
+
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read()
+
+        pos = data.find(MDPM_UUID)
+        if pos == -1:
+            return None
+
+        mdpm_start = pos + 20
+        mdpm_data = data[mdpm_start : mdpm_start + 200]
+
+        dt = _extract_datetime_from_mdpm_block(mdpm_data)
+        if dt is not None:
+            logger.info(f"Extracted date/time from AVCHD SEI: {dt.isoformat()}")
+        return dt
+
+    except Exception as e:
+        logger.warning(f"Failed to extract AVCHD datetime from {file_path}: {e}")
         return None
 
 

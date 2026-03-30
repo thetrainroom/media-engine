@@ -365,8 +365,90 @@ def parse_bit_depth(video_stream: dict[str, Any]) -> int | None:
     return None
 
 
-def extract_timecode(tags: dict[str, str], video_stream: dict[str, Any] | None) -> str | None:
-    """Extract start timecode from metadata."""
+def _bcd_decode(b: int) -> int:
+    """Decode a BCD-encoded byte to integer."""
+    return (b >> 4) * 10 + (b & 0x0F)
+
+
+# Sony MDPM UUID used in H.264 SEI user data
+_SONY_MDPM_UUID = bytes.fromhex("17ee8c60f84d11d98cd60800200c9a66")
+
+
+def _extract_mdpm_timecode(file_path: str, fps: float = 25.0) -> str | None:
+    """Extract timecode from Sony MDPM SEI data in AVCHD MTS files.
+
+    Sony cameras embed time-of-day timecodes in H.264 SEI messages using the
+    MDPM (Media Data Packet Metadata) format.  Tag 0x13 contains BCD-encoded
+    [frames, seconds, minutes, hours].  The recorded timecode is 2 frames ahead
+    of the first actual video frame.
+    """
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read(2 * 1024 * 1024)  # First 2MB is enough
+    except (OSError, IOError):
+        return None
+
+    idx = data.find(_SONY_MDPM_UUID)
+    if idx == -1:
+        return None
+
+    # UUID(16) + "MDPM"(4) + count(1) + first tag byte
+    tag_offset = idx + 21
+    if tag_offset + 5 > len(data):
+        return None
+
+    tag = data[tag_offset]
+    if tag != 0x13:
+        # Tag 0x13 should be the first entry; search for it
+        count = data[idx + 20]
+        for i in range(count):
+            pos = idx + 21 + i * 5
+            if pos + 5 > len(data):
+                return None
+            if data[pos] == 0x13:
+                tag_offset = pos
+                break
+        else:
+            return None
+
+    frames_bcd = data[tag_offset + 1]
+    seconds_bcd = data[tag_offset + 2]
+    minutes_bcd = data[tag_offset + 3]
+    hours_bcd = data[tag_offset + 4]
+
+    frames = _bcd_decode(frames_bcd)
+    seconds = _bcd_decode(seconds_bcd)
+    minutes = _bcd_decode(minutes_bcd)
+    hours = _bcd_decode(hours_bcd)
+
+    # Adjust for 2-frame encoding delay (MDPM records trigger time,
+    # first video frame is 2 frames later)
+    frames -= 2
+    if frames < 0:
+        frames += round(fps)
+        seconds -= 1
+        if seconds < 0:
+            seconds += 60
+            minutes -= 1
+            if minutes < 0:
+                minutes += 60
+                hours -= 1
+
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}:{frames:02d}"
+
+
+def extract_timecode(
+    tags: dict[str, str],
+    video_stream: dict[str, Any] | None,
+    all_streams: list[dict[str, Any]] | None = None,
+    file_path: str | None = None,
+) -> str | None:
+    """Extract start timecode from metadata.
+
+    Checks format tags, video stream tags, then all other streams (e.g. timed
+    metadata tracks in MP4 files from Sony cameras).  As a last resort, reads
+    Sony MDPM SEI data directly from AVCHD MTS files.
+    """
     tags_lower = {k.lower(): v for k, v in tags.items()}
 
     tc = tags_lower.get("timecode")
@@ -377,6 +459,26 @@ def extract_timecode(tags: dict[str, str], video_stream: dict[str, Any] | None) 
         stream_tags = video_stream.get("tags", {})
         stream_tags_lower = {k.lower(): v for k, v in stream_tags.items()}
         tc = stream_tags_lower.get("timecode")
+        if tc:
+            return tc
+
+    # Check all streams (catches timed metadata tracks in MP4/MOV containers)
+    if all_streams:
+        for stream in all_streams:
+            stream_tags = stream.get("tags", {})
+            stream_tags_lower = {k.lower(): v for k, v in stream_tags.items()}
+            tc = stream_tags_lower.get("timecode")
+            if tc:
+                return tc
+
+    # Fallback: read Sony MDPM timecodes from AVCHD MTS files
+    if file_path and file_path.lower().endswith((".mts", ".m2ts")):
+        fps = 25.0
+        if video_stream:
+            parsed_fps = parse_fps(video_stream)
+            if parsed_fps:
+                fps = parsed_fps
+        tc = _extract_mdpm_timecode(file_path, fps)
         if tc:
             return tc
 
@@ -662,7 +764,7 @@ def build_base_metadata(
     # Get stream tags for fallback date extraction
     video_stream_tags = video_stream.get("tags", {}) if video_stream else None
     created_at = parse_creation_time(tags, video_stream_tags)
-    timecode = extract_timecode(tags, video_stream)
+    timecode = extract_timecode(tags, video_stream, probe_data.get("streams"), file_path)
     gps = extract_gps_from_tags(tags)
     color_space = extract_color_space_from_stream(video_stream, tags)
 
