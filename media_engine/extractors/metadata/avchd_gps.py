@@ -83,7 +83,7 @@ def _extract_datetime_from_mdpm_block(mdpm_data: bytes) -> datetime | None:
     try:
         year_hi = _bcd_to_int(date_value[1])  # e.g., 0x20 -> 20
         year_lo = _bcd_to_int(date_value[2])  # e.g., 0x12 -> 12
-        year = year_hi * 100 + year_lo         # -> 2012
+        year = year_hi * 100 + year_lo  # -> 2012
         month = _bcd_to_int(date_value[3])
 
         day = _bcd_to_int(time_value[0])
