@@ -142,9 +142,22 @@ def _run_model_checks(check_id: str) -> None:
         logger.info("Testing YOLO model...")
         start = time.time()
         try:
+            import os
+
             from ultralytics import YOLO  # type: ignore[import-not-found]
 
-            YOLO("yolov8m.pt")
+            # Resolve to a writable directory — CWD is read-only inside a
+            # macOS .app bundle and ultralytics would otherwise download to
+            # CWD. Mirrors the resolution used in extractors/objects.py.
+            weights_dir = os.path.join(
+                os.environ.get(
+                    "TORCH_HOME",
+                    os.path.join(os.path.expanduser("~"), ".cache", "torch"),
+                ),
+                "ultralytics",
+            )
+            os.makedirs(weights_dir, exist_ok=True)
+            YOLO(os.path.join(weights_dir, "yolov8m.pt"))
             results["yolo"] = {
                 "canLoad": True,
                 "error": None,
