@@ -47,7 +47,7 @@ def _run_model_checks(check_id: str) -> None:
                 logger.info("Testing Qwen 2B model...")
                 start = time.time()
                 try:
-                    _get_qwen_model("Qwen/Qwen3-VL-2B-Instruct")
+                    _get_qwen_model("Qwen/Qwen3.5-2B")
                     results["qwen_2b"] = {
                         "canLoad": True,
                         "error": None,

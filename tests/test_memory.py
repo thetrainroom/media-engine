@@ -195,7 +195,7 @@ class TestAutoModelSelection:
         from media_engine.config import get_auto_whisper_model
 
         model = get_auto_whisper_model()
-        assert model in ["tiny", "small", "medium", "large-v3"]
+        assert model in ["tiny", "small", "large-v3-turbo", "large-v3"]
 
     def test_auto_qwen_model(self):
         """Test Qwen auto-selection returns valid model."""
@@ -217,11 +217,11 @@ class TestAutoModelSelection:
 
         model = get_auto_yolo_model()
         assert model in [
-            "yolov8n.pt",
-            "yolov8s.pt",
-            "yolov8m.pt",
-            "yolov8l.pt",
-            "yolov8x.pt",
+            "yolo26n.pt",
+            "yolo26s.pt",
+            "yolo26m.pt",
+            "yolo26l.pt",
+            "yolo26x.pt",
         ]
 
     def test_auto_clip_model(self):

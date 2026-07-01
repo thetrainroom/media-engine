@@ -106,7 +106,7 @@ class Settings(BaseModel):
 
     Model settings support "auto" to automatically select based on VRAM:
     - whisper_model: "auto" | "tiny" | "small" | "medium" | "large-v3" | "large-v3-turbo"
-    - qwen_model: "auto" | "Qwen/Qwen2-VL-2B-Instruct" | "Qwen/Qwen2-VL-7B-Instruct"
+    - qwen_model: "auto" | "Qwen/Qwen3.5-2B/4B/9B" | "Qwen/Qwen3.6-27B" | "Qwen/Qwen3.6-35B-A3B" | Qwen3-VL/Qwen2-VL names (legacy)
     - yolo_model: "auto" | "yolo26n/s/m/l/x.pt" | "yolov8n/s/m/l/x.pt" (legacy)
     - clip_model: "auto" | "ViT-B-16" | "ViT-B-32" | "ViT-L-14"
     - object_detector: "auto" | "yolo" | "qwen"
@@ -470,27 +470,28 @@ def get_auto_whisper_model() -> str:
 def get_auto_qwen_model() -> str:
     """Select Qwen VLM model based on available free memory.
 
-    Prefers Qwen3-VL (better visual understanding) over Qwen2-VL.
-    Falls back to Qwen2-VL if Qwen3-VL is not available.
+    Prefers Qwen3.5 native-VL small models (early-fusion multimodality,
+    Mar 2026) and the Qwen3.6-27B dense multimodal flagship (Apr 2026).
+    Qwen3-VL and Qwen2-VL names remain valid explicit settings.
 
-    | Free Memory | Model             | Size   | Quality |
-    |-------------|-------------------|--------|---------|
-    | <8GB        | (use YOLO)        | -      | Basic   |
-    | 8-16GB      | Qwen3-VL-2B      | ~5GB   | Good    |
-    | 16-24GB     | Qwen3-VL-8B      | ~17GB  | Great   |
-    | 24GB+       | Qwen3.5-27B (4b) | ~16GB  | Best    |
+    | Free Memory | Model            | Size   | Quality |
+    |-------------|------------------|--------|---------|
+    | <8GB        | (use YOLO)       | -      | Basic   |
+    | 8-16GB      | Qwen3.5-2B       | ~5GB   | Good    |
+    | 16-24GB     | Qwen3.5-9B       | ~18GB  | Great   |
+    | 24GB+       | Qwen3.6-27B (4b) | ~16GB  | Best    |
     """
     free_mem = get_free_memory_gb()
 
     if free_mem >= 24:
-        model = "Qwen/Qwen3.5-27B"
+        model = "Qwen/Qwen3.6-27B"
     elif free_mem >= 16:
-        model = "Qwen/Qwen3-VL-8B-Instruct"
+        model = "Qwen/Qwen3.5-9B"
     elif free_mem >= 8:
-        model = "Qwen/Qwen3-VL-2B-Instruct"
+        model = "Qwen/Qwen3.5-2B"
     else:
         # Not enough free memory for Qwen, should use YOLO instead
-        model = "Qwen/Qwen3-VL-2B-Instruct"
+        model = "Qwen/Qwen3.5-2B"
         logger.warning(f"Low free memory ({free_mem:.1f}GB) - consider using YOLO instead of Qwen")
 
     logger.info(f"Auto-selected Qwen model: {model} (free memory: {free_mem:.1f}GB)")
@@ -658,6 +659,7 @@ def get_vram_summary() -> dict:
             "can_use_qwen": vram >= 8,
             "can_use_qwen_8b": vram >= 17,
             "can_use_qwen_27b": vram >= 24,
+            "can_use_qwen3_6": vram >= 24,
             "can_use_clip_l14": vram >= 4,
             "can_use_yolo_xlarge": vram >= 16,
         },
@@ -699,7 +701,13 @@ MODEL_MEMORY_REQUIREMENTS: dict[str, float] = {
     "yolov8m.pt": 0.5,
     "yolov8l.pt": 0.8,
     "yolov8x.pt": 1.2,
-    # Qwen VLM (Qwen3-VL and Qwen3.5 models)
+    # Qwen VLM (Qwen3.5 native-VL and Qwen3.6 models)
+    "Qwen/Qwen3.5-2B": 5.0,
+    "Qwen/Qwen3.5-4B": 9.0,
+    "Qwen/Qwen3.5-9B": 18.0,
+    "Qwen/Qwen3.6-27B": 16.0,  # 4-bit quantized
+    "Qwen/Qwen3.6-35B-A3B": 20.0,  # 4-bit quantized MoE (3B active)
+    # Previous-generation Qwen models
     "Qwen/Qwen3-VL-2B-Instruct": 5.0,
     "Qwen/Qwen3-VL-8B-Instruct": 17.0,
     "Qwen/Qwen3.5-27B": 16.0,  # 4-bit quantized

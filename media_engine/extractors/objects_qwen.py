@@ -196,9 +196,11 @@ def _get_qwen_model(
     os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
     os.environ["TRANSFORMERS_VERBOSITY"] = "error"
 
-    # Select the right model class based on model name
+    # Select the right model class based on model name.
+    # Qwen3.6 shares architecture and transformers classes with Qwen3.5
+    # (hybrid Gated-DeltaNet, native early-fusion multimodality).
     is_qwen3_vl = "Qwen3-VL" in model_name
-    is_qwen3_5 = "Qwen3.5" in model_name
+    is_qwen3_5 = "Qwen3.5" in model_name or "Qwen3.6" in model_name
     is_qwen2_vl = "Qwen2-VL" in model_name or "Qwen2.5-VL" in model_name
 
     if is_qwen3_vl:
@@ -207,10 +209,12 @@ def _get_qwen_model(
         model_class = Qwen3VLForConditionalGeneration
         logger.info("Using Qwen3VLForConditionalGeneration")
     elif is_qwen3_5:
-        from transformers import AutoModelForCausalLM  # type: ignore[import-not-found]
+        # AutoModelForCausalLM resolves to the text-only head for Qwen3.5/3.6;
+        # the image-text-to-text auto class picks the multimodal generation head
+        from transformers import AutoModelForImageTextToText  # type: ignore[import-not-found]
 
-        model_class = AutoModelForCausalLM
-        logger.info("Using AutoModelForCausalLM (Qwen3.5 early-fusion)")
+        model_class = AutoModelForImageTextToText
+        logger.info("Using AutoModelForImageTextToText (Qwen3.5/3.6 early-fusion)")
     elif is_qwen2_vl:
         from transformers import Qwen2VLForConditionalGeneration  # type: ignore[import-not-found]
 
@@ -229,13 +233,13 @@ def _get_qwen_model(
 
         load_kwargs: dict[str, Any] = {"torch_dtype": torch_dtype}
 
-        # Qwen3.5-27B: use 4-bit quantization to fit in memory
-        if is_qwen3_5 and "27B" in model_name:
+        # Large Qwen3.5/3.6 checkpoints (27B dense, 35B MoE): 4-bit quantization to fit in memory
+        if is_qwen3_5 and ("27B" in model_name or "35B" in model_name):
             try:
                 from transformers import BitsAndBytesConfig  # type: ignore[import-not-found]
 
                 load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_4bit=True)
-                logger.info("Using 4-bit quantization for Qwen3.5-27B")
+                logger.info(f"Using 4-bit quantization for {model_name}")
             except ImportError:
                 logger.warning("bitsandbytes not available, loading without quantization")
 
@@ -271,13 +275,16 @@ def _is_qwen2_vl() -> bool:
 def _make_image_content(frame_path: str) -> dict[str, Any]:
     """Build an image content block compatible with the loaded model family.
 
-    Qwen2-VL uses: {"type": "image", "image": "file:///path"}
-    Qwen3-VL/3.5 use: {"type": "image", "url": "file:///path"}
+    Qwen2-VL goes through qwen_vl_utils, which expects file:// URIs:
+        {"type": "image", "image": "file:///path"}
+    Qwen3-VL/3.5/3.6 go through the transformers chat template, whose image
+    loader (transformers 5) accepts plain filesystem paths but not file:// URIs:
+        {"type": "image", "url": "/path"}
     """
     if _is_qwen2_vl():
         return {"type": "image", "image": f"file://{frame_path}"}
     else:
-        return {"type": "image", "url": f"file://{frame_path}"}
+        return {"type": "image", "url": frame_path}
 
 
 def _run_inference(
