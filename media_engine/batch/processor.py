@@ -59,6 +59,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         extract_transcript,
         get_adaptive_timestamps,
         get_sample_timestamps,
+        motion_result_to_dict,
         run_ffprobe_batch,
         unload_clip_model,
         unload_face_model,
@@ -547,22 +548,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             adaptive_timestamps[i] = get_adaptive_timestamps(motion)
 
                             # Always store motion data when computed (needed for Pass 2 timestamps)
-                            motion_result = {
-                                "duration": motion.duration,
-                                "fps": motion.fps,
-                                "primary_motion": motion.primary_motion.value,
-                                "avg_intensity": float(motion.avg_intensity),
-                                "is_stable": bool(motion.is_stable),
-                                "segments": [
-                                    {
-                                        "start": seg.start,
-                                        "end": seg.end,
-                                        "motion_type": seg.motion_type.value,
-                                        "intensity": float(seg.intensity),
-                                    }
-                                    for seg in motion.segments
-                                ],
-                            }
+                            motion_result = motion_result_to_dict(motion, include_features=settings.motion_features_enabled)
                             update_file_status(i, "running", "motion", motion_result)
                             update_extractor_status(i, "motion", "completed")
                             logger.info(f"Motion for {fname}: stable={motion.is_stable}, timestamps={len(adaptive_timestamps[i])}")

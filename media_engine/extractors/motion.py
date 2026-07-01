@@ -27,6 +27,14 @@ PAN_TILT_THRESHOLD = 0.7  # Ratio of directional vs total flow for pan/tilt
 ZOOM_THRESHOLD = 0.3  # Divergence threshold for zoom detection
 STATIC_THRESHOLD = 0.5  # Below this = static
 
+# Extended motion feature extraction (api_version 1.1)
+# Bump MOTION_FEATURES_VERSION when any feature formula, the frequency split,
+# or the smoothing parameters change - consumers cache derived scores keyed on it.
+MOTION_FEATURES_VERSION = "v1"
+FREQ_SPLIT_HZ = 2.0  # HF/LF band split for frequency energy (analysis runs at 5 fps -> Nyquist 2.5 Hz)
+SMOOTH_WINDOW = 5  # Moving-average window on the magnitude series before differentiating
+MIN_FEATURE_SAMPLES = 5  # Below this, features degenerate to documented defaults
+
 
 class MotionType(StrEnum):
     """Types of camera motion.
@@ -47,6 +55,27 @@ class MotionType(StrEnum):
     COMPLEX = "complex"  # Multiple motions combined
 
 
+@dataclass(slots=True, frozen=True)
+class MotionFeatures:
+    """Extended motion statistics for a time span (segment or whole clip).
+
+    All values are derived from the per-frame mean optical flow series that
+    classification already computes; no additional model inference.
+    """
+
+    magnitude_mean: float  # Mean flow magnitude (same as MotionSegment.intensity)
+    magnitude_std: float  # Std dev of magnitude
+    magnitude_p90: float  # 90th percentile of magnitude (robust near-peak)
+    magnitude_max: float  # Max magnitude (spikes / near-yanks)
+    direction_consistency: float  # [0, 1]: 1.0 = monotonic direction, 0.0 = random/reversing
+    direction_reversals_per_sec: float  # Direction changes >90 degrees per second
+    acceleration_mean: float  # Mean |d(magnitude)/dt| (magnitude per second)
+    jerk_max: float  # Peak |d2(magnitude)/dt2| (the signature of "yanking")
+    hf_energy: float  # [0, 1]: normalized energy above FREQ_SPLIT_HZ (shake, tremor)
+    lf_energy: float  # [0, 1]: normalized energy below FREQ_SPLIT_HZ (intentional movement)
+    hf_lf_ratio: float  # hf / (hf + lf), in [0, 1]. High = shaky.
+
+
 @dataclass(slots=True)
 class MotionSegment:
     """A segment of video with consistent motion.
@@ -58,6 +87,7 @@ class MotionSegment:
     end: float
     motion_type: MotionType
     intensity: float  # Average flow magnitude
+    features: MotionFeatures | None = None  # Extended stats (api_version 1.1)
 
 
 @dataclass(slots=True)
@@ -73,6 +103,11 @@ class MotionAnalysis:
     segments: list[MotionSegment]
     avg_intensity: float
     is_stable: bool  # True if mostly static/tripod
+    # Clip-level feature summaries (api_version 1.1)
+    magnitude_p90_overall: float = 0.0
+    jerk_max_overall: float = 0.0
+    hf_lf_ratio_overall: float = 0.0
+    features_version: str = MOTION_FEATURES_VERSION
 
 
 # Chunk duration in seconds (2 minutes)
@@ -306,7 +341,9 @@ def analyze_motion(
     out_width = out_width - (out_width % 2)
     out_height = out_height - (out_height % 2)
 
-    frame_motions: list[tuple[float, MotionType, float]] = []
+    # Per-frame series: (timestamp, motion_type, intensity, mean_x, mean_y)
+    # The mean flow vector is retained for extended feature computation.
+    frame_motions: list[tuple[float, MotionType, float, float, float]] = []
     prev_gray: np.ndarray | None = None
     global_frame_idx = 0
 
@@ -369,8 +406,8 @@ def analyze_motion(
                 )
 
                 # Classify motion
-                motion_type, intensity = _classify_flow(flow)
-                frame_motions.append((timestamp, motion_type, intensity))
+                motion_type, intensity, mean_x, mean_y = _classify_flow(flow)
+                frame_motions.append((timestamp, motion_type, intensity, mean_x, mean_y))
 
             prev_gray = gray.copy()
             global_frame_idx += 1
@@ -390,7 +427,7 @@ def analyze_motion(
         )
 
     # Build segments from frame motions
-    segments = _build_segments(frame_motions)
+    segments = _build_segments(frame_motions, sample_fps=sample_fps)
 
     # Determine primary motion (most common or longest)
     primary_motion = _get_primary_motion(segments, duration)
@@ -402,6 +439,14 @@ def analyze_motion(
     static_time = sum(s.end - s.start for s in segments if s.motion_type == MotionType.STATIC)
     is_stable = static_time > duration * 0.7 or avg_intensity < MOTION_THRESHOLD
 
+    # Clip-level feature summaries from the full per-frame series
+    overall = compute_motion_features(
+        magnitudes=np.array([m[2] for m in frame_motions]),
+        mean_xs=np.array([m[3] for m in frame_motions]),
+        mean_ys=np.array([m[4] for m in frame_motions]),
+        sample_fps=sample_fps,
+    )
+
     logger.info(f"Motion analysis: primary={primary_motion}, segments={len(segments)}, stable={is_stable}")
 
     return MotionAnalysis(
@@ -411,30 +456,34 @@ def analyze_motion(
         segments=segments,
         avg_intensity=float(avg_intensity),
         is_stable=bool(is_stable),
+        magnitude_p90_overall=overall.magnitude_p90,
+        jerk_max_overall=overall.jerk_max,
+        hf_lf_ratio_overall=overall.hf_lf_ratio,
     )
 
 
-def _classify_flow(flow: np.ndarray) -> tuple[MotionType, float]:
+def _classify_flow(flow: np.ndarray) -> tuple[MotionType, float, float, float]:
     """Classify motion type from optical flow field.
 
     Args:
         flow: Optical flow array (H, W, 2) with x and y components
 
     Returns:
-        (motion_type, intensity)
+        (motion_type, intensity, mean_x, mean_y) - the mean flow vector is
+        retained for extended feature computation (direction stats).
     """
     flow_x = flow[:, :, 0]
     flow_y = flow[:, :, 1]
 
     # Calculate flow statistics
-    mean_x = np.mean(flow_x)
-    mean_y = np.mean(flow_y)
+    mean_x = float(np.mean(flow_x))
+    mean_y = float(np.mean(flow_y))
     magnitude = np.sqrt(flow_x**2 + flow_y**2)
     mean_magnitude = np.mean(magnitude)
 
     # Check if motion is significant
     if mean_magnitude < STATIC_THRESHOLD:
-        return MotionType.STATIC, float(mean_magnitude)
+        return MotionType.STATIC, float(mean_magnitude), mean_x, mean_y
 
     # Check for zoom (divergence from center)
     h, w = flow.shape[:2]
@@ -455,9 +504,9 @@ def _classify_flow(flow: np.ndarray) -> tuple[MotionType, float]:
 
     if abs(divergence) > ZOOM_THRESHOLD * mean_magnitude:
         if divergence > 0:
-            return MotionType.PUSH_IN, float(mean_magnitude)
+            return MotionType.PUSH_IN, float(mean_magnitude), mean_x, mean_y
         else:
-            return MotionType.PULL_OUT, float(mean_magnitude)
+            return MotionType.PULL_OUT, float(mean_magnitude), mean_x, mean_y
 
     # Check for pan/tilt (consistent directional flow)
     abs_mean_x = abs(mean_x)
@@ -471,86 +520,200 @@ def _classify_flow(flow: np.ndarray) -> tuple[MotionType, float]:
                 return (
                     MotionType.PAN_LEFT,
                     float(mean_magnitude),
+                    mean_x,
+                    mean_y,
                 )  # Flow right = camera pans left
             else:
-                return MotionType.PAN_RIGHT, float(mean_magnitude)
+                return MotionType.PAN_RIGHT, float(mean_magnitude), mean_x, mean_y
 
     # Strong vertical motion = tilt
     if abs_mean_y > abs_mean_x and abs_mean_y > MOTION_THRESHOLD:
         ratio = abs_mean_y / (mean_magnitude + 1e-7)
         if ratio > PAN_TILT_THRESHOLD:
             if mean_y > 0:
-                return MotionType.TILT_UP, float(mean_magnitude)  # Flow down = camera tilts up
+                return MotionType.TILT_UP, float(mean_magnitude), mean_x, mean_y  # Flow down = camera tilts up
             else:
-                return MotionType.TILT_DOWN, float(mean_magnitude)
+                return MotionType.TILT_DOWN, float(mean_magnitude), mean_x, mean_y
 
     # Significant motion but not consistent direction = handheld/complex
     if mean_magnitude > MOTION_THRESHOLD:
-        return MotionType.HANDHELD, float(mean_magnitude)
+        return MotionType.HANDHELD, float(mean_magnitude), mean_x, mean_y
 
-    return MotionType.STATIC, float(mean_magnitude)
+    return MotionType.STATIC, float(mean_magnitude), mean_x, mean_y
+
+
+def compute_motion_features(
+    magnitudes: np.ndarray,
+    mean_xs: np.ndarray,
+    mean_ys: np.ndarray,
+    sample_fps: float,
+    magnitude_mean: float | None = None,
+) -> MotionFeatures:
+    """Compute extended motion statistics from a per-frame mean-flow series.
+
+    Pure post-processing on data classification already produced - deterministic
+    and cheap (no model inference). See MOTION_FEATURES_VERSION for the cache key.
+
+    Args:
+        magnitudes: Per-frame mean flow magnitudes
+        mean_xs: Per-frame mean flow x components
+        mean_ys: Per-frame mean flow y components
+        sample_fps: Sample rate of the series in Hz (needed for time derivatives and FFT)
+        magnitude_mean: Override for magnitude_mean so it can stay byte-identical to the
+            segment's existing intensity value (which averages differently after merges)
+
+    Returns:
+        MotionFeatures with all statistics populated
+    """
+    n = len(magnitudes)
+    mean_mag = float(magnitude_mean) if magnitude_mean is not None else (float(np.mean(magnitudes)) if n else 0.0)
+
+    if n < MIN_FEATURE_SAMPLES:
+        # Too few samples for meaningful statistics - documented degenerate defaults
+        return MotionFeatures(
+            magnitude_mean=mean_mag,
+            magnitude_std=0.0,
+            magnitude_p90=mean_mag,
+            magnitude_max=mean_mag,
+            direction_consistency=1.0,
+            direction_reversals_per_sec=0.0,
+            acceleration_mean=0.0,
+            jerk_max=0.0,
+            hf_energy=0.0,
+            lf_energy=1.0,
+            hf_lf_ratio=0.0,
+        )
+
+    # Magnitude distribution
+    magnitude_std = float(np.std(magnitudes))
+    magnitude_p90 = float(np.percentile(magnitudes, 90))
+    magnitude_max = float(np.max(magnitudes))
+
+    # Direction statistics from mean-flow angles (circular statistics).
+    # Consistency = resultant vector length: 1.0 for monotonic direction, ~0 for random.
+    angles = np.arctan2(mean_ys, mean_xs)
+    direction_consistency = float(np.sqrt(np.mean(np.cos(angles)) ** 2 + np.mean(np.sin(angles)) ** 2))
+
+    # Reversals: consecutive direction changes >90 degrees (negative dot product of unit vectors)
+    dx, dy = np.cos(angles), np.sin(angles)
+    reversals = int(np.sum(dx[1:] * dx[:-1] + dy[1:] * dy[:-1] < 0))
+    series_duration = n / sample_fps
+    direction_reversals_per_sec = reversals / series_duration if series_duration > 0 else 0.0
+
+    # Acceleration and jerk from finite differences of the smoothed magnitude series.
+    # Smoothing before differentiating avoids amplifying single-frame noise.
+    window = min(SMOOTH_WINDOW, n)
+    smoothed = np.convolve(magnitudes, np.ones(window) / window, mode="valid")
+    accel = np.diff(smoothed) * sample_fps
+    acceleration_mean = float(np.mean(np.abs(accel))) if len(accel) else 0.0
+    jerk = np.diff(accel) * sample_fps
+    jerk_max = float(np.max(np.abs(jerk))) if len(jerk) else 0.0
+
+    # Frequency band energy: FFT of the raw (unsmoothed) magnitude series, DC excluded.
+    # HF (>FREQ_SPLIT_HZ) = shake/tremor; LF = intentional pan/tilt/dolly.
+    spectrum = np.abs(np.fft.rfft(magnitudes - np.mean(magnitudes))) ** 2
+    freqs = np.fft.rfftfreq(n, d=1.0 / sample_fps)
+    lf = float(np.sum(spectrum[(freqs > 0) & (freqs < FREQ_SPLIT_HZ)]))
+    hf = float(np.sum(spectrum[freqs >= FREQ_SPLIT_HZ]))
+    total = lf + hf
+    if total <= 1e-12:
+        hf_energy, lf_energy = 0.0, 1.0
+    else:
+        hf_energy, lf_energy = hf / total, lf / total
+    hf_lf_ratio = hf_energy / (hf_energy + lf_energy)
+
+    return MotionFeatures(
+        magnitude_mean=mean_mag,
+        magnitude_std=magnitude_std,
+        magnitude_p90=magnitude_p90,
+        magnitude_max=magnitude_max,
+        direction_consistency=direction_consistency,
+        direction_reversals_per_sec=float(direction_reversals_per_sec),
+        acceleration_mean=acceleration_mean,
+        jerk_max=jerk_max,
+        hf_energy=hf_energy,
+        lf_energy=lf_energy,
+        hf_lf_ratio=hf_lf_ratio,
+    )
 
 
 def _build_segments(
-    frame_motions: list[tuple[float, MotionType, float]],
+    frame_motions: list[tuple[float, MotionType, float, float, float]],
     min_segment_duration: float = 0.5,
+    sample_fps: float = 5.0,
 ) -> list[MotionSegment]:
     """Build motion segments from frame-by-frame analysis.
 
-    Merges consecutive frames with same motion type into segments.
+    Merges consecutive frames with same motion type into segments. Tracks index
+    ranges into frame_motions so extended features can be computed over the full
+    (possibly merged) per-frame series of each segment.
     """
     if not frame_motions:
         return []
 
-    segments: list[MotionSegment] = []
+    # Runs as (start_ts, end_ts, motion_type, intensity, i0, i1) with i0/i1 an
+    # index range into frame_motions (i1 exclusive)
+    runs: list[tuple[float, float, MotionType, float, int, int]] = []
     current_type = frame_motions[0][1]
     current_start = frame_motions[0][0]
+    current_i0 = 0
     current_intensities: list[float] = [frame_motions[0][2]]
 
-    for timestamp, motion_type, intensity in frame_motions[1:]:
+    for idx, (timestamp, motion_type, intensity, _mx, _my) in enumerate(frame_motions[1:], start=1):
         if motion_type == current_type:
             current_intensities.append(intensity)
         else:
-            # End current segment
-            segments.append(
-                MotionSegment(
-                    start=current_start,
-                    end=timestamp,
-                    motion_type=current_type,
-                    intensity=float(np.mean(current_intensities)),
-                )
-            )
+            # End current run
+            runs.append((current_start, timestamp, current_type, float(np.mean(current_intensities)), current_i0, idx))
             current_type = motion_type
             current_start = timestamp
+            current_i0 = idx
             current_intensities = [intensity]
 
-    # Add final segment
-    if frame_motions:
+    # Add final run (extend slightly past last frame)
+    runs.append((current_start, frame_motions[-1][0] + 0.2, current_type, float(np.mean(current_intensities)), current_i0, len(frame_motions)))
+
+    # Merge short runs into their predecessor (same rule as before: type from the
+    # longer side, intensity as the plain average of the two - preserved for
+    # backward compatibility of the intensity field)
+    merged: list[tuple[float, float, MotionType, float, int, int]] = []
+    for run in runs:
+        start, end, motion_type, intensity, i0, i1 = run
+        if end - start < min_segment_duration and merged:
+            p_start, p_end, p_type, p_intensity, p_i0, _p_i1 = merged[-1]
+            merged[-1] = (
+                p_start,
+                end,
+                p_type if p_end - p_start > end - start else motion_type,
+                (p_intensity + intensity) / 2,
+                p_i0,
+                i1,
+            )
+        else:
+            merged.append(run)
+
+    # Materialize segments with extended features computed over each index range
+    segments: list[MotionSegment] = []
+    for start, end, motion_type, intensity, i0, i1 in merged:
+        series = frame_motions[i0:i1]
+        features = compute_motion_features(
+            magnitudes=np.array([m[2] for m in series]),
+            mean_xs=np.array([m[3] for m in series]),
+            mean_ys=np.array([m[4] for m in series]),
+            sample_fps=sample_fps,
+            magnitude_mean=intensity,
+        )
         segments.append(
             MotionSegment(
-                start=current_start,
-                end=frame_motions[-1][0] + 0.2,  # Extend slightly past last frame
-                motion_type=current_type,
-                intensity=float(np.mean(current_intensities)),
+                start=start,
+                end=end,
+                motion_type=motion_type,
+                intensity=intensity,
+                features=features,
             )
         )
 
-    # Merge short segments
-    merged: list[MotionSegment] = []
-    for seg in segments:
-        if seg.end - seg.start < min_segment_duration and merged:
-            # Merge with previous segment
-            prev = merged[-1]
-            merged[-1] = MotionSegment(
-                start=prev.start,
-                end=seg.end,
-                motion_type=(prev.motion_type if prev.end - prev.start > seg.end - seg.start else seg.motion_type),
-                intensity=(prev.intensity + seg.intensity) / 2,
-            )
-        else:
-            merged.append(seg)
-
-    return merged
+    return segments
 
 
 def _get_primary_motion(segments: list[MotionSegment], duration: float) -> MotionType:
@@ -566,6 +729,65 @@ def _get_primary_motion(segments: list[MotionSegment], duration: float) -> Motio
 
     # Return type with longest total duration
     return max(type_durations, key=type_durations.get)  # type: ignore
+
+
+def motion_result_to_dict(analysis: MotionAnalysis, include_features: bool = True) -> dict:
+    """Convert a MotionAnalysis to the batch-response dict.
+
+    Args:
+        analysis: Motion analysis result
+        include_features: When False, the extended api-1.1 feature fields are
+            omitted (settings escape hatch for strict-validating consumers)
+
+    Returns:
+        Dict matching the MotionResult response schema
+    """
+    segments = []
+    for seg in analysis.segments:
+        seg_dict: dict = {
+            "start": seg.start,
+            "end": seg.end,
+            "motion_type": seg.motion_type.value,
+            "intensity": float(seg.intensity),
+        }
+        if include_features and seg.features is not None:
+            f = seg.features
+            seg_dict.update(
+                {
+                    "magnitude_mean": f.magnitude_mean,
+                    "magnitude_std": f.magnitude_std,
+                    "magnitude_p90": f.magnitude_p90,
+                    "magnitude_max": f.magnitude_max,
+                    "direction_consistency": f.direction_consistency,
+                    "direction_reversals_per_sec": f.direction_reversals_per_sec,
+                    "acceleration_mean": f.acceleration_mean,
+                    "jerk_max": f.jerk_max,
+                    "hf_energy": f.hf_energy,
+                    "lf_energy": f.lf_energy,
+                    "hf_lf_ratio": f.hf_lf_ratio,
+                    "features_version": analysis.features_version,
+                }
+            )
+        segments.append(seg_dict)
+
+    result: dict = {
+        "duration": analysis.duration,
+        "fps": analysis.fps,
+        "primary_motion": analysis.primary_motion.value,
+        "avg_intensity": float(analysis.avg_intensity),
+        "is_stable": bool(analysis.is_stable),
+        "segments": segments,
+    }
+    if include_features:
+        result.update(
+            {
+                "magnitude_p90_overall": analysis.magnitude_p90_overall,
+                "jerk_max_overall": analysis.jerk_max_overall,
+                "hf_lf_ratio_overall": analysis.hf_lf_ratio_overall,
+                "features_version": analysis.features_version,
+            }
+        )
+    return result
 
 
 def get_sample_timestamps(

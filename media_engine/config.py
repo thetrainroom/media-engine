@@ -137,6 +137,10 @@ class Settings(BaseModel):
     # CLIP model ("auto" = select based on VRAM)
     clip_model: str = "auto"
 
+    # Motion analysis: expose extended per-segment/clip-level feature fields
+    # (api_version 1.1). Escape hatch for consumers that reject unknown fields.
+    motion_features_enabled: bool = True
+
     # OCR settings
     ocr_languages: list[str] = DEFAULT_OCR_LANGUAGES.copy()
 

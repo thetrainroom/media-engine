@@ -23,6 +23,7 @@ from .motion import (
     analyze_motion,
     get_adaptive_timestamps,
     get_sample_timestamps,
+    motion_result_to_dict,
 )
 from .objects import extract_objects, unload_yolo_model
 from .objects_qwen import extract_objects_qwen, unload_qwen_model
@@ -49,6 +50,7 @@ __all__ = [
     "extract_ocr",
     "extract_telemetry",
     "analyze_motion",
+    "motion_result_to_dict",
     "get_sample_timestamps",
     "get_adaptive_timestamps",
     "MotionAnalysis",
