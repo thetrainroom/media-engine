@@ -137,6 +137,10 @@ class Settings(BaseModel):
     # CLIP model ("auto" = select based on VRAM)
     clip_model: str = "auto"
 
+    # Default fixed CLIP sampling rate in Hz (api_version 1.1). Used when a
+    # batch request doesn't specify clip_sample_fps. None = per-scene mode.
+    clip_default_sample_fps: float | None = None
+
     # Motion analysis: expose extended per-segment/clip-level feature fields
     # (api_version 1.1). Escape hatch for consumers that reject unknown fields.
     motion_features_enabled: bool = True

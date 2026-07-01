@@ -43,6 +43,21 @@ def test_settings_get(client):
     assert "object_detector" in data
 
 
+def test_batch_clip_sample_fps_validation(client):
+    """clip_sample_fps outside [0.1, 10.0] is rejected before any processing."""
+    # Below minimum
+    response = client.post("/batch", json={"files": ["/nonexistent.mp4"], "clip_sample_fps": 0.05})
+    assert response.status_code == 422
+
+    # Above maximum
+    response = client.post("/batch", json={"files": ["/nonexistent.mp4"], "clip_sample_fps": 20.0})
+    assert response.status_code == 422
+
+    # Valid value passes validation (fails later on file existence, not schema)
+    response = client.post("/batch", json={"files": ["/nonexistent.mp4"], "clip_sample_fps": 1.0})
+    assert response.status_code == 404
+
+
 def test_settings_update(client):
     """Test PUT /settings endpoint."""
     # Get current settings

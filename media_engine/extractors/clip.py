@@ -347,23 +347,58 @@ IMAGE_EXTENSIONS = {
 }
 
 
+# Soft warning threshold for dense sampling (memory pressure territory)
+MAX_RECOMMENDED_CLIP_SAMPLES = 5000
+
+
+def _scene_index_for(timestamp: float, scene_boundaries: list[tuple[float, float]] | None) -> int | None:
+    """Find the index of the scene containing a timestamp, or None."""
+    if not scene_boundaries:
+        return None
+    for idx, (start, end) in enumerate(scene_boundaries):
+        if start <= timestamp < end:
+            return idx
+    # Timestamp past the last scene boundary (e.g. rounding at clip end)
+    if timestamp >= scene_boundaries[-1][1]:
+        return len(scene_boundaries) - 1
+    return None
+
+
 def extract_clip(
     file_path: str,
-    frame_buffer: SharedFrameBuffer,
+    frame_buffer: SharedFrameBuffer | None = None,
     model_name: str | None = None,  # CLIP model name (e.g., "ViT-B-32", "ViT-L-14")
+    sample_fps: float | None = None,
+    scene_boundaries: list[tuple[float, float]] | None = None,
 ) -> ClipResult:
     """Extract CLIP embeddings from video frames.
+
+    Two sampling modes:
+    - Default (sample_fps=None): embeds the pre-decoded frames from the shared
+      frame buffer (sample_mode "per_scene", the pre-1.1 behavior).
+    - Fixed rate (sample_fps set): streams frames at the given rate via its own
+      ffmpeg pipe, independent of the shared buffer, with bounded memory
+      (sample_mode "fixed_fps").
 
     For images, use extract_clip_image() instead.
 
     Args:
-        file_path: Path to video file (used for logging)
-        frame_buffer: Pre-decoded frames from SharedFrameBuffer
+        file_path: Path to video file
+        frame_buffer: Pre-decoded frames (required when sample_fps is None)
         model_name: CLIP model name (e.g., "ViT-B-32", "ViT-L-14"). If None, uses default.
+        sample_fps: Fixed sampling rate in Hz; None = default per-scene mode
+        scene_boundaries: (start, end) per detected scene, used to assign
+            scene_index in fixed_fps mode (ignored in default mode)
 
     Returns:
         ClipResult with embeddings per segment
     """
+    if sample_fps is not None:
+        return _extract_clip_fixed_fps(file_path, sample_fps, model_name, scene_boundaries)
+
+    if frame_buffer is None:
+        raise ValueError("frame_buffer is required when sample_fps is not set")
+
     backend = get_clip_backend(model_name)
 
     # Process frames from shared buffer
@@ -378,6 +413,7 @@ def extract_clip(
                 ClipSegment(
                     start=ts,
                     end=ts,
+                    timestamp=ts,
                     scene_index=i,
                     embedding=embedding,
                 )
@@ -389,6 +425,61 @@ def extract_clip(
 
     return ClipResult(
         model=backend.get_model_name(),
+        sample_mode="per_scene",
+        sample_fps=None,
+        segments=segments,
+    )
+
+
+def _extract_clip_fixed_fps(
+    file_path: str,
+    sample_fps: float,
+    model_name: str | None,
+    scene_boundaries: list[tuple[float, float]] | None,
+) -> ClipResult:
+    """Extract CLIP embeddings at a fixed sample rate (fixed_fps mode).
+
+    Streams frames in chunks so memory stays bounded regardless of clip length.
+    """
+    from media_engine.extractors.frame_buffer import iter_frames_fixed_fps
+    from media_engine.extractors.frames import get_video_duration
+
+    backend = get_clip_backend(model_name)
+
+    duration = get_video_duration(file_path)
+    expected = int(duration * sample_fps)
+    if expected > MAX_RECOMMENDED_CLIP_SAMPLES:
+        logger.warning(f"Dense CLIP sampling: {expected} samples requested for {file_path} ({duration:.0f}s at {sample_fps} fps) - expect memory pressure and long inference time")
+
+    logger.info(f"Extracting CLIP embeddings at fixed {sample_fps} fps (~{expected} samples)")
+    half_window = 0.5 / sample_fps
+    segments: list[ClipSegment] = []
+
+    for chunk in iter_frames_fixed_fps(file_path, fps=sample_fps):
+        for frame in chunk:
+            try:
+                embedding = backend.encode_image_from_array(frame.rgb)
+            except Exception as e:
+                logger.warning(f"Failed to encode frame at {frame.timestamp}s: {e}")
+                continue
+            ts = frame.timestamp
+            segments.append(
+                ClipSegment(
+                    start=max(0.0, ts - half_window),
+                    end=min(duration, ts + half_window) if duration > 0 else ts + half_window,
+                    timestamp=ts,
+                    scene_index=_scene_index_for(ts, scene_boundaries),
+                    embedding=embedding,
+                )
+            )
+        # Chunk (and its pixel data) is released before the next one is decoded
+
+    logger.info(f"Generated {len(segments)} CLIP embeddings (fixed_fps mode)")
+
+    return ClipResult(
+        model=backend.get_model_name(),
+        sample_mode="fixed_fps",
+        sample_fps=sample_fps,
         segments=segments,
     )
 
@@ -420,6 +511,7 @@ def extract_clip_image(
             ClipSegment(
                 start=0.0,
                 end=0.0,
+                timestamp=0.0,
                 scene_index=0,
                 embedding=embedding,
             )

@@ -411,12 +411,19 @@ class ObjectsResult(BaseModel):
 
 
 class ClipSegment(BaseModel):
-    """CLIP embedding for a segment."""
+    """CLIP embedding for a segment.
+
+    In "per_scene" mode (default), scene_index is the running sample index
+    (pre-1.1 behavior, preserved for backward compatibility). In "fixed_fps"
+    mode it is the index of the containing scene, or None when scene
+    detection was not enabled.
+    """
 
     start: float
     end: float
     scene_index: int | None = None
     embedding: list[float]
+    timestamp: float | None = None  # Center-of-sample time in seconds (api_version 1.1)
 
 
 class ClipResult(BaseModel):
@@ -424,6 +431,8 @@ class ClipResult(BaseModel):
 
     model: str
     segments: list[ClipSegment]
+    sample_mode: str = "per_scene"  # "per_scene" (default) or "fixed_fps" (api_version 1.1)
+    sample_fps: float | None = None  # Effective rate in Hz; None in per_scene mode
 
 
 class OcrDetection(BaseModel):
