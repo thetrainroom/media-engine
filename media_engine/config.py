@@ -19,8 +19,11 @@ logger = logging.getLogger(__name__)
 # Config file location
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "polybos" / "config.json"
 
-# API
-DEFAULT_API_VERSION = "1.0"
+# API version reported via /health and /settings. Code-owned: the engine
+# always reports the version it implements, regardless of what an older
+# config.json on disk may contain (see get_settings / save_config_to_file).
+# 1.1: additive fields - clip_sample_fps sampling, extended motion features.
+DEFAULT_API_VERSION = "1.1"
 DEFAULT_LOG_LEVEL = "INFO"
 
 # Whisper speech-to-text
@@ -227,8 +230,9 @@ def save_config_to_file(settings: Settings, config_path: Path | None = None) -> 
     # Create directory if needed
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    # api_version describes engine capabilities, not user preference - never persist it
     with open(path, "w") as f:
-        json.dump(settings.model_dump(), f, indent=2)
+        json.dump(settings.model_dump(exclude={"api_version"}), f, indent=2)
 
     logger.info(f"Saved config to {path}")
 
@@ -243,6 +247,9 @@ def get_settings() -> Settings:
 
     if _settings is None:
         config_data = load_config_from_file()
+        # api_version is code-owned: a config file written by an older engine
+        # would otherwise pin upgraded installs to the old version string
+        config_data.pop("api_version", None)
         _settings = Settings(**config_data)
         if config_data:
             logger.info(f"Loaded settings from {DEFAULT_CONFIG_PATH}")

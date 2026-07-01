@@ -34,6 +34,8 @@ async def get_settings_endpoint():
         qwen_frames_per_scene=settings.qwen_frames_per_scene,
         yolo_model=settings.yolo_model,
         clip_model=settings.clip_model,
+        clip_default_sample_fps=settings.clip_default_sample_fps,
+        motion_features_enabled=settings.motion_features_enabled,
         ocr_languages=settings.ocr_languages,
         temp_dir=settings.temp_dir,
     )
@@ -84,6 +86,8 @@ async def update_settings(update: SettingsUpdate):
         qwen_frames_per_scene=new_settings.qwen_frames_per_scene,
         yolo_model=new_settings.yolo_model,
         clip_model=new_settings.clip_model,
+        clip_default_sample_fps=new_settings.clip_default_sample_fps,
+        motion_features_enabled=new_settings.motion_features_enabled,
         ocr_languages=new_settings.ocr_languages,
         temp_dir=new_settings.temp_dir,
     )

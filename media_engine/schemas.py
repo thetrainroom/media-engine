@@ -576,6 +576,10 @@ class SettingsResponse(BaseModel):
 
     # CLIP
     clip_model: str
+    clip_default_sample_fps: float | None  # Default fixed CLIP sampling rate (Hz); null = per-scene
+
+    # Motion
+    motion_features_enabled: bool  # Include extended motion feature fields in responses
 
     # OCR
     ocr_languages: list[str]
@@ -615,6 +619,10 @@ class SettingsUpdate(BaseModel):
 
     # CLIP
     clip_model: str | None = None
+    clip_default_sample_fps: float | None = Field(default=None, ge=0.1, le=10.0)  # Hz; null keeps per-scene mode
+
+    # Motion
+    motion_features_enabled: bool | None = None
 
     # OCR
     ocr_languages: list[str] | None = None
