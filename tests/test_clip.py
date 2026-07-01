@@ -2,7 +2,7 @@
 
 import pytest
 
-from media_engine.extractors.clip import _scene_index_for, extract_clip
+from media_engine.extractors.clip import SIGLIP2_MODELS, _scene_index_for, extract_clip, is_siglip_model
 from media_engine.extractors.frame_buffer import decode_frames
 from media_engine.extractors.frames import get_video_duration
 from media_engine.extractors.scenes import extract_scenes
@@ -132,3 +132,41 @@ def test_extract_clip_fixed_fps_scene_index(test_video_path):
             assert segment.scene_index == 0
         else:
             assert segment.scene_index == 1
+
+
+# --- SigLIP 2 backend ---
+
+
+def test_siglip_model_name_detection():
+    """SigLIP names route to the transformers backend; CLIP names do not."""
+    assert is_siglip_model("SigLIP2-B-16")
+    assert is_siglip_model("SigLIP2-SO400M")
+    assert is_siglip_model("google/siglip2-so400m-patch16-384")  # raw HF id
+    assert not is_siglip_model("ViT-B-32")
+    assert not is_siglip_model("ViT-L-14")
+    assert not is_siglip_model(None)
+
+    # Short names resolve to google/ HF ids
+    for short, hf in SIGLIP2_MODELS.items():
+        assert hf.startswith("google/siglip2-"), (short, hf)
+
+
+@pytest.mark.slow
+def test_siglip2_encode_image_and_text(test_video_path):
+    """SigLIP2 produces matching-dim, normalized image and text embeddings."""
+    import numpy as np
+
+    from media_engine.extractors.clip import encode_text_query, get_clip_backend, unload_clip_model
+
+    backend = get_clip_backend("SigLIP2-B-16")
+    assert backend.get_model_name() == "SigLIP2-B-16"
+
+    frame_buffer = decode_frames(test_video_path, timestamps=[1.0])
+    frame = next(iter(frame_buffer.frames.values()))
+    img = np.array(backend.encode_image_from_array(frame.rgb), dtype=np.float64)
+    txt = np.array(encode_text_query("a photo", "SigLIP2-B-16"), dtype=np.float64)
+
+    assert len(img) == len(txt) == 768  # B-16 dim
+    assert np.linalg.norm(img) == pytest.approx(1.0, abs=1e-3)
+    assert np.linalg.norm(txt) == pytest.approx(1.0, abs=1e-3)
+    unload_clip_model()

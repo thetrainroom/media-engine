@@ -12,7 +12,7 @@ import cv2  # type: ignore[import-not-found]
 import numpy as np
 from numpy.typing import NDArray
 
-from media_engine.config import has_cuda, is_apple_silicon
+from media_engine.config import get_device, has_cuda, is_apple_silicon
 from media_engine.extractors.frame_buffer import SharedFrameBuffer
 from media_engine.schemas import ClipResult, ClipSegment
 
@@ -26,6 +26,23 @@ OPENCLIP_TO_HF_MODEL_MAP: dict[str, str] = {
     "ViT-B-32": "openai/clip-vit-base-patch32",
     "ViT-L-14": "openai/clip-vit-large-patch14",
 }
+
+# SigLIP 2 short names -> HuggingFace model IDs (transformers backend).
+# SigLIP 2 (Feb 2025): sigmoid-loss image-text encoders with a multilingual
+# text tower (109 languages) - stronger retrieval than the 2021 CLIP models.
+# NOTE: embeddings live in a different space than CLIP - not comparable;
+# ClipResult.model identifies which model produced an embedding.
+SIGLIP2_MODELS: dict[str, str] = {
+    "SigLIP2-B-16": "google/siglip2-base-patch16-224",  # 768-dim
+    "SigLIP2-SO400M": "google/siglip2-so400m-patch16-384",  # 1152-dim
+}
+
+
+def is_siglip_model(model_name: str | None) -> bool:
+    """Whether a model name refers to a SigLIP-family model."""
+    if not model_name:
+        return False
+    return model_name in SIGLIP2_MODELS or "siglip" in model_name.lower()
 
 
 def _load_image_rgb(image_path: str) -> NDArray[np.uint8]:
@@ -241,6 +258,83 @@ class MLXCLIPBackend(CLIPBackend):
             return embedding.numpy().flatten().tolist()
 
 
+def _to_feature_tensor(features: Any) -> Any:
+    """Unwrap transformers feature outputs to a plain tensor.
+
+    transformers 5 returns output objects (BaseModelOutputWithPooling) from
+    get_image_features/get_text_features; older versions return the tensor.
+    """
+    if hasattr(features, "pooler_output"):
+        return features.pooler_output
+    if hasattr(features, "last_hidden_state"):
+        return features.last_hidden_state[:, 0]
+    return features
+
+
+class SigLIPTransformersBackend(CLIPBackend):
+    """SigLIP 2 backend via transformers, for all platforms (MPS/CUDA/CPU).
+
+    SigLIP's architecture is not supported by mlx_clip or the CLIPModel
+    classes, so a single transformers-based backend serves every platform;
+    torch picks the accelerator (MPS on Apple Silicon, CUDA on NVIDIA).
+    """
+
+    def __init__(self, model_name: str) -> None:
+        # Keep the requested (short) name for get_model_name so ClipResult.model
+        # and /encode_text round-trip with the same identifier
+        self._model_name = model_name
+        self._hf_model = SIGLIP2_MODELS.get(model_name, model_name)
+        self._model: Any = None
+        self._processor: Any = None
+        self._device = str(get_device())
+
+    def _load_model(self) -> None:
+        if self._model is not None:
+            return
+
+        from transformers import AutoModel, AutoProcessor  # type: ignore[import-not-found]
+
+        logger.info(f"Loading SigLIP model: {self._hf_model} on {self._device}")
+        self._processor = AutoProcessor.from_pretrained(self._hf_model)
+        self._model = AutoModel.from_pretrained(self._hf_model)
+        self._model = self._model.to(self._device)
+        self._model.eval()
+
+    def encode_image(self, image_path: str) -> Embedding:
+        rgb_array = _load_image_rgb(image_path)
+        return self.encode_image_from_array(rgb_array)
+
+    def encode_image_from_array(self, rgb_array: NDArray[np.uint8]) -> Embedding:
+        import torch
+        from PIL import Image
+
+        self._load_model()
+        image = Image.fromarray(rgb_array)
+
+        inputs = self._processor(images=image, return_tensors="pt").to(self._device)
+        with torch.no_grad():
+            features = self._model.get_image_features(**inputs)
+            features = _to_feature_tensor(features)
+            features = features / features.norm(dim=-1, keepdim=True)
+        return features.cpu().numpy().flatten().tolist()
+
+    def get_model_name(self) -> str:
+        return self._model_name
+
+    def encode_text(self, text: str) -> Embedding:
+        import torch
+
+        self._load_model()
+
+        # SigLIP text towers are trained with fixed-length padding
+        inputs = self._processor(text=[text], padding="max_length", truncation=True, return_tensors="pt").to(self._device)
+        with torch.no_grad():
+            features = self._model.get_text_features(**inputs)
+            features = _to_feature_tensor(features)
+            features = features / features.norm(dim=-1, keepdim=True)
+        return features.cpu().numpy().flatten().tolist()
+
+
 # Singleton backend instance
 _backend: CLIPBackend | None = None
 _backend_model_name: str | None = None
@@ -259,7 +353,7 @@ def unload_clip_model() -> None:
         import torch
 
         # Clear internal model references
-        if isinstance(_backend, MLXCLIPBackend):
+        if isinstance(_backend, (MLXCLIPBackend, SigLIPTransformersBackend)):
             if _backend._model is not None:
                 del _backend._model
                 _backend._model = None
@@ -309,6 +403,15 @@ def get_clip_backend(model_name: str | None = None) -> CLIPBackend:
         unload_clip_model()
 
     if _backend is not None:
+        return _backend
+
+    # SigLIP models use the transformers backend on every platform - the
+    # architecture is unsupported by mlx_clip and the CLIPModel classes
+    if is_siglip_model(model_name):
+        assert model_name is not None
+        _backend = SigLIPTransformersBackend(model_name)
+        _backend_model_name = model_name
+        logger.info(f"Using SigLIP transformers backend: {model_name}")
         return _backend
 
     if is_apple_silicon():

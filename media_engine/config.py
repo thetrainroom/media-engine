@@ -108,7 +108,7 @@ class Settings(BaseModel):
     - whisper_model: "auto" | "tiny" | "small" | "medium" | "large-v3" | "large-v3-turbo"
     - qwen_model: "auto" | "Qwen/Qwen3.5-2B/4B/9B" | "Qwen/Qwen3.6-27B" | "Qwen/Qwen3.6-35B-A3B" | Qwen3-VL/Qwen2-VL names (legacy)
     - yolo_model: "auto" | "yolo26n/s/m/l/x.pt" | "yolov8n/s/m/l/x.pt" (legacy)
-    - clip_model: "auto" | "ViT-B-16" | "ViT-B-32" | "ViT-L-14"
+    - clip_model: "auto" | "SigLIP2-B-16" | "SigLIP2-SO400M" | "ViT-B-16" | "ViT-B-32" | "ViT-L-14" (legacy)
     - object_detector: "auto" | "yolo" | "qwen"
     """
 
@@ -603,25 +603,25 @@ def get_auto_yolo_model() -> str:
 
 
 def get_auto_clip_model() -> str:
-    """Select CLIP model based on available VRAM.
+    """Select the image-embedding model based on available VRAM.
 
-    | VRAM     | Model     | Size    | Quality |
-    |----------|-----------|---------|---------|
-    | <2GB     | ViT-B-16  | 335MB   | Good    |
-    | 2-4GB    | ViT-B-32  | 338MB   | Good    |
-    | 4GB+     | ViT-L-14  | 933MB   | Best    |
+    Auto now selects SigLIP 2 (sigmoid-loss encoders with a multilingual
+    text tower) - the strongest open image-text embedding models. The
+    OpenAI CLIP names (ViT-B-16/B-32/L-14) remain valid explicit settings,
+    which is required for querying indexes built with those models:
+    embeddings are NOT comparable across models.
 
-    Note: ViT-B-16 and ViT-B-32 are similar size but different patch sizes.
-    ViT-B-32 is slightly faster, ViT-B-16 has better detail recognition.
+    | VRAM     | Model          | Dim  | Quality |
+    |----------|----------------|------|---------|
+    | <4GB     | SigLIP2-B-16   | 768  | Good    |
+    | 4GB+     | SigLIP2-SO400M | 1152 | Best    |
     """
     vram = get_available_vram_gb()
 
     if vram >= 4:
-        model = "ViT-L-14"
-    elif vram >= 2:
-        model = "ViT-B-32"
+        model = "SigLIP2-SO400M"
     else:
-        model = "ViT-B-16"
+        model = "SigLIP2-B-16"
 
     logger.info(f"Auto-selected CLIP model: {model} (VRAM: {vram:.1f}GB)")
     return model
@@ -714,7 +714,9 @@ MODEL_MEMORY_REQUIREMENTS: dict[str, float] = {
     # Legacy Qwen2-VL models
     "Qwen/Qwen2-VL-2B-Instruct": 6.0,
     "Qwen/Qwen2-VL-7B-Instruct": 16.0,
-    # CLIP
+    # Image-text embedding models (SigLIP 2 and legacy CLIP)
+    "SigLIP2-B-16": 1.0,
+    "SigLIP2-SO400M": 2.0,
     "ViT-B-16": 0.4,
     "ViT-B-32": 0.4,
     "ViT-L-14": 1.0,

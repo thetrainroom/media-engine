@@ -229,4 +229,4 @@ class TestAutoModelSelection:
         from media_engine.config import get_auto_clip_model
 
         model = get_auto_clip_model()
-        assert model in ["ViT-B-16", "ViT-B-32", "ViT-L-14"]
+        assert model in ["SigLIP2-B-16", "SigLIP2-SO400M"]
