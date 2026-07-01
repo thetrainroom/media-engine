@@ -107,7 +107,7 @@ class Settings(BaseModel):
     Model settings support "auto" to automatically select based on VRAM:
     - whisper_model: "auto" | "tiny" | "small" | "medium" | "large-v3" | "large-v3-turbo"
     - qwen_model: "auto" | "Qwen/Qwen2-VL-2B-Instruct" | "Qwen/Qwen2-VL-7B-Instruct"
-    - yolo_model: "auto" | "yolov8n.pt" | "yolov8s.pt" | "yolov8m.pt" | "yolov8l.pt" | "yolov8x.pt"
+    - yolo_model: "auto" | "yolo26n/s/m/l/x.pt" | "yolov8n/s/m/l/x.pt" (legacy)
     - clip_model: "auto" | "ViT-B-16" | "ViT-B-32" | "ViT-L-14"
     - object_detector: "auto" | "yolo" | "qwen"
     """
@@ -572,26 +572,30 @@ def get_auto_qwen_batch_size() -> int:
 def get_auto_yolo_model() -> str:
     """Select YOLO model based on available VRAM.
 
-    | VRAM     | Model     | Size   | Speed   |
-    |----------|-----------|--------|---------|
-    | <2GB     | yolov8n   | 6MB    | Fastest |
-    | 2-4GB    | yolov8s   | 22MB   | Fast    |
-    | 4-8GB    | yolov8m   | 52MB   | Medium  |
-    | 8-16GB   | yolov8l   | 87MB   | Slow    |
-    | 16GB+    | yolov8x   | 136MB  | Slowest |
+    YOLO26 (Jan 2026): NMS-free end-to-end inference, +2.5 box AP over
+    YOLO11 and much faster CPU inference. Same ultralytics API; yolov8*
+    names remain valid as explicit settings.
+
+    | VRAM     | Model     | Speed   |
+    |----------|-----------|---------|
+    | <2GB     | yolo26n   | Fastest |
+    | 2-4GB    | yolo26s   | Fast    |
+    | 4-8GB    | yolo26m   | Medium  |
+    | 8-16GB   | yolo26l   | Slow    |
+    | 16GB+    | yolo26x   | Slowest |
     """
     vram = get_available_vram_gb()
 
     if vram >= 16:
-        model = "yolov8x.pt"
+        model = "yolo26x.pt"
     elif vram >= 8:
-        model = "yolov8l.pt"
+        model = "yolo26l.pt"
     elif vram >= 4:
-        model = "yolov8m.pt"
+        model = "yolo26m.pt"
     elif vram >= 2:
-        model = "yolov8s.pt"
+        model = "yolo26s.pt"
     else:
-        model = "yolov8n.pt"
+        model = "yolo26n.pt"
 
     logger.info(f"Auto-selected YOLO model: {model} (VRAM: {vram:.1f}GB)")
     return model
@@ -684,6 +688,12 @@ MODEL_MEMORY_REQUIREMENTS: dict[str, float] = {
     "large-v3": 6.0,
     "large-v3-turbo": 4.0,
     # YOLO models
+    "yolo26n.pt": 0.2,
+    "yolo26s.pt": 0.3,
+    "yolo26m.pt": 0.5,
+    "yolo26l.pt": 0.8,
+    "yolo26x.pt": 1.2,
+    # Legacy YOLOv8 models
     "yolov8n.pt": 0.2,
     "yolov8s.pt": 0.3,
     "yolov8m.pt": 0.5,

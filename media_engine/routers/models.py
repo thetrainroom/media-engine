@@ -138,13 +138,15 @@ def _run_model_checks(check_id: str) -> None:
                 "loadTimeSeconds": round(time.time() - start, 1),
             }
 
-        # Test YOLO
+        # Test YOLO (the model the current settings would actually load)
         logger.info("Testing YOLO model...")
         start = time.time()
         try:
             import os
 
             from ultralytics import YOLO  # type: ignore[import-not-found]
+
+            from media_engine.config import get_settings
 
             # Resolve to a writable directory — CWD is read-only inside a
             # macOS .app bundle and ultralytics would otherwise download to
@@ -157,7 +159,7 @@ def _run_model_checks(check_id: str) -> None:
                 "ultralytics",
             )
             os.makedirs(weights_dir, exist_ok=True)
-            YOLO(os.path.join(weights_dir, "yolov8m.pt"))
+            YOLO(os.path.join(weights_dir, get_settings().get_yolo_model()))
             results["yolo"] = {
                 "canLoad": True,
                 "error": None,

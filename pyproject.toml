@@ -54,7 +54,7 @@ cuda = [
     "faster-whisper>=0.10.0",
     "open-clip-torch>=2.24.0",
     "torch>=2.0.0",
-    "ultralytics>=8.0.0",
+    "ultralytics>=8.4.0",
 ]
 mlx = [
     "mlx-whisper>=0.4.0",
@@ -62,13 +62,13 @@ mlx = [
     # mlx_clip must be installed separately (not on PyPI):
     #   pip install https://github.com/harperreed/mlx_clip/archive/refs/heads/main.zip
     "torch>=2.0.0",
-    "ultralytics>=8.0.0",
+    "ultralytics>=8.4.0",
 ]
 cpu = [
     "openai-whisper>=20231117",
     "open-clip-torch>=2.24.0",
     "torch>=2.0.0",
-    "ultralytics>=8.0.0",
+    "ultralytics>=8.4.0",
 ]
 qwen = [
     "accelerate>=0.30.0",
