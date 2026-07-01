@@ -4,7 +4,12 @@ import os
 
 import pytest
 
-from media_engine.extractors.transcribe import extract_audio, extract_transcript
+from media_engine.extractors.transcribe import (
+    MLX_WHISPER_REPO_OVERRIDES,
+    cpu_whisper_model_name,
+    extract_audio,
+    extract_transcript,
+)
 
 # Use a video with speech for transcription tests
 SPEECH_VIDEO = os.path.join(os.path.dirname(__file__), "..", "test_data", "video", "sample_with_speech.MP4")
@@ -71,3 +76,15 @@ def test_transcript_file_not_found():
     """Test transcript extraction with non-existent file."""
     with pytest.raises(FileNotFoundError):
         extract_transcript("/nonexistent/video.mp4")
+
+
+def test_whisper_model_name_mappings():
+    """large-v3-turbo resolves correctly on every backend."""
+    # MLX: turbo repo has no "-mlx" suffix, unlike the standard pattern
+    assert MLX_WHISPER_REPO_OVERRIDES["large-v3-turbo"] == "mlx-community/whisper-large-v3-turbo"
+    assert "large-v3" not in MLX_WHISPER_REPO_OVERRIDES  # standard pattern still applies
+
+    # CPU (openai-whisper): turbo runs as-is, large-v3 still downgrades
+    assert cpu_whisper_model_name("large-v3-turbo") == "turbo"
+    assert cpu_whisper_model_name("large-v3") == "medium"
+    assert cpu_whisper_model_name("small") == "small"

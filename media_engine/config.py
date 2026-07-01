@@ -105,7 +105,7 @@ class Settings(BaseModel):
     Config file location: ~/.config/polybos/config.json
 
     Model settings support "auto" to automatically select based on VRAM:
-    - whisper_model: "auto" | "tiny" | "small" | "medium" | "large-v3"
+    - whisper_model: "auto" | "tiny" | "small" | "medium" | "large-v3" | "large-v3-turbo"
     - qwen_model: "auto" | "Qwen/Qwen2-VL-2B-Instruct" | "Qwen/Qwen2-VL-7B-Instruct"
     - yolo_model: "auto" | "yolov8n.pt" | "yolov8s.pt" | "yolov8m.pt" | "yolov8l.pt" | "yolov8x.pt"
     - clip_model: "auto" | "ViT-B-16" | "ViT-B-32" | "ViT-L-14"
@@ -441,19 +441,23 @@ def get_free_memory_gb() -> float:
 def get_auto_whisper_model() -> str:
     """Select Whisper model based on available VRAM.
 
-    | VRAM     | Model    | Size   | Quality |
-    |----------|----------|--------|---------|
-    | <4GB     | tiny     | 75MB   | Basic   |
-    | 4-6GB    | small    | 488MB  | Good    |
-    | 6-10GB   | medium   | 1.5GB  | Better  |
-    | 10GB+    | large-v3 | 3GB    | Best    |
+    | VRAM     | Model          | Size   | Quality |
+    |----------|----------------|--------|---------|
+    | <4GB     | tiny           | 75MB   | Basic   |
+    | 4-6GB    | small          | 488MB  | Good    |
+    | 6-10GB   | large-v3-turbo | 1.6GB  | Better  |
+    | 10GB+    | large-v3       | 3GB    | Best    |
+
+    large-v3-turbo (4 decoder layers vs 32) beats medium in both quality
+    and speed at similar memory, so it replaces medium in the auto tier.
+    Operators wanting turbo speed at 10GB+ set whisper_model explicitly.
     """
     vram = get_available_vram_gb()
 
     if vram >= 10:
         model = "large-v3"
     elif vram >= 6:
-        model = "medium"
+        model = "large-v3-turbo"
     elif vram >= 4:
         model = "small"
     else:
@@ -678,6 +682,7 @@ MODEL_MEMORY_REQUIREMENTS: dict[str, float] = {
     "small": 2.0,
     "medium": 4.0,
     "large-v3": 6.0,
+    "large-v3-turbo": 4.0,
     # YOLO models
     "yolov8n.pt": 0.2,
     "yolov8s.pt": 0.3,

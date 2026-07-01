@@ -104,6 +104,13 @@ class TranscriptionBackend(ABC):
         pass
 
 
+# MLX community repos usually follow "mlx-community/whisper-{model}-mlx";
+# models whose repo deviates from that pattern are mapped here.
+MLX_WHISPER_REPO_OVERRIDES: dict[str, str] = {
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+}
+
+
 class WhisperMLX(TranscriptionBackend):
     """Apple Silicon backend using mlx-whisper."""
 
@@ -130,7 +137,7 @@ class WhisperMLX(TranscriptionBackend):
 
         result: dict[str, Any] = self._model.transcribe(
             audio_path,
-            path_or_hf_repo=f"mlx-community/whisper-{model}-mlx",
+            path_or_hf_repo=MLX_WHISPER_REPO_OVERRIDES.get(model, f"mlx-community/whisper-{model}-mlx"),
             language=language,
             initial_prompt=initial_prompt,
             word_timestamps=False,
@@ -183,6 +190,18 @@ class WhisperCUDA(TranscriptionBackend):
         )
 
 
+def cpu_whisper_model_name(model: str) -> str:
+    """Map an engine Whisper model name to the openai-whisper CPU model.
+
+    openai-whisper names the turbo model just "turbo"; it is small enough
+    (4 decoder layers) to run on CPU without downgrading. large-v3 itself
+    is downgraded to medium for CPU practicality.
+    """
+    if model == "large-v3-turbo":
+        return "turbo"
+    return "medium" if model == "large-v3" else model
+
+
 class WhisperCPU(TranscriptionBackend):
     """CPU fallback using openai-whisper."""
 
@@ -191,8 +210,7 @@ class WhisperCPU(TranscriptionBackend):
         self._model_name: str | None = None
 
     def _load_model(self, model: str) -> None:
-        # Use smaller model for CPU
-        actual_model = "medium" if model == "large-v3" else model
+        actual_model = cpu_whisper_model_name(model)
 
         if self._model is None or self._model_name != actual_model:
             import whisper  # type: ignore[import-not-found]
