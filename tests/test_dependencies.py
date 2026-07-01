@@ -5,9 +5,6 @@ import importlib.util
 
 import pytest
 
-# Modules that crash on import (e.g., paddle on macOS) - check with find_spec only
-SPEC_CHECK_ONLY = {"paddle"}
-
 
 class TestBaseDependencies:
     """Test base dependencies that are always required."""
@@ -24,8 +21,7 @@ class TestBaseDependencies:
             "deepface",
             "tf_keras",
             "transformers",
-            "paddleocr",
-            "paddle",
+            "easyocr",
             "psutil",
             "langdetect",
             "httpx",
@@ -33,12 +29,6 @@ class TestBaseDependencies:
     )
     def test_base_dependency_importable(self, module: str):
         """Verify base dependency can be imported."""
-        if module in SPEC_CHECK_ONLY:
-            # Some modules crash on import but are installed - just check spec
-            if importlib.util.find_spec(module) is None:
-                pytest.fail(f"Base dependency '{module}' not installed")
-            return
-
         try:
             importlib.import_module(module)
         except ImportError as e:
