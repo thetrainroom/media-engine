@@ -30,8 +30,9 @@ DEFAULT_LOG_LEVEL = "INFO"
 DEFAULT_WHISPER_MODEL = "auto"  # Auto-select based on VRAM
 DEFAULT_FALLBACK_LANGUAGE = "en"
 
-# Speaker diarization
-DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
+# Speaker diarization (community-1 requires pyannote.audio 4.x and accepting
+# the gated license at https://huggingface.co/pyannote/speaker-diarization-community-1)
+DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
 
 # Processing
 DEFAULT_FACE_SAMPLE_FPS = 1.0

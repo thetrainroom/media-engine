@@ -380,7 +380,7 @@ Get current settings. Sensitive values (like HuggingFace token) are masked.
   "whisper_model": "auto",
   "fallback_language": "en",
   "hf_token_set": false,
-  "diarization_model": "pyannote/speaker-diarization-3.1",
+  "diarization_model": "pyannote/speaker-diarization-community-1",
   "face_sample_fps": 1.0,
   "object_sample_fps": 2.0,
   "min_face_size": 80,
@@ -443,7 +443,7 @@ Update settings. Only provided fields are updated. Changes persist to `~/.config
 **Response:** Same as GET /settings (returns updated settings)
 
 **Notes:**
-- To enable speaker diarization, you need a HuggingFace token and must accept the [pyannote model license](https://huggingface.co/pyannote/speaker-diarization-3.1)
+- To enable speaker diarization, you need a HuggingFace token and must accept the [pyannote model license](https://huggingface.co/pyannote/speaker-diarization-community-1)
 - Get a token at https://huggingface.co/settings/tokens
 
 ---

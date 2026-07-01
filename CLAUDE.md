@@ -251,7 +251,7 @@ Settings are stored in `~/.config/polybos/config.json`. The frontend can read/wr
   "whisper_model": "auto",
   "fallback_language": "en",
   "hf_token": null,
-  "diarization_model": "pyannote/speaker-diarization-3.1",
+  "diarization_model": "pyannote/speaker-diarization-community-1",
   "face_sample_fps": 1.0,
   "object_sample_fps": 2.0,
   "min_face_size": 80,
@@ -270,7 +270,7 @@ Settings are stored in `~/.config/polybos/config.json`. The frontend can read/wr
 |---------|-------------|---------|
 | `hf_token` | HuggingFace token for pyannote speaker diarization | null (diarization skipped) |
 | `whisper_model` | "auto", "tiny", "small", "medium", or "large-v3" | auto |
-| `diarization_model` | Pyannote model for speaker diarization | pyannote/speaker-diarization-3.1 |
+| `diarization_model` | Pyannote model for speaker diarization | pyannote/speaker-diarization-community-1 |
 | `object_detector` | "auto", "yolo", or "qwen" | auto |
 | `qwen_model` | Qwen VLM model or "auto" (Qwen3-VL-2B/8B, Qwen3.5-27B) | auto |
 | `qwen_strategy` | "auto", "single", "context", "batch", "batch_context" | auto |
@@ -280,7 +280,7 @@ Settings are stored in `~/.config/polybos/config.json`. The frontend can read/wr
 
 **Notes**:
 - `"auto"` model settings resolve at batch time from VRAM/free memory (see `config.py`).
-- Pyannote models are gated. Accept the license at https://huggingface.co/pyannote/speaker-diarization-3.1 before using.
+- Pyannote models are gated. Accept the license at https://huggingface.co/pyannote/speaker-diarization-community-1 before using.
 - For CJK OCR, add `ch_sim`, `ja`, `ko` to `ocr_languages`. Finnish (`fi`) is not supported by EasyOCR.
 
 ## Key Implementation Details
