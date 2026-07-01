@@ -12,10 +12,12 @@ install-cpu:
 
 # Speaker diarization (optional, run AFTER your platform target)
 # pyannote-audio pins an older torch version, so we install it first
-# then restore torch to the latest version to match the rest of the stack
+# then restore torch to the latest version to match the rest of the stack.
+# torchcodec must be upgraded together with torch - pyannote 4 decodes audio
+# through it and a stale build fails at runtime (AudioDecoder not defined).
 install-diarization:
 	pip install pyannote-audio>=4.0.0
-	pip install --upgrade torch torchaudio torchvision
+	pip install --upgrade torch torchaudio torchvision torchcodec
 
 # Visual language model descriptions
 install-qwen:

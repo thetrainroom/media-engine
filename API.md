@@ -302,16 +302,17 @@ Get hardware capabilities and auto-selected models.
   "vram_gb": 32.0,
   "free_memory_gb": 18.5,
   "auto_whisper_model": "large-v3",
-  "auto_qwen_model": "Qwen/Qwen3-VL-8B-Instruct",
+  "auto_qwen_model": "Qwen/Qwen3.5-9B",
   "auto_qwen_strategy": "batch_context",
-  "auto_yolo_model": "yolov8x.pt",
-  "auto_clip_model": "ViT-L-14",
+  "auto_yolo_model": "yolo26x.pt",
+  "auto_clip_model": "SigLIP2-SO400M",
   "auto_object_detector": "qwen",
   "recommendations": {
     "can_use_large_whisper": true,
     "can_use_qwen": true,
     "can_use_qwen_8b": true,
     "can_use_qwen_27b": true,
+    "can_use_qwen3_6": true,
     "can_use_clip_l14": true,
     "can_use_yolo_xlarge": true
   },
@@ -423,7 +424,7 @@ Update settings. Only provided fields are updated. Changes persist to `~/.config
 |-------|------|-------------|
 | `log_level` | string | Log level (DEBUG, INFO, WARNING, ERROR) |
 | `hf_token` | string | HuggingFace token for speaker diarization. Set to empty string `""` to clear. |
-| `whisper_model` | string | "auto", "tiny", "small", "medium", or "large-v3" |
+| `whisper_model` | string | "auto", "tiny", "small", "medium", "large-v3", or "large-v3-turbo" |
 | `fallback_language` | string | Fallback language code for short clips |
 | `diarization_model` | string | Pyannote model for speaker diarization |
 | `face_sample_fps` | float | Face detection sampling rate |
@@ -434,7 +435,7 @@ Update settings. Only provided fields are updated. Changes persist to `~/.config
 | `qwen_strategy` | string | "auto", "single", "context", "batch", or "batch_context" |
 | `qwen_frames_per_scene` | int | Frames per scene for Qwen |
 | `yolo_model` | string | YOLO model name or "auto" |
-| `clip_model` | string | CLIP model name or "auto" |
+| `clip_model` | string | Embedding model: "auto", "SigLIP2-B-16", "SigLIP2-SO400M", or a legacy CLIP name ("ViT-B-16"/"ViT-B-32"/"ViT-L-14") |
 | `clip_default_sample_fps` | float or null | Default `clip_sample_fps` when a batch request doesn't specify one, range [0.1, 10.0]. Null = per-scene mode. |
 | `motion_features_enabled` | bool | If false, the extended motion feature fields are omitted from responses (default true) |
 | `ocr_languages` | string[] | OCR language codes (EasyOCR codes) |
@@ -479,7 +480,7 @@ Encode a text query to a CLIP embedding for text-to-image similarity search. Non
 ```json
 {
   "text": "solnedgang over fjorden",
-  "model_name": "ViT-B-32",
+  "model_name": "SigLIP2-SO400M",
   "translate": true
 }
 ```
@@ -494,7 +495,7 @@ Encode a text query to a CLIP embedding for text-to-image similarity search. Non
 ```json
 {
   "embedding": [0.012, -0.034, ...],
-  "model": "ViT-B-32",
+  "model": "SigLIP2-SO400M",
   "original_text": "solnedgang over fjorden",
   "translated_text": "sunset over the fjord",
   "detected_language": "no",
@@ -502,7 +503,7 @@ Encode a text query to a CLIP embedding for text-to-image similarity search. Non
 }
 ```
 
-The embedding is normalized; 512 dimensions for ViT-B models, 768 for ViT-L-14.
+The embedding is normalized. Dimensions by model: 768 (SigLIP2-B-16), 1152 (SigLIP2-SO400M), 512 (CLIP ViT-B), 768 (CLIP ViT-L-14). With a SigLIP 2 model, non-English queries work without translation (`"translate": false`) thanks to the multilingual text tower.
 
 ---
 
@@ -521,24 +522,30 @@ Gracefully shutdown the engine (unloads all models, then exits the process).
 
 ## Model Selection
 
-All model fields support `"auto"` for automatic selection. Whisper/YOLO/CLIP are selected from total VRAM (unified memory on Apple Silicon); the object detector, Qwen model, and Qwen strategy are selected from *free* memory at the time of the check.
+All model fields support `"auto"` for automatic selection. Whisper/YOLO/embedding models are selected from total VRAM (unified memory on Apple Silicon); the object detector, Qwen model, and Qwen strategy are selected from *free* memory at the time of the check.
 
-| VRAM | Whisper | YOLO | CLIP |
-|------|---------|------|------|
-| <2GB | tiny | yolov8n | ViT-B-16 |
-| 2-4GB | tiny/small | yolov8s | ViT-B-32 |
-| 4-6GB | small | yolov8m | ViT-L-14 |
-| 6-8GB | medium | yolov8m | ViT-L-14 |
-| 8-10GB | medium | yolov8l | ViT-L-14 |
-| 10-16GB | large-v3 | yolov8l | ViT-L-14 |
-| 16GB+ | large-v3 | yolov8x | ViT-L-14 |
+| VRAM | Whisper | YOLO | Embeddings |
+|------|---------|------|------------|
+| <2GB | tiny | yolo26n | SigLIP2-B-16 |
+| 2-4GB | tiny/small | yolo26s | SigLIP2-B-16 |
+| 4-6GB | small | yolo26m | SigLIP2-SO400M |
+| 6-8GB | large-v3-turbo | yolo26m | SigLIP2-SO400M |
+| 8-10GB | large-v3-turbo | yolo26l | SigLIP2-SO400M |
+| 10-16GB | large-v3 | yolo26l | SigLIP2-SO400M |
+| 16GB+ | large-v3 | yolo26x | SigLIP2-SO400M |
 
 | Free Memory | Object Detector | Qwen Model |
 |-------------|-----------------|------------|
 | <8GB | yolo | - |
-| 8-16GB | qwen | Qwen/Qwen3-VL-2B-Instruct |
-| 16-24GB | qwen | Qwen/Qwen3-VL-8B-Instruct |
-| 24GB+ | qwen | Qwen/Qwen3.5-27B (4-bit) |
+| 8-16GB | qwen | Qwen/Qwen3.5-2B |
+| 16-24GB | qwen | Qwen/Qwen3.5-9B |
+| 24GB+ | qwen | Qwen/Qwen3.6-27B (4-bit) |
+
+Notes:
+- `large-v3-turbo` (4 decoder layers) is ~2.7-8× faster than large-v3 with minor quality loss; it replaces medium in the auto tier and can be set explicitly at any tier. It is not trained for Whisper's translate task (the engine only transcribes).
+- Older model names remain valid explicit settings: `yolov8n/s/m/l/x.pt`, `Qwen/Qwen3-VL-*`, `Qwen/Qwen2-VL-*`, and the CLIP models `ViT-B-16`/`ViT-B-32`/`ViT-L-14`.
+- **Embedding model spaces are not comparable**: an index built with one model cannot be queried with another. `ClipResult.model` identifies which model produced each embedding; switching models requires re-extracting. Use the legacy CLIP names to keep querying an existing CLIP-based index.
+- SigLIP 2 has a multilingual text tower (109 languages) — `POST /encode_text` works well with `"translate": false` for non-English queries.
 
 ### Qwen Strategy Selection
 
@@ -573,7 +580,7 @@ The `qwen_strategy` setting controls how Qwen analyzes multiple frames for tempo
 
 ### CLIP sampling cost
 
-Fixed-rate CLIP sampling multiplies inference cost proportionally: a 30-second clip at `clip_sample_fps: 1.0` produces 30 embeddings vs ~3 in per-scene mode (~10× the inference). Per-embedding cost is small (~15-20 ms for ViT-L-14 on Apple Silicon) and frames are streamed with bounded memory, but response payload grows linearly with the rate. Typical useful values: 0.5, 1.0, 2.0 — higher rates mostly produce near-duplicate embeddings.
+Fixed-rate CLIP sampling multiplies inference cost proportionally: a 30-second clip at `clip_sample_fps: 1.0` produces 30 embeddings vs ~3 in per-scene mode (~10× the inference). Per-embedding cost is small (~15-25 ms per embedding on Apple Silicon) and frames are streamed with bounded memory, but response payload grows linearly with the rate. Typical useful values: 0.5, 1.0, 2.0 — higher rates mostly produce near-duplicate embeddings.
 
 ---
 
@@ -919,7 +926,7 @@ CLIP embeddings for similarity search. Use `POST /encode_text` to encode queries
 
 ```json
 {
-  "model": "ViT-B-32",
+  "model": "SigLIP2-SO400M",
   "sample_mode": "per_scene",
   "sample_fps": null,
   "segments": [
@@ -935,7 +942,7 @@ Note: despite the mode name, sampling in this mode is motion-adaptive rather tha
 
 ```json
 {
-  "model": "ViT-L-14",
+  "model": "SigLIP2-SO400M",
   "sample_mode": "fixed_fps",
   "sample_fps": 1.0,
   "segments": [
@@ -950,7 +957,7 @@ Note: despite the mode name, sampling in this mode is motion-adaptive rather tha
 - Frames are streamed in bounded chunks (own ffmpeg pass at reduced resolution), so memory stays flat regardless of clip length. A warning is logged when a request would produce >5000 samples for one file.
 - Images fall back to the single-frame per_scene path.
 
-Embedding dimensions: 512 for ViT-B models, 768 for ViT-L-14.
+Embedding dimensions by model: 768 (SigLIP2-B-16), 1152 (SigLIP2-SO400M), 512 (CLIP ViT-B), 768 (CLIP ViT-L-14). `model` identifies the embedding space — embeddings from different models are not comparable; use the same model for indexing and text queries.
 
 ### `transcript`
 

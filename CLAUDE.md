@@ -165,8 +165,8 @@ media_engine/
 │   ├── faces.py         # DeepFace + Facenet512 for detection and embeddings
 │   ├── scenes.py        # PySceneDetect ContentDetector
 │   ├── objects.py       # YOLO object detection
-│   ├── objects_qwen.py  # Qwen VLM for scene descriptions (Qwen3-VL / Qwen3.5)
-│   ├── clip.py          # OpenCLIP/MLX-CLIP embeddings + text query encoding
+│   ├── objects_qwen.py  # Qwen VLM for scene descriptions (Qwen3.5/3.6, legacy Qwen3-VL/Qwen2-VL)
+│   ├── clip.py          # SigLIP2 (default) / OpenCLIP / MLX-CLIP embeddings + text query encoding
 │   ├── ocr.py           # EasyOCR text extraction
 │   ├── motion.py        # Camera motion analysis (optical flow)
 │   ├── frames.py        # Frame decoding (shared, single decode per file)
@@ -269,13 +269,13 @@ Settings are stored in `~/.config/polybos/config.json`. The frontend can read/wr
 | Setting | Description | Default |
 |---------|-------------|---------|
 | `hf_token` | HuggingFace token for pyannote speaker diarization | null (diarization skipped) |
-| `whisper_model` | "auto", "tiny", "small", "medium", or "large-v3" | auto |
+| `whisper_model` | "auto", "tiny", "small", "medium", "large-v3", or "large-v3-turbo" | auto |
 | `diarization_model` | Pyannote model for speaker diarization | pyannote/speaker-diarization-community-1 |
 | `object_detector` | "auto", "yolo", or "qwen" | auto |
-| `qwen_model` | Qwen VLM model or "auto" (Qwen3-VL-2B/8B, Qwen3.5-27B) | auto |
+| `qwen_model` | Qwen VLM model or "auto" (Qwen3.5-2B/9B, Qwen3.6-27B; older Qwen3-VL/Qwen2-VL names remain valid) | auto |
 | `qwen_strategy` | "auto", "single", "context", "batch", "batch_context" | auto |
-| `yolo_model` | "auto" or yolov8n/s/m/l/x.pt | auto |
-| `clip_model` | "auto", "ViT-B-16", "ViT-B-32", or "ViT-L-14" | auto |
+| `yolo_model` | "auto" or yolo26n/s/m/l/x.pt (yolov8* legacy) | auto |
+| `clip_model` | "auto", "SigLIP2-B-16", "SigLIP2-SO400M", or legacy CLIP names (ViT-B-16/B-32/L-14). Embeddings not comparable across models. | auto |
 | `ocr_languages` | OCR languages (EasyOCR codes, see https://www.jaided.ai/easyocr/) | Latin languages |
 
 **Notes**:
@@ -292,6 +292,7 @@ Settings are stored in `~/.config/polybos/config.json`. The frontend can read/wr
 - **Face filtering**: Skips faces <80px or low confidence; clusters embeddings to estimate unique count; long videos use adaptive batching with early exit once faces stabilize
 - **Frame decoding**: One decode pass per file into a `SharedFrameBuffer`, reused by objects/faces/OCR/CLIP
 - **Dense CLIP sampling**: opt-in via `clip_sample_fps` (request) or `clip_default_sample_fps` (setting); streams frames through its own ffmpeg fps-filter pipe in bounded chunks — never through the shared buffer. Default per-scene sampling is preserved byte-identically for backward compatibility.
+- **Embedding models**: SigLIP 2 is the auto default (transformers backend on all platforms — mlx_clip/CLIPModel don't support the architecture); legacy CLIP names keep their MLX/OpenCLIP backends. Embedding spaces are not comparable across models; `ClipResult.model` identifies the space. SigLIP 2's multilingual text tower makes `/encode_text` translation optional.
 - **Motion features**: extended per-segment/clip-level statistics (api 1.1) are post-processing on the flow series the classifier already computes — classification logic unchanged; `motion_features_enabled=false` omits them; bump `MOTION_FEATURES_VERSION` in `motion.py` when formulas change
 - **api_version**: code-owned (`DEFAULT_API_VERSION` in config.py); never persisted to the config file and stale on-disk values are ignored on load
 - **Device detection**: Checks metadata tags and XML sidecars for device info (DJI, Sony, Canon, Apple, Blackmagic, ARRI, RED, GoPro, 360 cameras, Tesla dashcam, DV, AVCHD)

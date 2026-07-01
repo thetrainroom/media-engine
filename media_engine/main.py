@@ -18,6 +18,24 @@ if sys.platform == "darwin":
     except RuntimeError:
         pass  # Already set
 
+# SnapPy (the 3-manifold topology package) shadows the python-snappy
+# compression module and installs PARI signal handlers via cypari on import,
+# which raises "signal only works in main thread" when fsspec probes
+# "import snappy" during pyannote/lightning imports inside batch worker
+# threads (fsspec only catches ImportError, not ValueError). The engine never
+# uses snappy compression, so when the module that "import snappy" resolves
+# to is SnapPy (fingerprint: it ships snappy/pari.py; python-snappy doesn't),
+# block the module so fsspec's probe fails cleanly with ImportError.
+# Distribution metadata can't decide this: both packages install the same
+# module path, and whichever was installed last owns the files.
+import importlib.util
+from pathlib import Path as _Path
+
+_snappy_spec = importlib.util.find_spec("snappy")
+if _snappy_spec is not None and _snappy_spec.submodule_search_locations:
+    if any((_Path(loc) / "pari.py").exists() for loc in _snappy_spec.submodule_search_locations):
+        sys.modules["snappy"] = None  # type: ignore[assignment]
+
 # Setup logging before any other imports
 # ruff: noqa: E402 (imports after environment setup is intentional)
 from media_engine.utils.logging import setup_logging
