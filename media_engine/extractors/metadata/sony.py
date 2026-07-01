@@ -395,9 +395,7 @@ class SonyExtractor:
         # Extract recording date from AVCHD MDPM if ffprobe didn't find it
         created_at = base_metadata.created_at
         if created_at is None:
-            avchd_dt = extract_avchd_datetime(file_path)
-            if avchd_dt is not None:
-                created_at = avchd_dt.isoformat()
+            created_at = extract_avchd_datetime(file_path)
 
         # Check for spanned recordings (AVCHD files split at 2GB)
         spanned_recording = None
