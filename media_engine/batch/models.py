@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class JobProgress(BaseModel):
@@ -43,6 +43,21 @@ class BatchRequest(BaseModel):
     enable_clip: bool = False
     enable_ocr: bool = False
     enable_motion: bool = False
+
+    # Fixed-rate CLIP sampling (api_version 1.1). When set, CLIP embeds frames
+    # at this rate regardless of scene boundaries; when None, embeddings are
+    # computed per-scene (pre-1.1 behavior). Falls back to the
+    # clip_default_sample_fps setting when unset.
+    clip_sample_fps: float | None = Field(
+        default=None,
+        ge=0.1,
+        le=10.0,
+        description=(
+            "Optional fixed sampling rate for CLIP embeddings, in Hz. "
+            "When set, CLIP embeds frames at this rate regardless of scene boundaries. "
+            "When null (default), embeddings are computed per-scene (existing behavior)."
+        ),
+    )
 
     # Context for Whisper
     language: str | None = None  # Force specific language (ISO 639-1 code, e.g., "en", "no")

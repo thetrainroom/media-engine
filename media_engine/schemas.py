@@ -411,12 +411,19 @@ class ObjectsResult(BaseModel):
 
 
 class ClipSegment(BaseModel):
-    """CLIP embedding for a segment."""
+    """CLIP embedding for a segment.
+
+    In "per_scene" mode (default), scene_index is the running sample index
+    (pre-1.1 behavior, preserved for backward compatibility). In "fixed_fps"
+    mode it is the index of the containing scene, or None when scene
+    detection was not enabled.
+    """
 
     start: float
     end: float
     scene_index: int | None = None
     embedding: list[float]
+    timestamp: float | None = None  # Center-of-sample time in seconds (api_version 1.1)
 
 
 class ClipResult(BaseModel):
@@ -424,6 +431,8 @@ class ClipResult(BaseModel):
 
     model: str
     segments: list[ClipSegment]
+    sample_mode: str = "per_scene"  # "per_scene" (default) or "fixed_fps" (api_version 1.1)
+    sample_fps: float | None = None  # Effective rate in Hz; None in per_scene mode
 
 
 class OcrDetection(BaseModel):
@@ -442,12 +451,29 @@ class OcrResult(BaseModel):
 
 
 class MotionSegment(BaseModel):
-    """A segment of video with consistent camera motion."""
+    """A segment of video with consistent camera motion.
+
+    The extended feature fields (api_version 1.1) are None when
+    motion_features_enabled is off or the engine predates 1.1.
+    """
 
     start: float
     end: float
-    motion_type: str  # static, pan_left, pan_right, tilt_up, tilt_down, zoom_in, zoom_out, handheld
+    motion_type: str  # static, pan_left, pan_right, tilt_up, tilt_down, push_in, pull_out, handheld, complex
     intensity: float  # Average flow magnitude
+    # Extended motion features (api_version 1.1)
+    magnitude_mean: float | None = None  # Same as intensity; kept for clarity
+    magnitude_std: float | None = None
+    magnitude_p90: float | None = None
+    magnitude_max: float | None = None
+    direction_consistency: float | None = None  # [0, 1]
+    direction_reversals_per_sec: float | None = None
+    acceleration_mean: float | None = None
+    jerk_max: float | None = None
+    hf_energy: float | None = None  # [0, 1]
+    lf_energy: float | None = None  # [0, 1]
+    hf_lf_ratio: float | None = None  # [0, 1], high = shaky
+    features_version: str | None = None  # e.g. "v1"; bump invalidates consumer caches
 
 
 class MotionResult(BaseModel):
@@ -459,6 +485,11 @@ class MotionResult(BaseModel):
     segments: list[MotionSegment]
     avg_intensity: float
     is_stable: bool  # True if mostly static/tripod
+    # Clip-level feature summaries (api_version 1.1)
+    magnitude_p90_overall: float | None = None
+    jerk_max_overall: float | None = None
+    hf_lf_ratio_overall: float | None = None
+    features_version: str | None = None
 
 
 class TelemetryPoint(BaseModel):
@@ -545,6 +576,10 @@ class SettingsResponse(BaseModel):
 
     # CLIP
     clip_model: str
+    clip_default_sample_fps: float | None  # Default fixed CLIP sampling rate (Hz); null = per-scene
+
+    # Motion
+    motion_features_enabled: bool  # Include extended motion feature fields in responses
 
     # OCR
     ocr_languages: list[str]
@@ -584,6 +619,10 @@ class SettingsUpdate(BaseModel):
 
     # CLIP
     clip_model: str | None = None
+    clip_default_sample_fps: float | None = Field(default=None, ge=0.1, le=10.0)  # Hz; null keeps per-scene mode
+
+    # Motion
+    motion_features_enabled: bool | None = None
 
     # OCR
     ocr_languages: list[str] | None = None

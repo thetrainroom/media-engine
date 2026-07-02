@@ -19,16 +19,20 @@ logger = logging.getLogger(__name__)
 # Config file location
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "polybos" / "config.json"
 
-# API
-DEFAULT_API_VERSION = "1.0"
+# API version reported via /health and /settings. Code-owned: the engine
+# always reports the version it implements, regardless of what an older
+# config.json on disk may contain (see get_settings / save_config_to_file).
+# 1.1: additive fields - clip_sample_fps sampling, extended motion features.
+DEFAULT_API_VERSION = "1.1"
 DEFAULT_LOG_LEVEL = "INFO"
 
 # Whisper speech-to-text
 DEFAULT_WHISPER_MODEL = "auto"  # Auto-select based on VRAM
 DEFAULT_FALLBACK_LANGUAGE = "en"
 
-# Speaker diarization
-DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
+# Speaker diarization (community-1 requires pyannote.audio 4.x and accepting
+# the gated license at https://huggingface.co/pyannote/speaker-diarization-community-1)
+DEFAULT_DIARIZATION_MODEL = "pyannote/speaker-diarization-community-1"
 
 # Processing
 DEFAULT_FACE_SAMPLE_FPS = 1.0
@@ -101,10 +105,10 @@ class Settings(BaseModel):
     Config file location: ~/.config/polybos/config.json
 
     Model settings support "auto" to automatically select based on VRAM:
-    - whisper_model: "auto" | "tiny" | "small" | "medium" | "large-v3"
-    - qwen_model: "auto" | "Qwen/Qwen2-VL-2B-Instruct" | "Qwen/Qwen2-VL-7B-Instruct"
-    - yolo_model: "auto" | "yolov8n.pt" | "yolov8s.pt" | "yolov8m.pt" | "yolov8l.pt" | "yolov8x.pt"
-    - clip_model: "auto" | "ViT-B-16" | "ViT-B-32" | "ViT-L-14"
+    - whisper_model: "auto" | "tiny" | "small" | "medium" | "large-v3" | "large-v3-turbo"
+    - qwen_model: "auto" | "Qwen/Qwen3.5-2B/4B/9B" | "Qwen/Qwen3.6-27B" | "Qwen/Qwen3.6-35B-A3B" | Qwen3-VL/Qwen2-VL names (legacy)
+    - yolo_model: "auto" | "yolo26n/s/m/l/x.pt" | "yolov8n/s/m/l/x.pt" (legacy)
+    - clip_model: "auto" | "SigLIP2-B-16" | "SigLIP2-SO400M" | "ViT-B-16" | "ViT-B-32" | "ViT-L-14" (legacy)
     - object_detector: "auto" | "yolo" | "qwen"
     """
 
@@ -136,6 +140,14 @@ class Settings(BaseModel):
 
     # CLIP model ("auto" = select based on VRAM)
     clip_model: str = "auto"
+
+    # Default fixed CLIP sampling rate in Hz (api_version 1.1). Used when a
+    # batch request doesn't specify clip_sample_fps. None = per-scene mode.
+    clip_default_sample_fps: float | None = None
+
+    # Motion analysis: expose extended per-segment/clip-level feature fields
+    # (api_version 1.1). Escape hatch for consumers that reject unknown fields.
+    motion_features_enabled: bool = True
 
     # OCR settings
     ocr_languages: list[str] = DEFAULT_OCR_LANGUAGES.copy()
@@ -219,8 +231,9 @@ def save_config_to_file(settings: Settings, config_path: Path | None = None) -> 
     # Create directory if needed
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    # api_version describes engine capabilities, not user preference - never persist it
     with open(path, "w") as f:
-        json.dump(settings.model_dump(), f, indent=2)
+        json.dump(settings.model_dump(exclude={"api_version"}), f, indent=2)
 
     logger.info(f"Saved config to {path}")
 
@@ -235,6 +248,9 @@ def get_settings() -> Settings:
 
     if _settings is None:
         config_data = load_config_from_file()
+        # api_version is code-owned: a config file written by an older engine
+        # would otherwise pin upgraded installs to the old version string
+        config_data.pop("api_version", None)
         _settings = Settings(**config_data)
         if config_data:
             logger.info(f"Loaded settings from {DEFAULT_CONFIG_PATH}")
@@ -425,19 +441,23 @@ def get_free_memory_gb() -> float:
 def get_auto_whisper_model() -> str:
     """Select Whisper model based on available VRAM.
 
-    | VRAM     | Model    | Size   | Quality |
-    |----------|----------|--------|---------|
-    | <4GB     | tiny     | 75MB   | Basic   |
-    | 4-6GB    | small    | 488MB  | Good    |
-    | 6-10GB   | medium   | 1.5GB  | Better  |
-    | 10GB+    | large-v3 | 3GB    | Best    |
+    | VRAM     | Model          | Size   | Quality |
+    |----------|----------------|--------|---------|
+    | <4GB     | tiny           | 75MB   | Basic   |
+    | 4-6GB    | small          | 488MB  | Good    |
+    | 6-10GB   | large-v3-turbo | 1.6GB  | Better  |
+    | 10GB+    | large-v3       | 3GB    | Best    |
+
+    large-v3-turbo (4 decoder layers vs 32) beats medium in both quality
+    and speed at similar memory, so it replaces medium in the auto tier.
+    Operators wanting turbo speed at 10GB+ set whisper_model explicitly.
     """
     vram = get_available_vram_gb()
 
     if vram >= 10:
         model = "large-v3"
     elif vram >= 6:
-        model = "medium"
+        model = "large-v3-turbo"
     elif vram >= 4:
         model = "small"
     else:
@@ -450,27 +470,28 @@ def get_auto_whisper_model() -> str:
 def get_auto_qwen_model() -> str:
     """Select Qwen VLM model based on available free memory.
 
-    Prefers Qwen3-VL (better visual understanding) over Qwen2-VL.
-    Falls back to Qwen2-VL if Qwen3-VL is not available.
+    Prefers Qwen3.5 native-VL small models (early-fusion multimodality,
+    Mar 2026) and the Qwen3.6-27B dense multimodal flagship (Apr 2026).
+    Qwen3-VL and Qwen2-VL names remain valid explicit settings.
 
-    | Free Memory | Model             | Size   | Quality |
-    |-------------|-------------------|--------|---------|
-    | <8GB        | (use YOLO)        | -      | Basic   |
-    | 8-16GB      | Qwen3-VL-2B      | ~5GB   | Good    |
-    | 16-24GB     | Qwen3-VL-8B      | ~17GB  | Great   |
-    | 24GB+       | Qwen3.5-27B (4b) | ~16GB  | Best    |
+    | Free Memory | Model            | Size   | Quality |
+    |-------------|------------------|--------|---------|
+    | <8GB        | (use YOLO)       | -      | Basic   |
+    | 8-16GB      | Qwen3.5-2B       | ~5GB   | Good    |
+    | 16-24GB     | Qwen3.5-9B       | ~18GB  | Great   |
+    | 24GB+       | Qwen3.6-27B (4b) | ~16GB  | Best    |
     """
     free_mem = get_free_memory_gb()
 
     if free_mem >= 24:
-        model = "Qwen/Qwen3.5-27B"
+        model = "Qwen/Qwen3.6-27B"
     elif free_mem >= 16:
-        model = "Qwen/Qwen3-VL-8B-Instruct"
+        model = "Qwen/Qwen3.5-9B"
     elif free_mem >= 8:
-        model = "Qwen/Qwen3-VL-2B-Instruct"
+        model = "Qwen/Qwen3.5-2B"
     else:
         # Not enough free memory for Qwen, should use YOLO instead
-        model = "Qwen/Qwen3-VL-2B-Instruct"
+        model = "Qwen/Qwen3.5-2B"
         logger.warning(f"Low free memory ({free_mem:.1f}GB) - consider using YOLO instead of Qwen")
 
     logger.info(f"Auto-selected Qwen model: {model} (free memory: {free_mem:.1f}GB)")
@@ -552,51 +573,55 @@ def get_auto_qwen_batch_size() -> int:
 def get_auto_yolo_model() -> str:
     """Select YOLO model based on available VRAM.
 
-    | VRAM     | Model     | Size   | Speed   |
-    |----------|-----------|--------|---------|
-    | <2GB     | yolov8n   | 6MB    | Fastest |
-    | 2-4GB    | yolov8s   | 22MB   | Fast    |
-    | 4-8GB    | yolov8m   | 52MB   | Medium  |
-    | 8-16GB   | yolov8l   | 87MB   | Slow    |
-    | 16GB+    | yolov8x   | 136MB  | Slowest |
+    YOLO26 (Jan 2026): NMS-free end-to-end inference, +2.5 box AP over
+    YOLO11 and much faster CPU inference. Same ultralytics API; yolov8*
+    names remain valid as explicit settings.
+
+    | VRAM     | Model     | Speed   |
+    |----------|-----------|---------|
+    | <2GB     | yolo26n   | Fastest |
+    | 2-4GB    | yolo26s   | Fast    |
+    | 4-8GB    | yolo26m   | Medium  |
+    | 8-16GB   | yolo26l   | Slow    |
+    | 16GB+    | yolo26x   | Slowest |
     """
     vram = get_available_vram_gb()
 
     if vram >= 16:
-        model = "yolov8x.pt"
+        model = "yolo26x.pt"
     elif vram >= 8:
-        model = "yolov8l.pt"
+        model = "yolo26l.pt"
     elif vram >= 4:
-        model = "yolov8m.pt"
+        model = "yolo26m.pt"
     elif vram >= 2:
-        model = "yolov8s.pt"
+        model = "yolo26s.pt"
     else:
-        model = "yolov8n.pt"
+        model = "yolo26n.pt"
 
     logger.info(f"Auto-selected YOLO model: {model} (VRAM: {vram:.1f}GB)")
     return model
 
 
 def get_auto_clip_model() -> str:
-    """Select CLIP model based on available VRAM.
+    """Select the image-embedding model based on available VRAM.
 
-    | VRAM     | Model     | Size    | Quality |
-    |----------|-----------|---------|---------|
-    | <2GB     | ViT-B-16  | 335MB   | Good    |
-    | 2-4GB    | ViT-B-32  | 338MB   | Good    |
-    | 4GB+     | ViT-L-14  | 933MB   | Best    |
+    Auto now selects SigLIP 2 (sigmoid-loss encoders with a multilingual
+    text tower) - the strongest open image-text embedding models. The
+    OpenAI CLIP names (ViT-B-16/B-32/L-14) remain valid explicit settings,
+    which is required for querying indexes built with those models:
+    embeddings are NOT comparable across models.
 
-    Note: ViT-B-16 and ViT-B-32 are similar size but different patch sizes.
-    ViT-B-32 is slightly faster, ViT-B-16 has better detail recognition.
+    | VRAM     | Model          | Dim  | Quality |
+    |----------|----------------|------|---------|
+    | <4GB     | SigLIP2-B-16   | 768  | Good    |
+    | 4GB+     | SigLIP2-SO400M | 1152 | Best    |
     """
     vram = get_available_vram_gb()
 
     if vram >= 4:
-        model = "ViT-L-14"
-    elif vram >= 2:
-        model = "ViT-B-32"
+        model = "SigLIP2-SO400M"
     else:
-        model = "ViT-B-16"
+        model = "SigLIP2-B-16"
 
     logger.info(f"Auto-selected CLIP model: {model} (VRAM: {vram:.1f}GB)")
     return model
@@ -634,6 +659,7 @@ def get_vram_summary() -> dict:
             "can_use_qwen": vram >= 8,
             "can_use_qwen_8b": vram >= 17,
             "can_use_qwen_27b": vram >= 24,
+            "can_use_qwen3_6": vram >= 24,
             "can_use_clip_l14": vram >= 4,
             "can_use_yolo_xlarge": vram >= 16,
         },
@@ -662,20 +688,35 @@ MODEL_MEMORY_REQUIREMENTS: dict[str, float] = {
     "small": 2.0,
     "medium": 4.0,
     "large-v3": 6.0,
+    "large-v3-turbo": 4.0,
     # YOLO models
+    "yolo26n.pt": 0.2,
+    "yolo26s.pt": 0.3,
+    "yolo26m.pt": 0.5,
+    "yolo26l.pt": 0.8,
+    "yolo26x.pt": 1.2,
+    # Legacy YOLOv8 models
     "yolov8n.pt": 0.2,
     "yolov8s.pt": 0.3,
     "yolov8m.pt": 0.5,
     "yolov8l.pt": 0.8,
     "yolov8x.pt": 1.2,
-    # Qwen VLM (Qwen3-VL and Qwen3.5 models)
+    # Qwen VLM (Qwen3.5 native-VL and Qwen3.6 models)
+    "Qwen/Qwen3.5-2B": 5.0,
+    "Qwen/Qwen3.5-4B": 9.0,
+    "Qwen/Qwen3.5-9B": 18.0,
+    "Qwen/Qwen3.6-27B": 16.0,  # 4-bit quantized
+    "Qwen/Qwen3.6-35B-A3B": 20.0,  # 4-bit quantized MoE (3B active)
+    # Previous-generation Qwen models
     "Qwen/Qwen3-VL-2B-Instruct": 5.0,
     "Qwen/Qwen3-VL-8B-Instruct": 17.0,
     "Qwen/Qwen3.5-27B": 16.0,  # 4-bit quantized
     # Legacy Qwen2-VL models
     "Qwen/Qwen2-VL-2B-Instruct": 6.0,
     "Qwen/Qwen2-VL-7B-Instruct": 16.0,
-    # CLIP
+    # Image-text embedding models (SigLIP 2 and legacy CLIP)
+    "SigLIP2-B-16": 1.0,
+    "SigLIP2-SO400M": 2.0,
     "ViT-B-16": 0.4,
     "ViT-B-32": 0.4,
     "ViT-L-14": 1.0,

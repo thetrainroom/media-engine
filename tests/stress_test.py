@@ -204,6 +204,9 @@ def get_extractor_configs(heavy: bool = False) -> list[dict]:
         {"enable_metadata": True, "enable_objects": True},
         {"enable_metadata": True, "enable_ocr": True},
         {"enable_metadata": True, "enable_clip": True},
+        # Dense fixed-rate CLIP sampling (api_version 1.1)
+        {"enable_metadata": True, "enable_clip": True, "clip_sample_fps": 1.0},
+        {"enable_metadata": True, "enable_scenes": True, "enable_clip": True, "clip_sample_fps": 2.0},
         # Combined visual
         {
             "enable_metadata": True,

@@ -361,6 +361,137 @@ def decode_frames(
     )
 
 
+def iter_frames_fixed_fps(
+    file_path: str,
+    fps: float,
+    max_dimension: int = 1024,
+    chunk_size: int = 32,
+    hwaccel: str | None = None,
+):
+    """Stream frames from a video at a fixed sample rate, in chunks.
+
+    Uses a single ffmpeg pipe with an fps filter instead of one seek per frame,
+    which is orders of magnitude faster for dense sampling (e.g. 1800 frames of
+    a 30-minute clip at 1 fps). Frames are yielded in chunks so callers can
+    process and release them without ever holding the whole video in memory.
+
+    Frames land at sample-window centers: frame k has timestamp (k + 0.5) / fps.
+
+    Args:
+        file_path: Path to video file
+        fps: Sample rate in Hz
+        max_dimension: Maximum width or height (maintains aspect ratio)
+        chunk_size: Number of frames per yielded chunk
+        hwaccel: Hardware acceleration method (auto-detect if None)
+
+    Yields:
+        Lists of SharedFrame (at most chunk_size each)
+
+    Raises:
+        FileNotFoundError: If the video file doesn't exist
+    """
+    from pathlib import Path
+
+    if not Path(file_path).exists():
+        raise FileNotFoundError(f"Video file not found: {file_path}")
+
+    if hwaccel is None:
+        hwaccel = _detect_hwaccel()
+
+    _, duration, src_width, src_height = get_video_info(file_path)
+
+    # Calculate output dimensions (maintain aspect ratio, cap at max_dimension)
+    if src_width > src_height:
+        out_width = min(max_dimension, src_width)
+        out_height = int(out_width * src_height / src_width)
+    else:
+        out_height = min(max_dimension, src_height)
+        out_width = int(out_height * src_width / src_height)
+    out_width = out_width - (out_width % 2)
+    out_height = out_height - (out_height % 2)
+
+    # Offset the stream by half a sample window so frames land at window centers
+    offset = 0.5 / fps
+
+    def _run(use_hwaccel: str | None):
+        cmd = ["ffmpeg", "-hide_banner"]
+
+        actual_out_height = out_height
+        if use_hwaccel and src_width > 0 and src_height > 0:
+            actual_out_height = int(out_width * src_height / src_width)
+            actual_out_height = actual_out_height - (actual_out_height % 2)
+
+        if use_hwaccel == "videotoolbox":
+            cmd.extend(["-hwaccel", "videotoolbox", "-hwaccel_output_format", "videotoolbox_vld"])
+            vf_filter = f"scale_vt=w={out_width}:h={actual_out_height},hwdownload,format=p010le,fps={fps}"
+        elif use_hwaccel == "cuda":
+            cmd.extend(["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"])
+            vf_filter = f"scale_cuda={out_width}:{actual_out_height},hwdownload,format=nv12,fps={fps}"
+        else:
+            actual_out_height = out_height
+            vf_filter = f"scale={out_width}:{out_height}:force_original_aspect_ratio=decrease,fps={fps}"
+
+        cmd.extend(
+            [
+                "-ss",
+                str(offset),
+                "-i",
+                file_path,
+                "-vf",
+                vf_filter,
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "bgr24",
+                "-",
+            ]
+        )
+
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        frame_size = out_width * actual_out_height * 3
+        frame_idx = 0
+        try:
+            while True:
+                raw = process.stdout.read(frame_size)  # type: ignore[union-attr]
+                if len(raw) != frame_size:
+                    break
+                bgr = np.frombuffer(raw, dtype=np.uint8).reshape((actual_out_height, out_width, 3)).copy()
+                timestamp = (frame_idx + 0.5) / fps
+                yield SharedFrame(timestamp=timestamp, bgr=bgr)
+                frame_idx += 1
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+            process.wait()
+
+    expected = int(duration * fps) if duration > 0 else 0
+    logger.info(f"Streaming ~{expected} frames from {file_path} at {fps} fps, {out_width}x{out_height}" + (f" (hwaccel={hwaccel})" if hwaccel else ""))
+
+    chunk: list[SharedFrame] = []
+    produced = 0
+    for frame in _run(hwaccel):
+        chunk.append(frame)
+        produced += 1
+        if len(chunk) >= chunk_size:
+            yield chunk
+            chunk = []
+
+    # Hardware decode can fail silently (zero frames) - retry with software
+    if produced == 0 and hwaccel:
+        logger.warning(f"Hardware acceleration ({hwaccel}) produced no frames, retrying with software decode")
+        for frame in _run(None):
+            chunk.append(frame)
+            produced += 1
+            if len(chunk) >= chunk_size:
+                yield chunk
+                chunk = []
+
+    if chunk:
+        yield chunk
+
+    logger.info(f"Streamed {produced} frames at {fps} fps from {file_path}")
+
+
 def get_extractor_timestamps(
     is_stable: bool,
     avg_intensity: float,

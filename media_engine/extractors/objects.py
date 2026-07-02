@@ -91,7 +91,7 @@ def extract_objects(
     frame_buffer: SharedFrameBuffer,
     min_confidence: float = 0.6,
     min_size: int = 50,
-    model_name: str = "yolov8m.pt",
+    model_name: str = "yolo26m.pt",
 ) -> ObjectsResult:
     """Extract objects from video frames using YOLO.
 
@@ -100,7 +100,7 @@ def extract_objects(
         frame_buffer: Pre-decoded frames from SharedFrameBuffer
         min_confidence: Minimum detection confidence (0.6 recommended)
         min_size: Minimum object size in pixels (filters noise)
-        model_name: YOLO model (yolov8m.pt recommended for accuracy)
+        model_name: YOLO model (yolo26m.pt recommended for accuracy)
 
     Returns:
         ObjectsResult with unique objects and summary

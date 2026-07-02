@@ -59,6 +59,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         extract_transcript,
         get_adaptive_timestamps,
         get_sample_timestamps,
+        motion_result_to_dict,
         run_ffprobe_batch,
         unload_clip_model,
         unload_face_model,
@@ -86,6 +87,12 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
     clip_model = settings.get_clip_model()
 
     logger.info(f"Batch {batch_id} models: whisper={whisper_model}, qwen={qwen_model}, yolo={yolo_model}, clip={clip_model}")
+
+    # Effective CLIP sampling rate: request overrides the settings default;
+    # None = per-scene mode (pre-1.1 behavior)
+    clip_sample_fps = request.clip_sample_fps if request.clip_sample_fps is not None else settings.clip_default_sample_fps
+    if clip_sample_fps is not None:
+        logger.info(f"Batch {batch_id} CLIP sampling: fixed {clip_sample_fps} fps")
 
     batch_start_time = time.time()
     peak_memory = get_memory_mb()
@@ -528,11 +535,13 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     total_files,
                 )
 
+                # Fixed-fps CLIP streams its own frames and doesn't need the shared
+                # buffer or motion-adaptive timestamps (images still use the buffer)
+                clip_needs_buffer = request.enable_clip and (clip_sample_fps is None or media_type == MediaType.IMAGE)
+
                 # --- Motion Analysis ---
                 if request.enable_motion or (
-                    (request.enable_objects or request.enable_faces or request.enable_clip or request.enable_ocr)
-                    and not has_precomputed_timestamps
-                    and media_type != MediaType.IMAGE
+                    (request.enable_objects or request.enable_faces or clip_needs_buffer or request.enable_ocr) and not has_precomputed_timestamps and media_type != MediaType.IMAGE
                 ):
                     motion_start = time.time()
                     update_extractor_status(i, "motion", "active")
@@ -547,22 +556,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                             adaptive_timestamps[i] = get_adaptive_timestamps(motion)
 
                             # Always store motion data when computed (needed for Pass 2 timestamps)
-                            motion_result = {
-                                "duration": motion.duration,
-                                "fps": motion.fps,
-                                "primary_motion": motion.primary_motion.value,
-                                "avg_intensity": float(motion.avg_intensity),
-                                "is_stable": bool(motion.is_stable),
-                                "segments": [
-                                    {
-                                        "start": seg.start,
-                                        "end": seg.end,
-                                        "motion_type": seg.motion_type.value,
-                                        "intensity": float(seg.intensity),
-                                    }
-                                    for seg in motion.segments
-                                ],
-                            }
+                            motion_result = motion_result_to_dict(motion, include_features=settings.motion_features_enabled)
                             update_file_status(i, "running", "motion", motion_result)
                             update_extractor_status(i, "motion", "completed")
                             logger.info(f"Motion for {fname}: stable={motion.is_stable}, timestamps={len(adaptive_timestamps[i])}")
@@ -611,7 +605,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                         request.enable_objects,
                         request.enable_faces,
                         request.enable_ocr,
-                        request.enable_clip,
+                        clip_needs_buffer,
                     ]
                 )
 
@@ -945,15 +939,32 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     update_file_timing(i, "ocr", time.time() - ocr_start, num_frames)
 
                 # --- CLIP ---
-                if request.enable_clip and buffer is not None:
+                use_fixed_fps_clip = request.enable_clip and not clip_needs_buffer
+                if request.enable_clip and (use_fixed_fps_clip or buffer is not None):
                     clip_start = time.time()
                     update_extractor_status(i, "clip", "active")
+                    clip = None
                     try:
-                        clip = extract_clip(
-                            file_path,
-                            frame_buffer=buffer,
-                            model_name=clip_model,
-                        )
+                        if use_fixed_fps_clip:
+                            # Fixed-rate sampling: streams its own frames, maps samples
+                            # to real scenes when scene detection ran for this file
+                            scene_boundaries: list[tuple[float, float]] | None = None
+                            with batch_jobs_lock:
+                                scenes_result = batch_jobs[batch_id].files[i].results.get("scenes")
+                            if scenes_result and scenes_result.get("detections"):
+                                scene_boundaries = [(d["start"], d["end"]) for d in scenes_result["detections"]]
+                            clip = extract_clip(
+                                file_path,
+                                model_name=clip_model,
+                                sample_fps=clip_sample_fps,
+                                scene_boundaries=scene_boundaries,
+                            )
+                        else:
+                            clip = extract_clip(
+                                file_path,
+                                frame_buffer=buffer,
+                                model_name=clip_model,
+                            )
                         if clip:
                             update_file_status(i, "running", "clip", clip.model_dump())
                         else:
@@ -962,7 +973,10 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
                     except Exception as e:
                         logger.warning(f"CLIP failed for {file_path}: {e}")
                         update_extractor_status(i, "clip", "failed")
-                    num_frames = len(buffer.frames) if buffer else None
+                    if use_fixed_fps_clip:
+                        num_frames = len(clip.segments) if clip else None
+                    else:
+                        num_frames = len(buffer.frames) if buffer else None
                     update_file_timing(i, "clip", time.time() - clip_start, num_frames)
 
                 # --- Release buffer for this file ---
