@@ -47,7 +47,16 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # CPU-only torch/torchvision first: GitHub runners have no GPU, and
+          # the default Linux wheels pull the CUDA stack. easyocr imports
+          # torchvision -> torch._dynamo, which imports triton when present -
+          # and triton's native module segfaults on the GPU-less runner.
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[cpu,dev]"
+          # openai-whisper pulls triton on Linux as an optional kernel
+          # accelerator; remove it so torch._dynamo skips it cleanly
+          # (a segfault during import cannot be caught or skipped by pytest).
+          pip uninstall -y triton || true
 
       - name: Run tests
         run: |
