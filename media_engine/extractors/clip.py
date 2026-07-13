@@ -558,24 +558,84 @@ def _extract_clip_fixed_fps(
     half_window = 0.5 / sample_fps
     segments: list[ClipSegment] = []
 
-    for chunk in iter_frames_fixed_fps(file_path, fps=sample_fps):
-        for frame in chunk:
-            try:
-                embedding = backend.encode_image_from_array(frame.rgb)
-            except Exception as e:
-                logger.warning(f"Failed to encode frame at {frame.timestamp}s: {e}")
-                continue
-            ts = frame.timestamp
-            segments.append(
-                ClipSegment(
-                    start=max(0.0, ts - half_window),
-                    end=min(duration, ts + half_window) if duration > 0 else ts + half_window,
-                    timestamp=ts,
-                    scene_index=_scene_index_for(ts, scene_boundaries),
-                    embedding=embedding,
+    try:
+        for chunk in iter_frames_fixed_fps(file_path, fps=sample_fps):
+            for frame in chunk:
+                try:
+                    embedding = backend.encode_image_from_array(frame.rgb)
+                except Exception as e:
+                    logger.warning(f"Failed to encode frame at {frame.timestamp}s: {e}")
+                    continue
+                ts = frame.timestamp
+                segments.append(
+                    ClipSegment(
+                        start=max(0.0, ts - half_window),
+                        end=min(duration, ts + half_window) if duration > 0 else ts + half_window,
+                        timestamp=ts,
+                        scene_index=_scene_index_for(ts, scene_boundaries),
+                        embedding=embedding,
+                    )
                 )
-            )
-        # Chunk (and its pixel data) is released before the next one is decoded
+            # Chunk (and its pixel data) is released before the next one is decoded
+    except Exception as e:
+        # Broken containers (e.g. missing duration metadata) can fail the
+        # streaming path entirely — fall through to the single-frame fallback
+        logger.warning(f"Fixed-fps streaming failed for {file_path}: {e} — trying single frame")
+
+    if not segments:
+        # Clips shorter than one sample window (duration < 1/fps) yield no
+        # frames from the fps-filter stream, and broken containers may fail
+        # streaming — embed a single frame so the clip still gets an
+        # embedding. Try mid-clip first, then the very first frame (seeking
+        # can silently return nothing on damaged files).
+        from media_engine.extractors.frame_buffer import decode_frames
+
+        mid = duration / 2 if duration > 0 else 0.0
+        candidates = [mid, 0.0] if mid > 0 else [0.0]
+        for candidate in candidates:
+            logger.info(f"No streamed frames, embedding single frame at {candidate:.2f}s")
+            try:
+                buffer = decode_frames(file_path, timestamps=[candidate], max_dimension=1920)
+            except Exception as e:
+                logger.warning(f"Single-frame decode at {candidate:.2f}s failed for {file_path}: {e}")
+                continue
+            for ts in sorted(buffer.frames.keys()):
+                try:
+                    embedding = backend.encode_image_from_array(buffer.frames[ts].rgb)
+                except Exception as e:
+                    logger.warning(f"Failed to encode fallback frame at {ts}s: {e}")
+                    continue
+                segments.append(
+                    ClipSegment(
+                        start=0.0,
+                        end=duration if duration > 0 else ts,
+                        timestamp=ts,
+                        scene_index=_scene_index_for(ts, scene_boundaries),
+                        embedding=embedding,
+                    )
+                )
+            if segments:
+                break
+
+        if not segments:
+            # Last resort: read the first decodable frame WITHOUT seeking.
+            # Damaged containers (missing index/duration) can refuse seeks
+            # while still decoding sequentially from the start.
+            logger.info(f"Seeked decodes failed, reading first frame without seek for {file_path}")
+            try:
+                rgb = _first_frame_no_seek(file_path)
+                embedding = backend.encode_image_from_array(rgb)
+                segments.append(
+                    ClipSegment(
+                        start=0.0,
+                        end=duration,
+                        timestamp=0.0,
+                        scene_index=_scene_index_for(0.0, scene_boundaries),
+                        embedding=embedding,
+                    )
+                )
+            except Exception as e:
+                logger.warning(f"Seek-free first-frame fallback failed for {file_path}: {e}")
 
     logger.info(f"Generated {len(segments)} CLIP embeddings (fixed_fps mode)")
 
@@ -585,6 +645,42 @@ def _extract_clip_fixed_fps(
         sample_fps=sample_fps,
         segments=segments,
     )
+
+
+def _first_frame_no_seek(file_path: str, max_dimension: int = 1920) -> "np.ndarray":
+    """Decode the very first frame of a video sequentially (no -ss seek).
+
+    Streams one PNG through an image2pipe so no output dimensions need to be
+    known up front. Used as a last resort for damaged containers that refuse
+    seeking but still decode from the start.
+    """
+    import io
+    import subprocess
+
+    from PIL import Image
+
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-v",
+        "error",
+        "-i",
+        file_path,
+        "-vf",
+        f"scale='min({max_dimension},iw)':-2",
+        "-frames:v",
+        "1",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "png",
+        "pipe:1",
+    ]
+    result = subprocess.run(cmd, capture_output=True, timeout=120)
+    if result.returncode != 0 or not result.stdout:
+        raise RuntimeError(f"ffmpeg first-frame decode failed: {result.stderr.decode(errors='replace')[:200]}")
+    image = Image.open(io.BytesIO(result.stdout)).convert("RGB")
+    return np.asarray(image)
 
 
 def extract_clip_image(
