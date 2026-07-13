@@ -49,6 +49,7 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
         decode_frames,
         detect_voice_activity,
         extract_clip,
+        extract_clip_image,
         extract_faces,
         extract_metadata,
         extract_objects,
@@ -940,12 +941,17 @@ def run_batch_job(batch_id: str, request: BatchRequest) -> None:
 
                 # --- CLIP ---
                 use_fixed_fps_clip = request.enable_clip and not clip_needs_buffer
-                if request.enable_clip and (use_fixed_fps_clip or buffer is not None):
+                if request.enable_clip and (use_fixed_fps_clip or buffer is not None or media_type == MediaType.IMAGE):
                     clip_start = time.time()
                     update_extractor_status(i, "clip", "active")
                     clip = None
                     try:
-                        if use_fixed_fps_clip:
+                        if media_type == MediaType.IMAGE:
+                            # Encode the image file directly. The shared-buffer decode
+                            # can come up empty for stills and fixed-fps streaming needs
+                            # a duration — both silently yield zero segments.
+                            clip = extract_clip_image(file_path, model_name=clip_model)
+                        elif use_fixed_fps_clip:
                             # Fixed-rate sampling: streams its own frames, maps samples
                             # to real scenes when scene detection ran for this file
                             scene_boundaries: list[tuple[float, float]] | None = None
