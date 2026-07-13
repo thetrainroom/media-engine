@@ -44,10 +44,11 @@ def extract_scenes(file_path: str, threshold: float = 27.0) -> ScenesResult:
 
     # Determine frame skip based on resolution
     # Higher resolution = more frame skip for speed
-    if pixels > RES_5K:
+    if pixels >= RES_5K:
         frame_skip = 4  # Process every 5th frame for 5K+
         logger.info(f"High-res video ({width}x{height}), using frame_skip=4")
-    elif pixels > RES_4K:
+    elif pixels >= RES_4K:
+        # >= so exactly-UHD (3840x2160) footage lands here, not the >1080p tier
         frame_skip = 2  # Process every 3rd frame for 4K+
         logger.info(f"4K video ({width}x{height}), using frame_skip=2")
     elif pixels > RES_1080P:
