@@ -191,36 +191,18 @@ def detect_voice_activity(
     frame_duration_ms = 30  # 30ms frames
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Check if it's a video file that needs audio extraction
-        video_extensions = {".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mxf"}
-        audio_extensions = {".wav", ".mp3", ".aac", ".m4a", ".flac", ".ogg"}
-
-        if path.suffix.lower() in video_extensions:
-            audio_path = Path(tmpdir) / "audio.wav"
-            if not _extract_audio(file_path, str(audio_path)):
-                logger.warning(f"Could not extract audio from {file_path}")
-                return {
-                    "audio_content": str(AudioContent.UNKNOWN),
-                    "speech_ratio": 0.0,
-                    "speech_segments": [],
-                    "total_duration": 0.0,
-                }
-            wav_path = str(audio_path)
-        elif path.suffix.lower() in audio_extensions:
-            # Convert to WAV format
-            audio_path = Path(tmpdir) / "audio.wav"
-            if not _extract_audio(file_path, str(audio_path)):
-                logger.warning(f"Could not convert audio from {file_path}")
-                return {
-                    "audio_content": str(AudioContent.UNKNOWN),
-                    "speech_ratio": 0.0,
-                    "speech_segments": [],
-                    "total_duration": 0.0,
-                }
-            wav_path = str(audio_path)
-        else:
-            # Assume it's already a WAV file
-            wav_path = file_path
+        # Decode whatever the file is (video, AIFF, MP3, 24-bit or stereo WAV, ...)
+        # to the 16 kHz mono 16-bit WAV the frame reader expects
+        audio_path = Path(tmpdir) / "audio.wav"
+        if not _extract_audio(file_path, str(audio_path)):
+            logger.warning(f"Could not extract audio from {file_path}")
+            return {
+                "audio_content": str(AudioContent.UNKNOWN),
+                "speech_ratio": 0.0,
+                "speech_segments": [],
+                "total_duration": 0.0,
+            }
+        wav_path = str(audio_path)
 
         # Read audio frames
         try:
